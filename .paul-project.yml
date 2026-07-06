@@ -1,8 +1,13 @@
 policy_profile: flat
-policy_version: 1.0.7
+policy_version: 1.0.12
+tier: shareable
 code_paths:
   - ".paul-project.yml"
   - "VERSION"
+  - "pyproject.toml"
+  - "paulsha_hippo/**"
+  - "scripts/**"
+  - "tests/**"
   - "**/*.md"
   - "**/*.yml"
   - "**/*.yaml"
