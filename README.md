@@ -3,8 +3,9 @@
 > 跨 LLM vendor 的經驗筆記基座——session 自動蒸餾成原子筆記，睡眠期（dream）整理，隔天喚醒（wakeup）回灌 context。
 > 命名取自海馬迴（hippocampus）：大腦在睡眠時做記憶固化的器官。
 
-**狀態：🚧 Phase 1 遷入完成（885 tests 綠），本機部署驗證中。** 設計見
-[拆包執行設計 spec](https://github.com/hamanpaul/paulshaclaw/blob/main/docs/superpowers/specs/2026-07-06-memory-extraction-hippo-design.md)。
+**狀態：✅ v0.1.0 上線。** 已從 [paulshaclaw](https://github.com/hamanpaul/paulshaclaw) 完整拆出、可單獨安裝運轉（953 tests；WSL2+systemd 全鏈實測：截取→蒸餾→回灌）。
+設計見[拆包執行設計 spec](https://github.com/hamanpaul/paulshaclaw/blob/main/docs/superpowers/specs/2026-07-06-memory-extraction-hippo-design.md)。
+> 已驗環境：WSL2＋systemd＋claude-headless。其他 backend（codex/copilot/openai-compatible headless）與無 systemd 主機為 opt-in，見 [#10](https://github.com/hamanpaul/paulsha-hippo/issues/10)。
 
 ## Quickstart
 
