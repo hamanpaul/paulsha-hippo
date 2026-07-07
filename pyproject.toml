@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "跨 LLM vendor 的經驗筆記基座：session 蒸餾、dream 整理、wakeup 回灌"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+dependencies = ["pyyaml>=6"]
 
 [project.scripts]
 hippo = "paulsha_hippo.cli:main"

@@ -1,0 +1,6 @@
+{
+  "session_id": "claude-minimal-001",
+  "transcript_path": "runtime/source/claude-minimal-001.jsonl",
+  "cwd": "/repo/minimal",
+  "capture_scope": "session_end"
+}

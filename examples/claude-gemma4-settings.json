@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "gemma4-26b-a4b-nvfp4",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "effortLevel": "low"
+}

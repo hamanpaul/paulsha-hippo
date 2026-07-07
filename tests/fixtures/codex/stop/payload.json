@@ -1,0 +1,13 @@
+{
+  "session_id": "codex-stop-001",
+  "cwd": "/repo/paulshaclaw",
+  "started_at": "2026-05-24T10:00:00+00:00",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "e300b08",
+  "turn_count": 2,
+  "user_prompts": ["Continue adapter task"],
+  "assistant_summary": "Prepared adapter red tests.",
+  "touched_files": ["tests/test_adapters.py"],
+  "referenced_artifacts": ["docs/superpowers/specs/2026-05-24-stage2-memory-importer-mvp-design.md"],
+  "capture_scope": "turn"
+}

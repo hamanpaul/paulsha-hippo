@@ -1,0 +1,12 @@
+{
+  "session_id": "codex-subagent-001",
+  "cwd": "/repo/paulshaclaw",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "4f733f4",
+  "turn_count": 1,
+  "user_prompts": ["Review adapter contract"],
+  "assistant_summary": "Subagent reviewed the normalized session contract.",
+  "touched_files": [],
+  "referenced_artifacts": ["openspec/changes/stage2-memory-importer-mvp/tasks.md"],
+  "capture_scope": "subagent"
+}

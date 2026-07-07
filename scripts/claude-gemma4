@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SECRET_ENV="${PSC_CLAUDE_GEMMA4_SECRET_ENV:-${PSC_SECRET_ENV:-$HOME/.config/paulshaclaw/paulshaclaw.telegram.secret.env}}"
+GEMMA_CONFIG_DIR="${PSC_CLAUDE_GEMMA4_CONFIG_DIR:-${PSC_GEMMA4_CONFIG_DIR:-$HOME/.claude-gemma4}}"
+GEMMA_SETTINGS="$GEMMA_CONFIG_DIR/settings.json"
+GEMMA_SETTINGS_TEMPLATE="${PSC_CLAUDE_GEMMA4_SETTINGS_TEMPLATE:-$SCRIPT_DIR/../config/claude-gemma4-settings.json}"
+GEMMA_PROXY="$SCRIPT_DIR/claude-gemma4-proxy"
+GEMMA_PROXY_URL="${PSC_CLAUDE_GEMMA4_PROXY_URL:-http://127.0.0.1:18080}"
+
+if command -v claude >/dev/null 2>&1; then
+  REAL_CLAUDE="$(command -v claude)"
+elif command -v claude.exe >/dev/null 2>&1; then
+  REAL_CLAUDE="$(command -v claude.exe)"
+elif [ -x "$HOME/.nvm/versions/node/v22.20.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" ]; then
+  REAL_CLAUDE="$HOME/.nvm/versions/node/v22.20.0/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+else
+  echo "Claude executable not found: claude or claude.exe" >&2
+  exit 1
+fi
+
+if [ ! -r "$GEMMA_SETTINGS_TEMPLATE" ]; then
+  echo "Claude Gemma4 settings template is not readable: $GEMMA_SETTINGS_TEMPLATE" >&2
+  exit 1
+fi
+
+if [ ! -r "$SECRET_ENV" ]; then
+  echo "Claude Gemma4 API key file is not readable: $SECRET_ENV" >&2
+  exit 1
+fi
+
+. "$SECRET_ENV"
+
+CLAUDE_GEMMA4_API_KEY="${PSC_CLAUDE_GEMMA4_API_KEY:-${OPENAI_API_KEY:-}}"
+if [ -z "$CLAUDE_GEMMA4_API_KEY" ]; then
+  echo "PSC_CLAUDE_GEMMA4_API_KEY or OPENAI_API_KEY is not set in $SECRET_ENV" >&2
+  exit 1
+fi
+
+if ! curl -fsS "$GEMMA_PROXY_URL/health" >/dev/null 2>&1; then
+  nohup "$GEMMA_PROXY" >"$HOME/.claude-gemma4-proxy.log" 2>&1 &
+  sleep 0.2
+fi
+
+if ! curl -fsS "$GEMMA_PROXY_URL/health" >/dev/null 2>&1; then
+  echo "Claude Gemma4 proxy failed to start; see $HOME/.claude-gemma4-proxy.log" >&2
+  exit 1
+fi
+
+mkdir -p "$GEMMA_CONFIG_DIR"
+
+if [ ! -r "$GEMMA_SETTINGS" ]; then
+  cp "$GEMMA_SETTINGS_TEMPLATE" "$GEMMA_SETTINGS"
+fi
+
+# Mirror custom skills into the gemma4 config dir so it self-heals on every
+# launch. Claude Code only loads user skills from $CLAUDE_CONFIG_DIR/skills,
+# so without this gemma4 sees none of the custom-skills. A real dir holding
+# per-skill symlinks mirrors ~/.claude/skills, so Claude Code's periodic
+# cleanup does not drop it the way it would a whole-dir symlink.
+GEMMA_SKILLS="$GEMMA_CONFIG_DIR/skills"
+SRC_SKILLS="${PSC_CLAUDE_GEMMA4_SKILLS_SRC:-$HOME/.agents/skills}"
+# Flat-link a single skill dir (one that holds SKILL.md) into GEMMA_SKILLS,
+# skipping if the name is already taken.
+link_gemma_skill() {
+  local src dest
+  src="$1"
+  dest="$GEMMA_SKILLS/$(basename "$src")"
+  if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+    ln -s "$src" "$dest"
+  fi
+}
+if [ -d "$SRC_SKILLS" ]; then
+  mkdir -p "$GEMMA_SKILLS"
+  for s in "$SRC_SKILLS"/*; do
+    [ -e "$s" ] || continue
+    if [ -f "$s/SKILL.md" ]; then
+      # Flat skill (e.g. bro): link as-is.
+      link_gemma_skill "$s"
+    elif [ -d "$s" ]; then
+      # Container dir (e.g. superpowers → brainstorming/, systematic-debugging/…).
+      # Claude Code only loads skills/<name>/SKILL.md, so flatten one level so each
+      # nested skill is a directly-loadable user skill instead of an unreadable
+      # whole-container entry.
+      for c in "$s"/*; do
+        if [ -f "$c/SKILL.md" ]; then
+          link_gemma_skill "$c"
+        fi
+      done
+    fi
+  done
+fi
+
+node - "$GEMMA_CONFIG_DIR/.claude.json" "$PWD" <<'NODE'
+const fs = require('fs');
+const [file, cwd] = process.argv.slice(2);
+let config = {};
+try {
+  config = JSON.parse(fs.readFileSync(file, 'utf8'));
+} catch {
+  config = {};
+}
+config.projects ??= {};
+config.projects[cwd] ??= {};
+config.projects[cwd].hasTrustDialogAccepted = true;
+config.projects[cwd].projectOnboardingSeenCount ??= 1;
+fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
+NODE
+
+# Idempotently ensure the gemma4 bro hooks are wired into settings.json
+# (repo = runtime; absolute paths resolved from this launcher's SCRIPT_DIR).
+node - "$GEMMA_SETTINGS" "$SCRIPT_DIR/gemma4-hooks/bro_in.py" "$SCRIPT_DIR/gemma4-hooks/bro_out.py" <<'NODE'
+const fs = require('fs');
+const [file, broIn, broOut] = process.argv.slice(2);
+let cfg = {};
+try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+cfg.hooks = cfg.hooks || {};
+cfg.hooks.UserPromptSubmit = [{ hooks: [{ type: 'command', command: `python3 ${broIn}` }] }];
+cfg.hooks.Stop = [{ hooks: [{ type: 'command', command: `python3 ${broOut}` }] }];
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
+NODE
+
+unset CLAUDE_CODE_USE_VERTEX
+unset ANTHROPIC_VERTEX_PROJECT_ID
+unset CLOUD_ML_REGION
+unset CLAUDE_CODE_OAUTH_TOKEN
+unset CLAUDE_CODE_SESSION_ACCESS_TOKEN
+unset ANTHROPIC_DEFAULT_HAIKU_MODEL
+unset ANTHROPIC_DEFAULT_SONNET_MODEL
+unset ANTHROPIC_SMALL_FAST_MODEL
+
+export ANTHROPIC_CONFIG_DIR="$GEMMA_CONFIG_DIR"
+export CLAUDE_CONFIG_DIR="$GEMMA_CONFIG_DIR"
+export CLAUDE_SECURESTORAGE_CONFIG_DIR="$GEMMA_CONFIG_DIR"
+export ANTHROPIC_API_KEY="$CLAUDE_GEMMA4_API_KEY"
+export ANTHROPIC_BASE_URL="$GEMMA_PROXY_URL"
+export ANTHROPIC_MODEL="gemma4-26b-a4b-nvfp4"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="gemma4-26b-a4b-nvfp4"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="gemma4"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Gemma4 26B-A4B-NVFP4 on 192.0.2.10"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES="text,tool_use"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-1024}"
+export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-1}"
+export CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT="${CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT:-1}"
+# 2026-06-09 evidence: claude.exe anon-rss reached 8.6GB, so default the Node
+# heap cap to 3GB unless the caller already set NODE_OPTIONS explicitly.
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=3072}"
+
+fast_mode=0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -f|--fast)
+      fast_mode=1
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+
+if [ "$fast_mode" = "1" ]; then
+  exec "$REAL_CLAUDE" --bare --settings "$GEMMA_SETTINGS" "${args[@]}"
+fi
+
+exec "$REAL_CLAUDE" --settings "$GEMMA_SETTINGS" "${args[@]}"
