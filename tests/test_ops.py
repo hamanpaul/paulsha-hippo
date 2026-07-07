@@ -172,3 +172,28 @@ class BackendConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallServiceUnitContentTests(unittest.TestCase):
+    def test_rendered_unit_has_no_legacy_module_or_memory_prefix(self):
+        with TemporaryDirectory() as tmp:
+            with mock.patch.object(ops, "_systemd_user_available", return_value=True), \
+                 mock.patch.object(ops.subprocess, "run") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="Linger=yes")
+                ops.run_install_service(enable=False, home_dir=tmp)
+            body = (Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.service").read_text(encoding="utf-8")
+            self.assertNotIn("paulshaclaw.memory", body)
+            self.assertNotIn("cli memory ", body)
+            self.assertIn("paulsha_hippo.cli dream run", body)
+
+
+class InstallHooksResolverTests(unittest.TestCase):
+    def test_install_hooks_passes_resolved_memory_root(self):
+        env = {"HIPPO_MEMORY_ROOT": "/resolved/from/env"}
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(ops.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0)
+            ops.run_install_hooks(memory_root=None, repo_root=None)
+        argv = run.call_args[0][0]
+        self.assertIn("--memory-root", argv)
+        self.assertEqual(argv[argv.index("--memory-root") + 1], "/resolved/from/env")
