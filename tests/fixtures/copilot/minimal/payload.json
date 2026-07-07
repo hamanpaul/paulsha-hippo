@@ -1,0 +1,7 @@
+{
+  "sessionId": "copilot-minimal-001",
+  "timestamp": "2026-05-24T11:05:00+00:00",
+  "cwd": "/repo/minimal",
+  "reason": "sessionEnd",
+  "capture_scope": "session_end"
+}

@@ -1,0 +1,14 @@
+{
+  "sessionId": "copilot-session-end-001",
+  "timestamp": "2026-05-24T11:00:00+00:00",
+  "cwd": "/repo/paulshaclaw",
+  "reason": "sessionEnd",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "e300b08",
+  "turn_count": 2,
+  "user_prompts": ["Normalize Copilot payload"],
+  "assistant_summary": "Mapped sessionId to session_id.",
+  "touched_files": ["paulshaclaw/memory/importer/adapters/copilot.py"],
+  "referenced_artifacts": ["docs/superpowers/plans/2026-05-24-stage2-memory-importer-mvp.md"],
+  "capture_scope": "session_end"
+}

@@ -1,0 +1,16 @@
+version: 1
+projects:
+  paulshaclaw:
+    slug: paulshaclaw
+    roots:
+      - /path/to/paulshaclaw
+    remotes:
+      - github.com/hamanpaul/paulshaclaw
+    aliases: [paulsha, paulshia, psc]
+  obs-auto-moc:
+    slug: obs-auto-moc
+    roots:
+      - /path/to/obs-auto-moc
+    remotes:
+      - github.com/hamanpaul/obs-auto-moc
+    aliases: [auto-moc, obs-moc]

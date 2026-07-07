@@ -1,0 +1,251 @@
+"""Test suite for atomizer config loader."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from paulsha_hippo.atomizer.config import (
+    AtomizerConfig,
+    AtomizerConfigError,
+    _deep_merge,
+    load_config,
+    resolve_command_argv,
+)
+
+
+class TestAtomizerConfig(unittest.TestCase):
+    """Test atomizer configuration loading and hashing."""
+
+    def test_load_defaults(self):
+        """load_config(override_path=None) returns cfg with expected defaults and hash."""
+        cfg, hash_value = load_config(override_path=None)
+        
+        self.assertEqual(cfg.default_artifact_kind, "report")
+        self.assertEqual(cfg.default_phase, "review")
+        self.assertGreater(cfg.max_fragment_chars, 0)
+        self.assertIsInstance(cfg.boundary_patterns, tuple)
+        self.assertGreater(len(cfg.boundary_patterns), 0)
+        self.assertEqual(len(hash_value), 64)  # SHA-256 hex digest
+
+    def test_override_merges_and_changes_hash(self):
+        """Base hash differs after override file with split.max_fragment_chars: 100."""
+        # Load default config and get hash
+        cfg_default, hash_default = load_config(override_path=None)
+        
+        # Create override file with modified max_fragment_chars
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            override_path = Path(f.name)
+            f.write("split:\n  max_fragment_chars: 100\n")
+        
+        try:
+            cfg_override, hash_override = load_config(override_path=override_path)
+            
+            # Hash should change
+            self.assertNotEqual(hash_default, hash_override)
+            
+            # max_fragment_chars should be overridden
+            self.assertEqual(cfg_override.max_fragment_chars, 100)
+            
+            # default_artifact_kind should remain report
+            self.assertEqual(cfg_override.default_artifact_kind, "report")
+        finally:
+            override_path.unlink()
+
+    def test_unsupported_schema_fails_closed(self):
+        """Default dir containing atomizer.yaml with schema_version: 9 raises AtomizerConfigError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = Path(tmpdir)
+            config_file = config_dir / "atomizer.yaml"
+            config_file.write_text("schema_version: 9\n")
+            
+            with self.assertRaises(AtomizerConfigError) as ctx:
+                load_config(default_dir=config_dir, override_path=None)
+            
+            self.assertIn("schema", str(ctx.exception).lower())
+
+    def test_hash_deterministic(self):
+        """Repeated default config loads produce same hash."""
+        _, hash1 = load_config(override_path=None)
+        _, hash2 = load_config(override_path=None)
+        
+        self.assertEqual(hash1, hash2)
+
+    def test_bool_as_int_rejected(self):
+        """Boolean max_fragment_chars must fail closed instead of becoming 1 or 0."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            override_path = Path(f.name)
+            f.write("split:\n  max_fragment_chars: true\n")
+
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_nonpositive_max_chars_rejected(self):
+        """Zero or negative max_fragment_chars must fail closed."""
+        for value in (0, -1000):
+            with self.subTest(value=value):
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                    override_path = Path(f.name)
+                    f.write(f"split:\n  max_fragment_chars: {value}\n")
+
+                try:
+                    with self.assertRaises(AtomizerConfigError):
+                        load_config(override_path=override_path)
+                finally:
+                    override_path.unlink()
+
+    def test_string_boundary_patterns_rejected(self):
+        """boundary_patterns must be a list, not a string split into characters."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            override_path = Path(f.name)
+            f.write("split:\n  boundary_patterns: not-a-list\n")
+
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_config_maps_are_immutable(self):
+        """Frozen config must not expose mutable mapping internals."""
+        cfg, _ = load_config(override_path=None)
+
+        with self.assertRaises(TypeError):
+            cfg.artifact_kind_map["injected"] = "malicious"
+
+        with self.assertRaises(TypeError):
+            cfg.phase_map["injected"] = "malicious"
+
+    def test_deep_merge_does_not_mutate_nested_base(self):
+        """Deep merge must not share nested dict references from the base config."""
+        base = {
+            "split": {"max_fragment_chars": 8000, "boundary_patterns": ["^#"]},
+            "phase_map": {"report": "review"},
+        }
+        merged = _deep_merge(base, {"split": {"max_fragment_chars": 100}})
+        merged["phase_map"]["report"] = "mutated"
+
+        self.assertEqual(base["split"]["max_fragment_chars"], 8000)
+        self.assertEqual(base["phase_map"]["report"], "review")
+        self.assertEqual(merged["split"]["max_fragment_chars"], 100)
+
+
+class AgentExecConfigTests(unittest.TestCase):
+    def test_agent_exec_and_promoter_defaults(self):
+        cfg, _ = load_config(override_path=None)
+
+        self.assertTrue(cfg.agent_exec_command)
+        self.assertGreater(cfg.agent_exec_timeout, 0)
+        self.assertTrue(cfg.agent_exec_upstream_url.startswith("http"))
+        self.assertIn(cfg.default_promoter, ("identity", "llm"))
+        self.assertTrue(cfg.skill_path)
+        self.assertTrue(cfg.known_projects_file)
+
+    def test_upstream_url_override_and_hash(self):
+        import pathlib
+        from paulsha_hippo.atomizer import config as cfgmod
+
+        base = (
+            "schema_version: 1\n"
+            "split:\n"
+            "  boundary_patterns:\n"
+            "    - '^#'\n"
+            "  max_fragment_chars: 8000\n"
+            "agent_exec:\n"
+            "  upstream_url: http://10.0.0.5:9001\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "atomizer.yaml").write_text(base, encoding="utf-8")
+            cfg, hash_value = cfgmod.load_config(default_dir=p, override_path=None)
+            self.assertEqual(cfg.agent_exec_upstream_url, "http://10.0.0.5:9001")
+            self.assertEqual(len(hash_value), 64)
+
+    def test_resolve_agent_exec_settings_prefers_env_upstream(self):
+        from paulsha_hippo.atomizer import config as cfgmod
+
+        with unittest.mock.patch.dict(
+            "os.environ",
+            {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": "http://10.0.0.9:9002"},
+            clear=False,
+        ):
+            _, upstream = cfgmod.resolve_agent_exec_settings()
+        self.assertEqual(upstream, "http://10.0.0.9:9002")
+
+    def test_missing_known_projects_file_uses_facade_default(self):
+        from paulsha_hippo.atomizer import config as cfgmod
+
+        base = "schema_version: 1\nsplit:\n  boundary_patterns:\n    - '^#'\n  max_fragment_chars: 8000\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "atomizer.yaml").write_text(base, encoding="utf-8")
+            agents_root = p / "custom-agents"
+            with unittest.mock.patch.dict(
+                "os.environ",
+                {"PSC_AGENTS_ROOT": str(agents_root)},
+                clear=False,
+            ):
+                cfg, _ = cfgmod.load_config(default_dir=p, override_path=None)
+
+            self.assertEqual(
+                cfg.known_projects_file,
+                str(agents_root / "config" / "projects.yaml"),
+            )
+
+    def test_invalid_timeout_fails_closed_with_config_error(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            override_path = Path(f.name)
+            f.write("agent_exec:\n  timeout_seconds: nope\n")
+
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_float_timeout_fails_closed_with_config_error(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            override_path = Path(f.name)
+            f.write("agent_exec:\n  timeout_seconds: 1.5\n")
+
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_resolve_command_argv_expands_repo_relative_script(self):
+        resolved = resolve_command_argv(("scripts/claude-gemma4",))
+        self.assertTrue(Path(resolved[0]).is_absolute())
+        self.assertTrue(resolved[0].endswith("/scripts/claude-gemma4"))
+
+    def test_max_output_tokens_default_and_in_hash(self):
+        import tempfile, pathlib
+        from paulsha_hippo.atomizer import config as cfgmod
+        base = "schema_version: 1\nsplit:\n  boundary_patterns:\n    - '^#'\n  max_fragment_chars: 8000\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "atomizer.yaml").write_text(base, encoding="utf-8")
+            cfg_default, hash_default = cfgmod.load_config(default_dir=p, override_path=None)
+            self.assertEqual(cfg_default.agent_exec_max_output_tokens, 8192)
+            (p / "atomizer.yaml").write_text(base + "agent_exec:\n  max_output_tokens: 16384\n", encoding="utf-8")
+            cfg_big, hash_big = cfgmod.load_config(default_dir=p, override_path=None)
+            self.assertEqual(cfg_big.agent_exec_max_output_tokens, 16384)
+            self.assertNotEqual(hash_default, hash_big)
+
+    def test_max_output_tokens_rejects_non_positive(self):
+        import tempfile, pathlib
+        from paulsha_hippo.atomizer import config as cfgmod
+        base = ("schema_version: 1\nsplit:\n  boundary_patterns:\n    - '^#'\n"
+                "  max_fragment_chars: 8000\nagent_exec:\n  max_output_tokens: 0\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / "atomizer.yaml").write_text(base, encoding="utf-8")
+            with self.assertRaises(cfgmod.AtomizerConfigError):
+                cfgmod.load_config(default_dir=p, override_path=None)
+
+
+if __name__ == '__main__':
+    unittest.main()

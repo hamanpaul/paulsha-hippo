@@ -1,0 +1,15 @@
+{
+  "session_id": "claude-session-end-001",
+  "transcript_path": "runtime/source/claude-session-end-001.jsonl",
+  "cwd": "/repo/paulshaclaw",
+  "started_at": "2026-05-24T08:00:00+00:00",
+  "ended_at": "2026-05-24T08:45:00+00:00",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "e300b08",
+  "turn_count": 4,
+  "user_prompts": ["Implement memory scaffold", "Run tests"],
+  "assistant_summary": "Created scaffold and verified tests.",
+  "touched_files": ["paulshaclaw/memory/hooks/install.sh", "tests/test_tree_skeleton.py"],
+  "referenced_artifacts": ["docs/superpowers/plans/2026-05-24-stage2-memory-importer-mvp.md"],
+  "capture_scope": "session_end"
+}

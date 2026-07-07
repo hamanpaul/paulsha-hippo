@@ -1,0 +1,2 @@
+### Added
+- #125 Phase 1 code 遷入：paulshaclaw `memory/**`（31k LOC、872 tests 綠）平移為 `paulsha_hippo/**`；`lifecycle` → `lib/lifecycle`、`idle` → `lib/idle`；hippo CLI 樹去 `memory` 前綴（`hippo atomize|dream|janitor|replay|bundle|search|wakeup|syncback|knowledge`）；`paths.py` 單一權威 resolver（`HIPPO_*` > `PSC_*` deprecated 警告 > config.yaml > `~/.agents/memory`）；stage2 12 份 capability specs、integration check、gemma4 wrapper（scripts/ + examples/）隨遷

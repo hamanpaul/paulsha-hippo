@@ -1,0 +1,16 @@
+{
+  "sessionId": "copilot-history-001",
+  "timestamp": "2026-05-24T11:30:00+00:00",
+  "cwd": "/repo/paulshaclaw",
+  "reason": "sessionEnd",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "4f733f4",
+  "history": [
+    {"role": "user", "content": "Draft frontmatter tests"},
+    {"role": "assistant", "content": "Outlined deterministic rendering."},
+    {"role": "user", "content": "Keep key order stable"}
+  ],
+  "touched_files": ["tests/test_frontmatter.py", "docs/plan.md"],
+  "referenced_artifacts": ["docs/plan.md", "docs/task.md"],
+  "capture_scope": "session_end"
+}

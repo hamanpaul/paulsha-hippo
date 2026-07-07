@@ -1,0 +1,14 @@
+{
+  "session_id": "claude-artifacts-001",
+  "transcript_path": "runtime/source/claude-artifacts-001.jsonl",
+  "cwd": "/repo/paulshaclaw/docs",
+  "ended_at": "2026-05-24T09:15:00+00:00",
+  "repo": "hamanpaul/paulshaclaw",
+  "commit": "4f733f4",
+  "turn_count": 3,
+  "user_prompts": ["Update OpenSpec task", "Check design docs"],
+  "assistant_summary": "Reviewed Stage 2 artifacts.",
+  "touched_files": ["openspec/changes/stage2-memory-importer-mvp/tasks.md"],
+  "referenced_artifacts": ["docs/spec.md", "docs/research/02.obs-auto-moc-memory-dream-mode-24-7-service-notes-.md"],
+  "capture_scope": "session_end"
+}

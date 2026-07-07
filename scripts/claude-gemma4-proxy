@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UPSTREAM = (os.environ.get("PSC_CLAUDE_GEMMA4_UPSTREAM_URL") or "http://192.0.2.10:8001").rstrip("/")
+HOST = "127.0.0.1"
+PORT = 18080
+
+
+def content_to_text(content):
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return ""
+
+
+def hoist_system_messages(payload):
+    """Move system/developer role entries out of messages into the top-level
+    system field. vLLM's Anthropic /v1/messages only accepts user/assistant."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return
+    system_parts = []
+    kept = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") in ("system", "developer"):
+            text = content_to_text(message.get("content"))
+            if text:
+                system_parts.append(text)
+        else:
+            kept.append(message)
+    if not system_parts:
+        return
+    existing = content_to_text(payload.get("system"))
+    combined = "\n\n".join(part for part in ([existing] + system_parts) if part)
+    if combined:
+        payload["system"] = combined
+    payload["messages"] = kept
+
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format, *args):
+        return
+
+    def _send(self, status, body, headers=None):
+        self.send_response(status)
+        for key, value in (headers or {}).items():
+            if key.lower() not in {"transfer-encoding", "connection", "content-encoding", "content-length"}:
+                self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._send(200, b"ok\n", {"Content-Type": "text/plain"})
+            return
+        self._forward()
+
+    def do_POST(self):
+        self._forward()
+
+    def _forward(self):
+        raw_length = self.headers.get("content-length", "0") or "0"
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._send(400, b"invalid content-length\n", {"Content-Type": "text/plain; charset=utf-8"})
+            return
+        if length < 0:
+            self._send(400, b"invalid content-length\n", {"Content-Type": "text/plain; charset=utf-8"})
+            return
+        body = self.rfile.read(length) if length else b""
+
+        normalized_path = self.path.split("?", 1)[0].rstrip("/")
+        if self.command == "POST" and normalized_path.endswith(("/messages", "/chat/completions")):
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                kwargs = payload.setdefault("chat_template_kwargs", {})
+                kwargs["enable_thinking"] = False
+                if normalized_path.endswith("/messages"):
+                    hoist_system_messages(payload)
+                body = json.dumps(payload).encode("utf-8")
+            except Exception:
+                pass
+
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in {"host", "content-length", "connection", "accept-encoding"}
+        }
+        headers["Content-Length"] = str(len(body))
+
+        request = urllib.request.Request(
+            UPSTREAM + self.path,
+            data=body if self.command != "GET" else None,
+            headers=headers,
+            method=self.command,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                self._send(response.status, response.read(), dict(response.headers.items()))
+        except urllib.error.HTTPError as error:
+            self._send(error.code, error.read(), dict(error.headers.items()))
+        except urllib.error.URLError:
+            self._send(503, b"upstream unavailable\n", {"Content-Type": "text/plain; charset=utf-8"})
+
+def main():
+    server = ThreadingHTTPServer((HOST, PORT), ProxyHandler)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
