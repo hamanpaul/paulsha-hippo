@@ -23,7 +23,7 @@ from .project_resolver import normalize_remote
 from .project_resolver import resolve_project
 
 _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "watcher_final": 2}
-_TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip"}
+_TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip"}
 _LEDGER_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _LEDGER_THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -55,6 +55,39 @@ def completeness(session: NormalizedSession, capture_scope: str) -> tuple[int, i
         len(session["touched_files"]),
         len(session["user_prompts"]),
     )
+
+
+# #7/#8 治理閘：自捕捉與空 session 短路（capture 端漏網時的第二層防護）。
+_ATOMIZE_SKILL_SIGNATURES = (
+    "name: atomize-knowledge-slice",
+    "# Atomize Knowledge Slice",
+    "把單一 session 的 fragments 蒸餾成可驗證的 knowledge slices",
+)
+
+
+def is_self_capture(session: NormalizedSession) -> bool:
+    """#7 layer 2：user prompt 內容即 atomize skill 調用文本 → hippo 自蒸餾 session。"""
+    for prompt in session.get("user_prompts", []):
+        text = prompt if isinstance(prompt, str) else str(prompt)
+        if any(sig in text for sig in _ATOMIZE_SKILL_SIGNATURES):
+            return True
+    return False
+
+
+# title.apply 對空 session 的 summary 佔位符（即「無內容」訊號本身）。
+_EMPTY_SUMMARY_PLACEHOLDERS = {"", "(無內容)"}
+
+
+def is_empty_session(session: NormalizedSession) -> bool:
+    """#8：無 user prompt、無 touched files、summary 空/佔位、turn 微量 → 無蒸餾價值。"""
+    if session.get("user_prompts"):
+        return False
+    if session.get("touched_files"):
+        return False
+    if str(session.get("assistant_summary", "")).strip() not in _EMPTY_SUMMARY_PLACEHOLDERS:
+        return False
+    return int(session.get("turn_count", 0)) <= 1
+
 
 
 def _read_tool(queue_path: Path) -> str:
@@ -245,6 +278,28 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     incoming_hash = content_hash(session, result.capture_scope)
     incoming_completeness = completeness(session, result.capture_scope)
     captured_at, day, month = _date_parts(session)
+
+    # #7/#8 短路：不寫 inbox、不入蒸餾佇列，僅 archive+ledger+移除 queue。
+    skip_status = None
+    if is_self_capture(session):
+        skip_status = "self-skip"
+    elif is_empty_session(session):
+        skip_status = "empty-skip"
+    if skip_status is not None:
+        archive_path = _archive_path(root, month, key, skip_status, incoming_hash)
+        decision = _decision_entry(
+            status=skip_status,
+            key=key,
+            queue_path=queue_path,
+            inbox_path=root / "inbox" / "_skipped" / f"{safe_key(session['session_id'])}.md",
+            archive_path=archive_path,
+            incoming_hash=incoming_hash,
+            incoming_completeness=incoming_completeness,
+            recorded=_load_recorded(root, key),
+        )
+        decision["skip_reason"] = skip_status
+        decision["rendered"] = ""
+        return decision
     bucket = classify_session(session)
     project = resolve_project(
         cwd=session.get("cwd"),
