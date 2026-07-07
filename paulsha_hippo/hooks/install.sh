@@ -153,7 +153,21 @@ venv_dir="${memory_root}/hooks/.venv"
 if [[ "$skip_venv" != true ]]; then
   if python3 -m venv --help &>/dev/null 2>&1; then
     python3 -m venv "$venv_dir"
-    "${venv_dir}/bin/pip" install --quiet -e "${repo_root}"
+    if [[ -f "${repo_root}/pyproject.toml" ]]; then
+      # 開發/checkout 情境：editable 安裝 repo
+      "${venv_dir}/bin/pip" install --quiet -e "${repo_root}"
+    else
+      # wheel/pipx 情境（repo_root=site-packages 根）：直接把已解包的套件
+      # 複製進 venv site-packages（零網路、與安裝版本一致）
+      _hooks_pkg_src="${repo_root}/paulsha_hippo"
+      _venv_site="$("${venv_dir}/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+      if [[ -d "$_hooks_pkg_src" && -n "$_venv_site" ]]; then
+        "${venv_dir}/bin/pip" install --quiet pyyaml
+        cp -r "$_hooks_pkg_src" "$_venv_site/"
+      else
+        echo "install.sh: WARN cannot locate packaged paulsha_hippo; importer venv incomplete" >&2
+      fi
+    fi
   else
     echo "install.sh: WARN python3 venv unavailable; skipping venv creation" >&2
   fi
@@ -496,6 +510,9 @@ install -d -m 700 "$(dirname "$projects_yaml")"
 
 if [[ ! -f "$projects_yaml" ]]; then
   sample_yaml="${repo_root}/config/agents-projects.sample.yaml"
+  if [[ ! -f "$sample_yaml" ]]; then
+    sample_yaml="$(dirname "${BASH_SOURCE[0]}")/../config-samples/agents-projects.sample.yaml"
+  fi
   if [[ -f "$sample_yaml" ]]; then
     install -m 600 "$sample_yaml" "$projects_yaml"
   else
