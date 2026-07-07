@@ -1,0 +1,10 @@
+{
+  "policy_version": "0.1.0",
+  "boundaries": [
+    {"id": "external_to_raw", "status": "mandatory", "hooks": [{"name": "regex_redaction", "fail_mode": "fail_closed"}], "retry_count": 3, "retry_backoff_ms": 50, "audit_required": true},
+    {"id": "raw_to_distilled", "status": "mandatory", "hooks": [{"name": "regex_redaction", "fail_mode": "fail_closed"}, {"name": "gitleaks_redaction", "fail_mode": "fail_closed"}, {"name": "classification", "fail_mode": "fail_open_warn"}], "retry_count": 3, "retry_backoff_ms": 50, "audit_required": true},
+    {"id": "distilled_to_canonical", "status": "deferred", "hooks": [], "retry_count": 3, "retry_backoff_ms": 50, "audit_required": true},
+    {"id": "canonical_to_indexed", "status": "deferred", "hooks": [], "retry_count": 3, "retry_backoff_ms": 50, "audit_required": true},
+    {"id": "indexed_to_consumer", "status": "deferred", "hooks": [], "retry_count": 3, "retry_backoff_ms": 50, "audit_required": true}
+  ]
+}

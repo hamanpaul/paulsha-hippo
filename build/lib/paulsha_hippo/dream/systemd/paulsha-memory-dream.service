@@ -1,0 +1,9 @@
+[Unit]
+Description=PaulSha memory dream service (atomize + janitor)
+
+[Service]
+Type=oneshot
+# %h = user home; adjust MEMORY_ROOT/PYTHONPATH at install time.
+# #175: 排程路徑顯式 pin --promoter llm，與生產（scripts/start.sh）一致；
+# identity 僅為顯式測試選項（會 1:1 複製 importer 樣板成 knowledge slices）。
+ExecStart=/usr/bin/env python3 -m paulsha_hippo.cli dream run --memory-root %h/.agents/memory --require-idle --promoter llm

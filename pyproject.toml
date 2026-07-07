@@ -18,3 +18,15 @@ test = ["pytest"]
 
 [tool.setuptools.packages.find]
 include = ["paulsha_hippo*"]
+
+[tool.setuptools.package-data]
+# wheel 安裝必備的非 .py 資產（E2E fresh-install 驗證抓到：editable 下不缺、wheel 下缺）
+"paulsha_hippo" = [
+    "**/*.sh",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.md",
+    "**/*.service",
+    "**/*.timer",
+    "**/*.json",
+]

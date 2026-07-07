@@ -1,0 +1,10 @@
+{
+  "policy_version": "0.1.0",
+  "levels": ["public", "private", "secret"],
+  "unknown_project_default": "private",
+  "redaction_hit_default": "private",
+  "manual_precedence": true,
+  "project_defaults": [
+    {"project": "paulshaclaw", "level": "public", "reason": "tooling design repo", "roots": ["paulshaclaw"], "remotes": ["hamanpaul/paulshaclaw"]}
+  ]
+}
