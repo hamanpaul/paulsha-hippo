@@ -21,6 +21,11 @@ TOOL = "copilot-cli"
 
 
 def main() -> int:
+    # #7 自捕捉防護：hippo 自發蒸餾（agent_exec 注入 HIPPO_SELF_SESSION）
+    # 的 agent session 不得再被截取，否則遞迴汙染。先於任何 package import。
+    import os as _self_os
+    if _self_os.environ.get("HIPPO_SELF_SESSION", "").strip():
+        return 0
     from paulsha_hippo.hooks._wakeup_common import (
         fire_importer,
         log_warn,

@@ -68,6 +68,11 @@ def _fire_importer(root: Path, queue_path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # #7 自捕捉防護：hippo 自發蒸餾（agent_exec 注入 HIPPO_SELF_SESSION）
+    # 的 agent session 不得再被截取，否則遞迴汙染。先於任何 package import。
+    import os as _self_os
+    if _self_os.environ.get("HIPPO_SELF_SESSION", "").strip():
+        return 0
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--subagent", action="store_true")
     args, _ = parser.parse_known_args(argv)

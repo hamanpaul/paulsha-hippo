@@ -34,7 +34,9 @@ class AgentExecClient(AgentClient):
                 text=True,
                 timeout=self._timeout,
                 check=False,
-                env=None if self._env is None else {**os.environ, **self._env},
+                # #7：注入自捕捉標記——蒸餾子程序（claude -p 等）的 agent session
+                # 其 hooks 讀到即跳過 queue write，斷開遞迴自捕捉。
+                env={**os.environ, "HIPPO_SELF_SESSION": "1", **(self._env or {})},
             )
         except FileNotFoundError as exc:
             raise AgentExecError(f"agent command not found: {self._command[0]}") from exc
