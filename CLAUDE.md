@@ -18,9 +18,10 @@ policy_version: 1.0.12
 - [ ] 若本任務跨多個子項，先建議用 `git worktree` 拆開
 
 ## 改 code 時
-- [ ] 同一 PR 必須同步更新 `CHANGELOG.md [Unreleased]`
-- [ ] 除非可明確標示為 docs-only / test-only / chore，否則不得省略 CHANGELOG
+- [ ] 同一 PR 必須新增 `changelog.d/<slug>.md` 碎片——R-09 實際檢查的是這個碎片是否存在，不是直接改 `CHANGELOG.md`；鏡像進 `CHANGELOG.md [Unreleased]` 仍是慣例，但不是 R-09 的判定對象
+- [ ] 除非可明確標示為 docs-only / test-only / chore，否則不得省略 changelog.d 碎片（豁免用 `skip-changelog` label + 理由）
 - [ ] code_paths 涵蓋的檔案變動皆視為 code change
+- R-09 為 diff-aware：本機 `python3 -m policy_check --repo .`（無 PR context）不會抓到碎片缺漏，須在有 PR base/head 資訊時（CI）才驗得出來
 
 ## 改版號時（release 觸發時）
 - [ ] 嚴格遵循 `<MAJOR>.<MINOR>.<PATCH>[-fix.N]`
@@ -31,7 +32,7 @@ policy_version: 1.0.12
 - [ ] MAJOR bump 需使用者明確核可
 
 ## 完成任務（claim done）前
-- [ ] `CHANGELOG.md [Unreleased]` 有對應 entry（或 PR 標 `skip-changelog` + 理由）
+- [ ] `changelog.d/` 有對應碎片（或 PR 標 `skip-changelog` + 理由）
 - [ ] `VERSION` 內容與意圖一致（release label PR 才可偏離 latest tag）
 - [ ] `.github/pull_request_template.md` checklist 全勾
 - [ ] `python3 -m policy_check --repo .` 無任何 failure
@@ -52,7 +53,7 @@ policy_version: 1.0.12
 - `policy-exempt:branch-name` — R-12 分支來源規則
 - `policy-exempt:agent-files` — R-13 agent convention files 存在
 - `policy-exempt:cli-help` — R-16 CLI help 同步
-- `skip-changelog` — R-09 code 變動要求 CHANGELOG entry（特殊用途，需附理由）
+- `skip-changelog` — R-09 code 變動要求 changelog.d 碎片（或直寫 CHANGELOG）（特殊用途，需附理由）
 - `wip` — R-11 自動通過 PR body checkbox 未全勾（work in progress）
 
 > 各 policy 版本新增的 exemption label 列於下方對應「新增規則」段。
