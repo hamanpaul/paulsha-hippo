@@ -3,6 +3,11 @@ Description=PaulSha memory dream service (atomize + janitor)
 
 [Service]
 Type=oneshot
+# 可攜資源治理（實體 RAM 百分比；CPUWeight 為相對值，換機自動縮放）。
+CPUWeight=20
+MemoryHigh=20%
+MemoryMax=30%
+TasksMax=256
 # %h = user home; adjust MEMORY_ROOT/PYTHONPATH at install time.
 # #175: 排程路徑顯式 pin --promoter llm，與生產（scripts/start.sh）一致；
 # identity 僅為顯式測試選項（會 1:1 複製 importer 樣板成 knowledge slices）。
