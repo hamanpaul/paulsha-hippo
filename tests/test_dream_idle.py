@@ -60,6 +60,35 @@ class DreamIdleTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             idle.is_idle(probe=lambda: [0.2, 0.3, 0.4])
 
+    def test_mem_headroom_above_threshold(self):
+        from paulsha_hippo.lib import idle
+        self.assertTrue(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 1000, "MemAvailable": 300}))
+
+    def test_mem_headroom_below_threshold(self):
+        from paulsha_hippo.lib import idle
+        self.assertFalse(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 1000, "MemAvailable": 150}))
+
+    def test_mem_headroom_at_threshold_is_false(self):
+        from paulsha_hippo.lib import idle
+        # 嚴格大於：剛好 20% 不放行
+        self.assertFalse(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 1000, "MemAvailable": 200}))
+
+    def test_mem_headroom_failsafe_on_oserror(self):
+        from paulsha_hippo.lib import idle
+
+        def boom():
+            raise OSError("no meminfo")
+
+        self.assertTrue(idle.has_mem_headroom(0.20, probe=boom))
+
+    def test_mem_headroom_failsafe_on_missing_field(self):
+        from paulsha_hippo.lib import idle
+        self.assertTrue(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 1000}))
+
+    def test_mem_headroom_zero_total_is_true(self):
+        from paulsha_hippo.lib import idle
+        self.assertTrue(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 0, "MemAvailable": 0}))
+
 
 if __name__ == "__main__":
     unittest.main()
