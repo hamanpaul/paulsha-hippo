@@ -1,8 +1,8 @@
 [Unit]
-Description=Run PaulSha memory dream on workday mornings
+Description=Run PaulSha memory dream hourly
 
 [Timer]
-OnCalendar=Mon..Fri 05:00
+OnCalendar=hourly
 Persistent=true
 
 [Install]

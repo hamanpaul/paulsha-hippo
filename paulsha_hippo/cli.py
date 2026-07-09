@@ -22,6 +22,14 @@ class PayloadReadError(Exception):
     """Raised when a payload file cannot be read as UTF-8 text."""
 
 
+def _pct_arg(s):
+    import math
+    v = float(s)
+    if not math.isfinite(v) or not (0.0 <= v <= 100.0):
+        raise argparse.ArgumentTypeError("--min-avail-mem-pct must be a finite number in [0, 100]")
+    return v
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -114,6 +122,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dream_run.add_argument("--dry-run", action="store_true")
     dream_run.add_argument("--require-idle", action="store_true")
     dream_run.add_argument("--max-load", type=float, default=1.0)
+    dream_run.add_argument("--min-avail-mem-pct", type=_pct_arg, default=20.0)
     dream_run.add_argument("--promoter", choices=["identity", "llm"], default=None)
     dream_run.add_argument("--agent-command", default=None)
     dream_run.add_argument(

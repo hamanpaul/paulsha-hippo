@@ -97,6 +97,56 @@ class DreamCliTests(unittest.TestCase):
             self.assertEqual(payload.get("backlog_depth"), 1)
             self.assertIsNone(dream.last_run(root))
 
+    def test_require_idle_low_memory_skips(self):
+        from paulsha_hippo.lib import idle as idle_lib
+
+        real_has_mem_headroom = idle_lib.has_mem_headroom
+
+        def mem_gate(min_fraction, probe=None):
+            self.assertEqual(min_fraction, 0.35)
+            self.assertIsNotNone(probe)
+            return real_has_mem_headroom(min_fraction, probe=probe)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed(root)
+            buf = io.StringIO()
+            with patch(
+                "paulsha_hippo.dream.cli.idle.is_idle",
+                return_value=True,
+            ), patch(
+                "paulsha_hippo.dream.cli.idle._read_meminfo",
+                side_effect=[
+                    {"MemAvailable": 150, "MemTotal": 1000},
+                    AssertionError("unexpected second meminfo read"),
+                ],
+            ), patch(
+                "paulsha_hippo.dream.cli.idle.has_mem_headroom",
+                side_effect=mem_gate,
+            ), redirect_stdout(buf):
+                rc = cli.main(["dream",
+                        "run",
+                        "--memory-root",
+                        str(root),
+                        "--now",
+                        "2026-06-02T05:00:00Z",
+                        "--require-idle",
+                        "--min-avail-mem-pct",
+                        "35.0",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(
+                payload,
+                {
+                    "avail_pct": 15.0,
+                    "backlog_depth": 1,
+                    "skipped": "low memory",
+                },
+            )
+            self.assertIsNone(dream.last_run(root))
+
     def test_status_reports_backlog(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
