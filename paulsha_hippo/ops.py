@@ -192,12 +192,29 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
 
 # ---------------------------------------------------------------- dream supervise
 
-def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
-                        once: bool = False, runner=None) -> int:
-    """前景常駐：每 interval 秒跑一次 dream run --require-idle（service-dream.sh 語意）。
+def _dream_timer_active() -> bool:
+    """True 當 systemd dream timer 已接管（active）。systemctl 缺失/非 active → False。"""
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "is-active", "paulsha-hippo-dream.timer"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    return completed.stdout.strip() == "active"
 
-    首輪延後一個 interval（開機 loadavg 尚低，避免 idle gate 假通過疊上啟動風暴）。
+
+def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
+                        once: bool = False, runner=None,
+                        timer_active=_dream_timer_active) -> int:
+    """前景常駐：每 interval 秒跑一次 dream run --require-idle。
+
+    systemd dream timer 已接管時讓位（避免雙跑）；首輪延後一個 interval。
     """
+    if timer_active():
+        print("systemd dream timer 已接管；supervise 讓位（不啟動前景 loop）")
+        return 0
     from paulsha_hippo import cli as hippo_cli
 
     argv = ["dream", "run", "--require-idle", "--promoter", "llm"] + list(extra_argv or [])

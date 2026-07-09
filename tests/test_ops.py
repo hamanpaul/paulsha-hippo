@@ -97,6 +97,24 @@ class SuperviseTests(unittest.TestCase):
         with mock.patch.object(ops.time, "sleep"):
             self.assertEqual(ops.run_dream_supervise(interval=1, once=True, runner=boom), 0)
 
+    def test_supervise_defers_when_timer_active(self):
+        calls = []
+        rc = ops.run_dream_supervise(
+            interval=1, once=True, runner=lambda: calls.append(1),
+            timer_active=lambda: True,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_supervise_runs_when_timer_inactive(self):
+        calls = []
+        rc = ops.run_dream_supervise(
+            interval=1, once=True, runner=lambda: calls.append(1),
+            timer_active=lambda: False,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [1])
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
