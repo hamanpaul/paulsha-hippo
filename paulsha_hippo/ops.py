@@ -200,7 +200,7 @@ def _dream_timer_active() -> bool:
             capture_output=True,
             text=True,
         )
-    except FileNotFoundError:
+    except OSError:
         return False
     return completed.stdout.strip() == "active"
 

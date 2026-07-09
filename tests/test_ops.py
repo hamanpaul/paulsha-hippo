@@ -132,6 +132,11 @@ class SuperviseTests(unittest.TestCase):
         sleep.assert_called_with(1)
         self.assertEqual(calls, [1])
 
+    def test_dream_timer_active_false_when_systemctl_permission_denied(self):
+        # systemctl 存在但無權限執行時應 fallback 為 False，不得讓例外往外傳
+        with mock.patch.object(ops.subprocess, "run", side_effect=PermissionError("denied")):
+            self.assertFalse(ops._dream_timer_active())
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
