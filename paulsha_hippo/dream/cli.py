@@ -31,6 +31,36 @@ def _run(args: argparse.Namespace) -> int:
         )
         return 0
 
+    mem_info: dict[str, int] | None = None
+
+    def mem_probe() -> dict[str, int]:
+        nonlocal mem_info
+        if mem_info is None:
+            reader = getattr(idle, "_read_meminfo", None)
+            mem_info = reader() if callable(reader) else {}
+        return mem_info
+
+    if args.require_idle and not idle.has_mem_headroom(
+        getattr(args, "min_avail_mem_pct", 20.0) / 100.0,
+        probe=mem_probe,
+    ):
+        info = mem_info or {}
+        try:
+            avail_pct = round(100.0 * info["MemAvailable"] / info["MemTotal"], 1)
+        except (KeyError, ZeroDivisionError, TypeError):
+            avail_pct = None
+        print(
+            json.dumps(
+                {
+                    "skipped": "low memory",
+                    "avail_pct": avail_pct,
+                    "backlog_depth": dream_ledger.backlog_depth(memory_root),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
     atom_cfg, atom_hash = atomizer_config.load_config()
     jan_cfg, jan_hash = janitor_config.load_config()
     promoter = atomizer_cli._build_promoter(args, atom_cfg, memory_root)

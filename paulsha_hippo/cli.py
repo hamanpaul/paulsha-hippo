@@ -114,6 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dream_run.add_argument("--dry-run", action="store_true")
     dream_run.add_argument("--require-idle", action="store_true")
     dream_run.add_argument("--max-load", type=float, default=1.0)
+    dream_run.add_argument("--min-avail-mem-pct", type=float, default=20.0)
     dream_run.add_argument("--promoter", choices=["identity", "llm"], default=None)
     dream_run.add_argument("--agent-command", default=None)
     dream_run.add_argument(
