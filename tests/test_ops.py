@@ -84,9 +84,14 @@ class InstallServiceTests(unittest.TestCase):
 class SuperviseTests(unittest.TestCase):
     def test_supervise_defers_first_run_then_invokes(self):
         calls = []
+        timer_active = mock.Mock(return_value=False)
         with mock.patch.object(ops.time, "sleep") as sleep:
-            rc = ops.run_dream_supervise(interval=7, once=True, runner=lambda: calls.append(1))
+            rc = ops.run_dream_supervise(
+                interval=7, once=True, runner=lambda: calls.append(1),
+                timer_active=timer_active,
+            )
         self.assertEqual(rc, 0)
+        timer_active.assert_called_once_with()
         sleep.assert_called_with(7)
         self.assertEqual(calls, [1])
 
@@ -94,8 +99,16 @@ class SuperviseTests(unittest.TestCase):
         def boom():
             raise RuntimeError("x")
 
-        with mock.patch.object(ops.time, "sleep"):
-            self.assertEqual(ops.run_dream_supervise(interval=1, once=True, runner=boom), 0)
+        timer_active = mock.Mock(return_value=False)
+        with mock.patch.object(ops.time, "sleep") as sleep:
+            self.assertEqual(
+                ops.run_dream_supervise(
+                    interval=1, once=True, runner=boom, timer_active=timer_active
+                ),
+                0,
+            )
+        timer_active.assert_called_once_with()
+        sleep.assert_called_with(1)
 
     def test_supervise_defers_when_timer_active(self):
         calls = []
@@ -108,11 +121,15 @@ class SuperviseTests(unittest.TestCase):
 
     def test_supervise_runs_when_timer_inactive(self):
         calls = []
-        rc = ops.run_dream_supervise(
-            interval=1, once=True, runner=lambda: calls.append(1),
-            timer_active=lambda: False,
-        )
+        timer_active = mock.Mock(return_value=False)
+        with mock.patch.object(ops.time, "sleep") as sleep:
+            rc = ops.run_dream_supervise(
+                interval=1, once=True, runner=lambda: calls.append(1),
+                timer_active=timer_active,
+            )
         self.assertEqual(rc, 0)
+        timer_active.assert_called_once_with()
+        sleep.assert_called_with(1)
         self.assertEqual(calls, [1])
 
 
