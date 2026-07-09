@@ -16,7 +16,7 @@ dream（記憶蒸餾常駐）目前無資源治理：`--require-idle` 只看 CPU
 - `dream-resource-governance`: dream 常駐的資源進入閘（load + 記憶體雙閘）、與 systemd timer 的單一驅動仲裁（supervise 讓位）、以及 dream systemd 單元的排程與 cgroup 資源上限契約。
 
 ### Modified Capabilities
-<!-- 無：既有 stage2-* 能力的 requirement 不變（僅新增 dream 資源治理契約）。 -->
+- `stage2-memory-governance`: dream 排程 requirement 由 Mon–Fri morning 改為交由 dream-resource-governance 治理（hourly）。
 
 ## Impact
 

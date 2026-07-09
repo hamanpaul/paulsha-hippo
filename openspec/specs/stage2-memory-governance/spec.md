@@ -552,7 +552,7 @@ Stage 2 SHALL provide `psc memory dream status` returning the latest run summary
 
 ### Requirement: Idle-gated scheduling
 
-Stage 2 SHALL ship a systemd user unit/timer template and an idle-check wrapper so the dream service can run on a workday-morning schedule only when the system is idle. The timer template MUST use `OnCalendar` for Monday–Friday morning and MUST invoke `dream run --require-idle`. `--require-idle` MUST skip the run (log and exit zero) when the system is confirmed busy, and MUST proceed when idle or when idleness cannot be determined (fail-safe-to-run). The idle decision MUST be implemented in Python so it is unit-testable with an injected probe.
+Stage 2 SHALL ship a systemd user unit/timer template and an idle-check wrapper so the dream service can run on a recurring schedule only when the system is idle. The timer template MUST use `OnCalendar` on a recurring schedule (the concrete cadence is governed by the `dream-resource-governance` capability) and MUST invoke `dream run --require-idle`. `--require-idle` MUST skip the run (log and exit zero) when the system is confirmed busy, and MUST proceed when idle or when idleness cannot be determined (fail-safe-to-run). The idle decision MUST be implemented in Python so it is unit-testable with an injected probe.
 
 #### Scenario: Busy system skips
 
