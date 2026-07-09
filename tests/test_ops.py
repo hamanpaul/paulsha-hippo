@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -185,6 +186,18 @@ class InstallServiceUnitContentTests(unittest.TestCase):
             self.assertNotIn("paulshaclaw.memory", body)
             self.assertNotIn("cli memory ", body)
             self.assertIn("paulsha_hippo.cli dream run", body)
+
+    def test_execstart_uses_current_interpreter_not_env_python(self):
+        with TemporaryDirectory() as tmp:
+            with mock.patch.object(ops, "_systemd_user_available", return_value=True), \
+                 mock.patch.object(ops.subprocess, "run") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="Linger=yes")
+                ops.run_install_service(enable=False, home_dir=tmp)
+            body = (Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.service").read_text(encoding="utf-8")
+            # pipx / venv 隔離安裝下，ExecStart 必須綁定當前 interpreter（sys.executable），
+            # 不能用 /usr/bin/env python3（全域 python 會 import 不到 paulsha_hippo）
+            self.assertIn(f"ExecStart={sys.executable} -m paulsha_hippo.cli dream run", body)
+            self.assertNotIn("/usr/bin/env python3", body)
 
 
 class InstallHooksResolverTests(unittest.TestCase):

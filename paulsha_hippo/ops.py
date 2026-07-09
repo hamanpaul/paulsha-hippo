@@ -163,6 +163,11 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
     ):
         src = src_dir / src_name
         text = src.read_text(encoding="utf-8").replace("paulsha-memory-dream", "paulsha-hippo-dream")
+        # ExecStart 綁定當前 interpreter：pipx / venv 隔離安裝下，template 寫死的
+        # /usr/bin/env python3（全域 python）會 import 不到 paulsha_hippo
+        # （ModuleNotFoundError → 服務啟動即 exit 1）。改用 sys.executable 指向
+        # 實際安裝環境的 python，確保 systemd 服務能載入套件。
+        text = text.replace("/usr/bin/env python3", sys.executable)
         dst = unit_dir / dst_name
         dst.write_text(text, encoding="utf-8")
         written.append(str(dst))
