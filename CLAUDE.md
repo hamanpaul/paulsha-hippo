@@ -53,7 +53,7 @@ policy_version: 1.0.12
 - `policy-exempt:branch-name` — R-12 分支來源規則
 - `policy-exempt:agent-files` — R-13 agent convention files 存在
 - `policy-exempt:cli-help` — R-16 CLI help 同步
-- `skip-changelog` — R-09 code 變動要求 CHANGELOG entry（特殊用途，需附理由）
+- `skip-changelog` — R-09 code 變動要求 changelog.d 碎片（或直寫 CHANGELOG）（特殊用途，需附理由）
 - `wip` — R-11 自動通過 PR body checkbox 未全勾（work in progress）
 
 > 各 policy 版本新增的 exemption label 列於下方對應「新增規則」段。
