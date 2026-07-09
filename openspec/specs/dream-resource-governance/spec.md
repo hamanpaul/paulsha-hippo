@@ -1,4 +1,9 @@
-## ADDED Requirements
+# dream-resource-governance Specification
+
+## Purpose
+定義 dream 常駐的資源進入閘（load + 記憶體雙閘）、與 systemd timer 的單一驅動仲裁（supervise 讓位），以及 dream systemd 單元的排程與 cgroup 資源上限契約。
+
+## Requirements
 
 ### Requirement: 記憶體 headroom 進入閘
 
