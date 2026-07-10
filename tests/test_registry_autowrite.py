@@ -234,6 +234,44 @@ class RegistryAutoWriteTest(unittest.TestCase):
         self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
         self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
 
+    def test_unrelated_payload_remote_does_not_hitchhike_into_registry(self):
+        # 回歸釘（#14 review blocking finding）：payload remote_url 夾帶不相干 remote、
+        # slug 實由現場探測 remote（config 匹配）派生時，gate 必須逐 remote 過濾——
+        # 只寫個別通過驗證的 remote；否則不相干 remote 搭便車落盤，真 remote 恰為
+        # 該值的無關 repo 經 union-read remote match 被翻轉歸屬（自我強化污染變體）。
+        self.enable_auto_write()
+        projects_yaml = self.base / "agents" / "config" / "projects.yaml"
+        projects_yaml.parent.mkdir(parents=True, exist_ok=True)
+        projects_yaml.write_text(
+            "projects:\n"
+            "  official-widget:\n"
+            "    remotes:\n"
+            "      - github.com/acme/widget\n",
+            encoding="utf-8",
+        )
+        repo = self.make_repo()
+        decision = self.ingest(
+            self.payload(
+                cwd=repo,
+                session_id="registry-sid-hitchhike",
+                remote_url="git@github.com:acme/unrelated-victim.git",
+            ),
+            name="hitchhike.json",
+        )
+        self.assertEqual(decision["status"], "written")
+        self.assertEqual(decision["project"], "official-widget")
+        projects = self.read_projects()
+        self.assertEqual([project.slug for project in projects], ["official-widget"])
+        # 逐 remote 過濾：只有通過驗證的現場探測 remote 落盤，unrelated-victim 不得寫入
+        self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
+        # 反饋面：真 remote 恰為 unrelated-victim 的無關 repo 不得被污染清單誤判成 official-widget
+        victim = self.make_repo(name="victim", remote="git@github.com:acme/unrelated-victim.git")
+        victim_decision = self.ingest(
+            self.payload(cwd=victim, session_id="registry-sid-victim"),
+            name="victim.json",
+        )
+        self.assertEqual(victim_decision["project"], "github.com/acme/unrelated-victim")
+
     def test_registry_failure_does_not_break_ingest(self):
         self.enable_auto_write()
         repo = self.make_repo(name="failrepo", remote="git@github.com:acme/failrepo.git")

@@ -47,7 +47,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 
 - **Opt-in**：`~/.config/paulsha-hippo/config.yaml` 設 `project_registry.auto_write: true` 才寫（預設 off）。
 - 觸發點：importer ingest 完成（dry-run 不寫）；`slug` 為 `_unknown`、或 roots 與 remotes 全空的 session 不寫。
-- **寫入 gate（remotes 必須是真 remote）**：僅當 slug 由 remote 正規化派生（session 的 git remote，或顯式 payload remote 鍵 `remote_url` / `remote` 經 config/registry 匹配）才寫；dir-name / basename fallback slug 一律 skip（記 debug log）——杜絕 remoteless worktree 的自我矛盾 mapping，與已刪 cwd / git 逾時下「垃圾 slug 掛真 remote」的自我強化污染。path 形 `repo` 欄位（toplevel 路徑輸入）僅供解析比對，不得寫入 `remotes`。
+- **寫入 gate（remotes 必須是真 remote）**：僅當 slug 由 remote 正規化派生（session 的 git remote，或顯式 payload remote 鍵 `remote_url` / `remote` 經 config/registry 匹配）才寫；驗證逐 remote 套用——只有個別通過驗證的 remote 寫入 `remotes`，payload 夾帶而未通過驗證的不相干 remote 不得搭便車落盤；dir-name / basename fallback slug 一律 skip（記 debug log）——杜絕 remoteless worktree 的自我矛盾 mapping，與已刪 cwd / git 逾時下「垃圾 slug 掛真 remote」的自我強化污染。path 形 `repo` 欄位（toplevel 路徑輸入）僅供解析比對，不得寫入 `remotes`。
 - 互斥：固定名 lock `flock(LOCK_EX)`；原子性：寫 `.project-hippo.yaml.tmp` 後 `os.replace`；內容未變則跳寫（冪等）。
 - Fail-open：registry 寫入失敗不影響 ingest 主流程（記 warning）。
 - **分權**：generated 檔不允許手改（檔頭註明；手改內容會在下次寫入被 canonical 化覆蓋）。使用者 override 一律放 manual 檔——hippo 側 legacy `projects.yaml`，或 cortex 側 `project-cortex.yaml`。

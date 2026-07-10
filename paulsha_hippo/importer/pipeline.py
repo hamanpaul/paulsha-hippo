@@ -317,7 +317,11 @@ def _discovery_candidate(
       match 解析成垃圾 slug（自我強化污染）。
     remote 派生判準：slug 等於某 anchor remote 的正規形（無 config 匹配時
     resolve_project 的 raw remote slug），或等於 config/registry 以該 remote
-    重解析（remote-only，不帶 cwd）出的 slug。
+    重解析（remote-only，不帶 cwd）出的 slug。判準逐 remote 套用：只有個別
+    通過驗證的 remote 才寫入輸出 remotes——payload 夾帶不相干 remote_url 而
+    slug 實由現場探測 remote 派生時，不相干 remote 不得搭便車落盤（否則真
+    remote 恰為該值的無關 repo 會經 union-read remote match 被誤判成本 slug，
+    自我強化污染的另一變體）。
     """
     anchor_remotes = tuple(sorted({value for value in remotes if value}))
     if not slug or slug == "_unknown" or not anchor_remotes:
@@ -326,11 +330,12 @@ def _discovery_candidate(
             slug,
         )
         return None
-    remote_derived = any(
-        slug == remote or slug == resolve_project(remote_url=remote, memory_root=str(memory_root))
+    validated_remotes = tuple(
+        remote
         for remote in anchor_remotes
+        if slug == remote or slug == resolve_project(remote_url=remote, memory_root=str(memory_root))
     )
-    if not remote_derived:
+    if not validated_remotes:
         LOGGER.debug(
             "project registry discovery skipped（slug 非 remote 派生，不落盤）: slug=%s remotes=%s",
             slug,
@@ -340,7 +345,7 @@ def _discovery_candidate(
     return {
         "slug": slug,
         "roots": [main_root] if main_root else [],
-        "remotes": list(anchor_remotes),
+        "remotes": list(validated_remotes),
     }
 
 
