@@ -20,6 +20,24 @@ _REPO_ROOT = _PKG_ROOT.parent
 _BACKENDS = ("claude-headless", "openai-compatible", "custom-argv")
 
 
+class BackendUnavailableError(ValueError):
+    """backend argv[0] 在目前環境解析不到可執行檔（#15；PR-D preset registry 重用）。"""
+
+
+def resolve_backend_argv(argv: list[str]) -> list[str]:
+    """argv[0] 以 shutil.which 絕對路徑化（跨批次共享契約：PR-A 建立、PR-D 重用）。
+
+    - 以 os.path.abspath 正規化、不 resolve symlink（nvm shim 需保留原 symlink 層）。
+    - 空 argv 或 which 找不到 → BackendUnavailableError（ValueError 子類）。
+    """
+    if not argv or not argv[0]:
+        raise BackendUnavailableError("backend argv 不可為空")
+    resolved = shutil.which(argv[0])
+    if resolved is None:
+        raise BackendUnavailableError(f"backend executable 找不到：{argv[0]}")
+    return [os.path.abspath(resolved), *argv[1:]]
+
+
 # ---------------------------------------------------------------- init
 
 def _write_if_absent(path: Path, content: str, *, force: bool = False) -> bool:
@@ -56,10 +74,17 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）
     override = paths.config_path("atomizer.override.yaml")
     if backend == "claude-headless":
+        try:
+            argv = resolve_backend_argv(["claude", "-p"])
+        except BackendUnavailableError as exc:
+            print(f"init: {exc}（請先安裝 claude CLI，或改用 --backend openai-compatible/custom-argv）",
+                  file=sys.stderr)
+            return 2
         override_body = (
             "schema_version: \"1\"\n"
             "agent_exec:\n"
-            "  command:\n    - claude\n    - -p\n"
+            "  command:\n"
+            + "".join(f"    - {token}\n" for token in argv)
             + (f"  model: {model}\n" if model else "")
         )
     elif backend == "openai-compatible":

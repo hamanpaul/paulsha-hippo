@@ -22,7 +22,8 @@ class InitTests(unittest.TestCase):
                 "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
                 "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
             }
-            with mock.patch.dict("os.environ", env):
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
                     base_url=None, api_key_env=None, model=None, assume_yes=True,
@@ -32,8 +33,27 @@ class InitTests(unittest.TestCase):
             self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
             body = override.read_text(encoding="utf-8")
-            self.assertIn("- claude", body)
+            # #15：argv[0] 絕對路徑化——systemd 環境沒有 NVM PATH，裸命令找不到
+            self.assertIn("- /fake/bin/claude", body)
             self.assertIn("- -p", body)
+            self.assertNotIn("\n    - claude\n", body)
+
+    def test_init_claude_headless_fails_when_backend_missing(self):
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops.shutil, "which", return_value=None):
+                rc = ops.run_init(
+                    memory_root=None, backend="claude-headless",
+                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                )
+            self.assertEqual(rc, 2)
+            override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
+            self.assertFalse(override.exists())
 
     def test_init_openai_compatible_requires_base_url(self):
         rc = ops.run_init(memory_root=None, backend="openai-compatible",
@@ -49,6 +69,26 @@ class InitTests(unittest.TestCase):
                 ops.run_init(memory_root="/x", backend="custom-argv",
                              base_url=None, api_key_env=None, model=None, assume_yes=False)
             self.assertIn("/keep/me", cfg.read_text(encoding="utf-8"))
+
+
+class ResolveBackendArgvTests(unittest.TestCase):
+    def test_resolves_bare_command_to_absolute(self):
+        with mock.patch.object(ops.shutil, "which", return_value="/usr/bin/claude"):
+            self.assertEqual(
+                ops.resolve_backend_argv(["claude", "-p"]), ["/usr/bin/claude", "-p"]
+            )
+
+    def test_missing_command_raises_backend_unavailable(self):
+        with mock.patch.object(ops.shutil, "which", return_value=None):
+            with self.assertRaises(ops.BackendUnavailableError):
+                ops.resolve_backend_argv(["nope-cmd"])
+
+    def test_error_is_value_error_subclass(self):
+        self.assertTrue(issubclass(ops.BackendUnavailableError, ValueError))
+
+    def test_empty_argv_raises(self):
+        with self.assertRaises(ops.BackendUnavailableError):
+            ops.resolve_backend_argv([])
 
 
 class DoctorTests(unittest.TestCase):
