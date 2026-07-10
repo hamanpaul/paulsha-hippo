@@ -283,6 +283,15 @@ def _build_parser() -> argparse.ArgumentParser:
     requeue_p.add_argument("--now", default=None)
     requeue_p.set_defaults(func=_requeue)
 
+    recall_p = memory_subparsers.add_parser(
+        "recall", help="任務相關記憶 shortlist（跨 CLI consumer API；記 offered，含 tool 歸因）")
+    recall_p.add_argument("--memory-root", default=str(paths.memory_root()))
+    recall_p.add_argument("--cwd", default=None)
+    recall_p.add_argument("--prompt", required=True)
+    recall_p.add_argument("--tool", required=True)
+    recall_p.add_argument("--session-id", required=True)
+    recall_p.set_defaults(func=_recall)
+
     return parser
 
 
@@ -692,6 +701,17 @@ def _memory_usage(args: argparse.Namespace) -> int:
         for s in slices[:30]:
             print(f"  {s['slice_id']}  offered={s['offered_count']} "
                   f"read={s['read_count']} last_read={s['last_read']}")
+    return 0
+
+
+def _recall(args: argparse.Namespace) -> int:
+    """跨 CLI consumer API：重用 prompt-time shortlist 管線（best-effort，恆 exit 0）。"""
+    from .hooks._shortlist_common import build_shortlist_and_record
+
+    block = build_shortlist_and_record(
+        Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt)
+    if block:
+        print(block)
     return 0
 
 
