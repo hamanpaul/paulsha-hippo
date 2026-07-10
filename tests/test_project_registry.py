@@ -1,5 +1,9 @@
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -217,6 +221,65 @@ class RecordDiscoveryTests(_ScratchDirTestCase):
             )
         parsed = parse_registry(path.read_text(encoding="utf-8"))
         self.assertEqual([project.slug for project in parsed], sorted(slugs))
+
+
+class CrashRecoveryTests(_ScratchDirTestCase):
+    def test_interrupted_replace_keeps_previous_bytes_and_recovers(self):
+        path = self.root / "project-hippo.yaml"
+        record_discovery(slug="alpha", roots=("/data/a",), registry_path=path)
+        before = path.read_bytes()
+        with mock.patch(
+            "paulsha_hippo.importer.registry.os.replace",
+            side_effect=OSError("simulated crash"),
+        ):
+            with self.assertRaises(OSError):
+                record_discovery(slug="beta", roots=("/data/b",), registry_path=path)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(record_discovery(slug="beta", roots=("/data/b",), registry_path=path))
+        slugs = [project.slug for project in parse_registry(path.read_text(encoding="utf-8"))]
+        self.assertEqual(slugs, ["alpha", "beta"])
+
+    def test_sigkill_mid_write_leaves_complete_canonical_file(self):
+        path = self.root / "project-hippo.yaml"
+        record_discovery(slug="crash-proj", roots=("/data/crash/seed",), registry_path=path)
+        child_code = textwrap.dedent(
+            """
+            import sys
+            from paulsha_hippo.importer.registry import record_discovery
+
+            registry_path = sys.argv[1]
+            index = 0
+            while True:
+                index += 1
+                record_discovery(
+                    slug="crash-proj",
+                    roots=(f"/data/crash/root-{index:06d}",),
+                    registry_path=registry_path,
+                )
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(path)],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.4)
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+        text = path.read_text(encoding="utf-8")
+        parsed = parse_registry(text)
+        self.assertEqual([project.slug for project in parsed], ["crash-proj"])
+        self.assertGreaterEqual(len(parsed[0].roots), 1)
+        # canonical 自洽：任何殘缺（torn write）都會使 render(parse(x)) != x
+        self.assertEqual(render_registry(parsed), text)
+        names = {item.name for item in self.root.iterdir()}
+        self.assertLessEqual(
+            names,
+            {"project-hippo.yaml", ".project-hippo.yaml.lock", ".project-hippo.yaml.tmp"},
+        )
 
 
 if __name__ == "__main__":

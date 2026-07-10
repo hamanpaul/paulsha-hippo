@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fcntl
 import logging
+import os
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -221,7 +222,9 @@ def record_discovery(
             rendered = render_registry(merge_discovery(existing, incoming))
             if existing_text == rendered:
                 return False
-            path.write_text(rendered, encoding="utf-8")
+            tmp_path = path.with_name(TMP_FILENAME)
+            tmp_path.write_text(rendered, encoding="utf-8")
+            os.replace(tmp_path, path)
             return True
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
