@@ -675,7 +675,9 @@ def _memory_usage(args: argparse.Namespace) -> int:
         return out
 
     offered_rows = _read_jsonl(led / "offered.jsonl")
-    used_rows = [e for e in _read_jsonl(led / "memory_usage.jsonl") if e.get("source") == "read"]
+    usage_rows = _read_jsonl(led / "memory_usage.jsonl")
+    used_rows = [e for e in usage_rows if e.get("source") == "read"]
+    applied_rows = [e for e in usage_rows if e.get("kind") == "applied"]
 
     agg = defaultdict(lambda: {"offered_count": 0, "read_count": 0, "last_read": ""})
     sessions = set()
@@ -695,6 +697,25 @@ def _memory_usage(args: argparse.Namespace) -> int:
         if ts > agg[sid]["last_read"]:
             agg[sid]["last_read"] = ts
 
+    def _tool_key(e) -> str:
+        return str(e.get("tool") or "(unknown)")
+
+    by_tool: dict[str, dict] = {}
+    for e in offered_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["offered"] += len(e.get("offered", []))
+    for e in used_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["read"] += 1
+    applied_tools: set[str] = set()
+    for e in applied_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["applied"] += 1
+        applied_tools.add(_tool_key(e))
+    for name, t in by_tool.items():
+        if name not in applied_tools:
+            t["applied"] = None  # 該 tool 無任何 applied 訊號 → n/a（不以內容猜測補值）
+
     slices = [{"slice_id": sid, **v} for sid, v in agg.items()]
     slices.sort(key=lambda s: (s["read_count"], s["offered_count"]), reverse=True)
     never_read = sum(1 for s in slices if s["offered_count"] > 0 and s["read_count"] == 0)
@@ -705,7 +726,9 @@ def _memory_usage(args: argparse.Namespace) -> int:
         "total_reads": total_reads,
         "avg_reads_per_session": round(total_reads / n, 3) if n else 0.0,
     }
-    report = {"summary": summary, "slices": slices}
+    report = {"summary": summary,
+              "by_tool": {k: by_tool[k] for k in sorted(by_tool)},
+              "slices": slices}
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
@@ -713,6 +736,10 @@ def _memory_usage(args: argparse.Namespace) -> int:
         print(f"sessions={summary['sessions']} slices={summary['slices']} "
               f"never_read={summary['never_read']} total_reads={summary['total_reads']} "
               f"avg_reads/session={summary['avg_reads_per_session']}")
+        for name in sorted(by_tool):
+            t = by_tool[name]
+            applied_disp = "n/a" if t["applied"] is None else str(t["applied"])
+            print(f"  tool={name} offered={t['offered']} read={t['read']} applied={applied_disp}")
         for s in slices[:30]:
             print(f"  {s['slice_id']}  offered={s['offered_count']} "
                   f"read={s['read_count']} last_read={s['last_read']}")
