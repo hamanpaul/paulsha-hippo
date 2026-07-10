@@ -14,18 +14,43 @@ from typing import Any
 VALID_STATES = {"split", "promoted", "skipped", "parked"}
 PARKED_FAILURE_CATEGORIES = {"backend_unavailable", "transient", "invalid_output"}
 _ERROR_TEXT_MAX_CHARS = 500
+_REDACTION_FAILED_PLACEHOLDER = "[REDACTION UNAVAILABLE: text withheld]"
+
+
+def redact_secret_text(text: str) -> str:
+    """套用 repo 既有 policy secret redaction 規則（fail-closed）。
+
+    命中 credential（GitHub PAT／Bearer token／OpenAI・Anthropic key 等
+    `policy/secrets.yaml` 規則）的行整行以 `[REDACTED LINE: <rule> xN]` 佔位
+    （沿用 `policy.redact_lines` 既有語意）。redaction 機制本身失效（policy
+    載入／regex 錯誤）時整段以 placeholder 取代——秘密永不落 ledger／evidence。
+    """
+    try:
+        from paulsha_hippo.policy import load_policy, redact_lines
+
+        return redact_lines(
+            str(text),
+            policy=load_policy(),
+            session_ref=None,
+            boundary="raw_to_distilled",
+        ).text
+    except Exception:  # noqa: BLE001 —fail-closed：任何失敗都不得回傳原文
+        return _REDACTION_FAILED_PLACEHOLDER
 
 
 def sanitize_error_text(text: str, limit: int = _ERROR_TEXT_MAX_CHARS) -> str:
-    """Bounded、去敏的錯誤文字：壓平 whitespace、遮蔽 home 前綴、截斷。
+    """Bounded、去敏的錯誤文字：壓平 whitespace、遮蔽 home 前綴、secret
+    redaction（fail-closed）、截斷。
 
-    parked 事件與 dream orchestrator 的 error 欄位共用（契約：≤500 字元、去敏）。
+    parked 事件與 dream orchestrator 的 error 欄位共用（契約：≤500 字元、去敏、
+    無 credential）。redaction 必須先於截斷：先截斷可能把 token 斬半、令 pattern
+    失配而留下敏感前綴。
     """
     collapsed = " ".join(str(text).split())
     home = str(Path.home())
     if home and home != "/":
         collapsed = collapsed.replace(home, "~")
-    return collapsed[:limit]
+    return redact_secret_text(collapsed)[:limit]
 
 
 class ProcessingLedgerError(Exception):

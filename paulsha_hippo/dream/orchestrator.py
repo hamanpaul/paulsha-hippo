@@ -57,8 +57,10 @@ def _run_pass(
 
     if isinstance(warnings, list) and warnings:
         summary = dict(summary)
+        # 警告會持久化進 dream ledger：與 error_message 同等去敏（secret redaction、
+        # fail-closed），不得留 credential 副本。
         summary["warnings"] = [
-            str(warning)[:_WARNING_TEXT_MAX_CHARS]
+            processing_ledger.sanitize_error_text(warning, limit=_WARNING_TEXT_MAX_CHARS)
             for warning in warnings[:_WARNINGS_RECORDED_MAX]
         ]
         summary["warnings_total"] = len(warnings)

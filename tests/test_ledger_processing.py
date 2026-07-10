@@ -173,6 +173,56 @@ class TestSanitizeErrorText(unittest.TestCase):
         self.assertNotIn("\n", out)
         self.assertNotIn("\t", out)
 
+    # #15 review F1：含 credential 的例外訊息不得原文落 ledger/evidence——
+    # 必須套用 repo 既有 policy secret redaction 規則（policy/secrets.yaml）。
+    _SECRET_SAMPLES = {
+        "github_pat": "ghp_" + "A1b2C3d4" * 5,
+        "github_fine_grained": "github_pat_" + "A1b2C3d4" * 5,
+        "openai_key": "sk-" + "a1B2c3D4" * 4,
+        "anthropic_key": "sk-ant-" + "a1B2c3D4" * 4,
+        "aws_access_key": "AKIA" + "ABCDEFGHIJKLMNOP",
+        "bearer_token": "Authorization: Bearer xyzzy-token-123456",
+        "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXBhcnQ",
+    }
+
+    def test_credentials_are_redacted_not_persisted(self):
+        for name, secret in self._SECRET_SAMPLES.items():
+            with self.subTest(rule=name):
+                out = processing.sanitize_error_text(f"HTTP 401 calling backend: {secret} rejected")
+                self.assertNotIn(secret, out)
+                # bearer 樣本的 token 部分也不得殘留
+                self.assertNotIn("xyzzy-token-123456", out)
+                self.assertIn("REDACTED", out)
+
+    def test_redaction_happens_before_truncation(self):
+        # token 若先被截斷斬半，pattern 失配會留下敏感前綴——redaction 必須先行
+        secret = "ghp_" + "Z9y8X7w6" * 5
+        out = processing.sanitize_error_text(("x" * 490) + " " + secret, limit=500)
+        self.assertNotIn("ghp_", out)
+        self.assertLessEqual(len(out), 500)
+
+    def test_redaction_fail_closed_returns_placeholder(self):
+        # redaction 機制本身失效（policy 載入失敗）→ 整段以 placeholder 取代，
+        # 原文（可能含 credential）絕不落地
+        secret = "ghp_" + "A1b2C3d4" * 5
+        with mock.patch(
+            "paulsha_hippo.policy.load_policy",
+            side_effect=RuntimeError("policy files unreadable"),
+        ):
+            out = processing.sanitize_error_text(f"boom {secret}")
+        self.assertNotIn(secret, out)
+        self.assertNotIn("boom", out)
+        self.assertEqual(out, processing._REDACTION_FAILED_PLACEHOLDER)
+
+    def test_redact_secret_text_keeps_clean_lines_in_multiline_text(self):
+        secret = "sk-ant-" + "a1B2c3D4" * 4
+        raw = f"line one is clean\napi_key = {secret}\nline three is clean"
+        out = processing.redact_secret_text(raw)
+        self.assertNotIn(secret, out)
+        self.assertIn("line one is clean", out)
+        self.assertIn("line three is clean", out)
+        self.assertIn("REDACTED", out)
+
 
 if __name__ == "__main__":
     unittest.main()

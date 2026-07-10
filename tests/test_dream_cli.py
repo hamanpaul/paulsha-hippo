@@ -166,6 +166,24 @@ class DreamCliTests(unittest.TestCase):
             self.assertEqual(payload.get("skipped"), "dream lock held by another process")
             self.assertIsNone(dream.last_run(root))
 
+    def test_dream_run_propagates_non_contention_lock_error(self):
+        # review F4：ENOLCK 等非 contention 錯誤不得被當成「another process」exit 0——
+        # 必須上拋讓 dream 非零收場，故障可觀測。
+        import errno
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed(root)
+            with patch(
+                "paulsha_hippo.dream.cli.dream_lock.acquire_dream_lock",
+                side_effect=OSError(errno.ENOLCK, "no locks available"),
+            ):
+                with self.assertRaises(OSError) as ctx:
+                    cli.main(["dream", "run", "--memory-root", str(root),
+                              "--now", "2026-07-10T00:00:00Z"])
+            self.assertEqual(ctx.exception.errno, errno.ENOLCK)
+            self.assertIsNone(dream.last_run(root))
+
     def test_dream_run_releases_lock_after_run(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

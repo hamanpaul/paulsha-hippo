@@ -177,6 +177,46 @@ def _service_effective_path_env() -> str:
     return "/usr/local/bin:/usr/bin:/bin"
 
 
+_PROBE_TIMEOUT_SECS = 10
+
+
+def _exec_probe_service_effective(command: list[str], service_path: str,
+                                  *, runner=subprocess.run) -> tuple[bool, str]:
+    """在 service-effective PATH 下「實際執行」完整 backend argv。回傳 (ok, 說明)。
+
+    只驗 argv[0] 的 is_file()+executable bit 會漏掉 interpreter／shebang 斷鏈
+    （例：`/usr/bin/env node` 之下 node 不在 service PATH、或
+    `('/usr/bin/env', 'definitely-no-such-runtime')`），造成 doctor 綠燈但
+    service 實跑必敗（recovery gate 誤判 → requeue 再入失敗鏈）。判定：
+    exec 失敗（ENOENT／EACCES 等）與 exit 126/127（not executable／command
+    not found，含 env 的子命令缺失）→ FAIL；timeout 或其他 exit code 代表
+    exec 鏈已啟動 → PASS。stdin 關閉、受限 timeout，probe 不做實際工作。
+    """
+    env = {**os.environ, "PATH": service_path}
+    try:
+        completed = runner(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        return True, f"{_PROBE_TIMEOUT_SECS}s 內未退出（exec 鏈已啟動）"
+    except FileNotFoundError:
+        return False, "exec 失敗：檔案或 shebang interpreter 不存在"
+    except PermissionError:
+        return False, "exec 失敗：無執行權限"
+    except OSError as exc:
+        return False, f"exec 失敗：{exc}"
+    if completed.returncode in (126, 127):
+        stderr_tail = " ".join(str(completed.stderr or "").split())[:200]
+        return False, (f"exit {completed.returncode}"
+                       f"（command not found / not executable）：{stderr_tail}")
+    return True, f"exit {completed.returncode}"
+
+
 def _probe_backend_service_effective() -> tuple[str, bool]:
     """以 service-effective 環境驗證 atomizer backend 可執行。回傳 (報告行, is_failure)。
 
@@ -195,17 +235,27 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
             "probe 由 PR-D preset 接手）",
             False,
         )
-    command = atomizer_config.resolve_command_argv(cfg.agent_exec_command)
+    command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
-    if Path(argv0).is_absolute():
-        ok = Path(argv0).is_file() and os.access(argv0, os.X_OK)
-    else:
-        ok = shutil.which(argv0, path=_service_effective_path_env()) is not None
+    service_path = _service_effective_path_env()
+    if not Path(argv0).is_absolute():
+        resolved = shutil.which(argv0, path=service_path)
+        if resolved is None:
+            return (
+                f"FAIL distiller backend：{argv0} 在 service-effective 環境解析不到"
+                "（hippo doctor --fix-backend 可嘗試自動遷移）",
+                True,
+            )
+        command[0] = resolved
+    ok, detail = _exec_probe_service_effective(command, service_path)
     if ok:
-        return f"- distiller backend：✓ {argv0}（service-effective 可執行）", False
+        return (
+            f"- distiller backend：✓ {command[0]}（service-effective 實測可執行；{detail}）",
+            False,
+        )
     return (
-        f"FAIL distiller backend：{argv0} 在 service-effective 環境解析不到"
-        "（hippo doctor --fix-backend 可嘗試自動遷移）",
+        f"FAIL distiller backend：{' '.join(command)} 在 service-effective 環境無法執行"
+        f"（{detail}；hippo doctor --fix-backend 可嘗試自動遷移）",
         True,
     )
 

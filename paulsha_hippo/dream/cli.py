@@ -77,13 +77,43 @@ def _run(args: argparse.Namespace) -> int:
             )
             return 0
 
-        atom_cfg, atom_hash = atomizer_config.load_config()
-        jan_cfg, jan_hash = janitor_config.load_config()
-        promoter = atomizer_cli._build_promoter(args, atom_cfg, memory_root)
         now = args.now
+
+        # #15 失敗鏈：config 載入與 promoter 建構是 atomize 失敗邊界的一部分，
+        # 不得逃出 run_dream 記錄邊界（否則無 failure category／evidence／dream
+        # error record，timer 每輪重複整輪失敗）。初始化失敗分類為
+        # backend_unavailable：eligible split sessions 立即 park（含證據），
+        # 失敗本身由 run_dream 記為 dream error record。
+        atom_error: Exception | None = None
+        atom_cfg = None
+        atom_hash = ""
+        promoter = None
+        try:
+            atom_cfg, atom_hash = atomizer_config.load_config()
+            promoter = atomizer_cli._build_promoter(args, atom_cfg, memory_root)
+        except Exception as exc:  # noqa: BLE001 —初始化失敗需入 park 鏈並被記錄
+            atom_error = exc
+
+        jan_error: Exception | None = None
+        jan_cfg = None
+        jan_hash = ""
+        try:
+            jan_cfg, jan_hash = janitor_config.load_config()
+        except Exception as exc:  # noqa: BLE001 —同上：janitor config 失敗也要入記錄邊界
+            jan_error = exc
+
         doc_corpus = corpus_for_roots(getattr(args, "instruction_root", None))
 
         def atomize_fn() -> dict[str, object]:
+            if atom_error is not None:
+                if not args.dry_run:
+                    atomizer_pipeline.park_split_sessions(
+                        memory_root,
+                        error_text=str(atom_error),
+                        now=now,
+                        config_hash=atom_hash or "unavailable",
+                    )
+                raise atom_error
             return atomizer_pipeline.run(
                 memory_root,
                 config=atom_cfg,
@@ -95,6 +125,8 @@ def _run(args: argparse.Namespace) -> int:
             )
 
         def janitor_fn() -> dict[str, object]:
+            if jan_error is not None:
+                raise jan_error
             # In the dream/service context the provenance source repos are usually
             # not checked out at the run CWD, so a CWD-relative path probe gives
             # false negatives and would spuriously decay freshly atomized knowledge.
@@ -126,7 +158,10 @@ def _run(args: argparse.Namespace) -> int:
             janitor_fn=janitor_fn,
             moc_fn=moc_fn,
             now=now,
-            config_hash=f"{atom_hash[:8]}:{jan_hash[:8]}",
+            config_hash=(
+                f"{atom_hash[:8] if atom_hash else 'invalid'}"
+                f":{jan_hash[:8] if jan_hash else 'invalid'}"
+            ),
             dry_run=args.dry_run,
         )
         print(json.dumps(result, sort_keys=True, indent=2))

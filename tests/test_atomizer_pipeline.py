@@ -1426,5 +1426,130 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertEqual(result["summary"]["split_sessions"], 0)
 
 
+class ParkEvidenceRedactionTests(unittest.TestCase):
+    """#15 review F1：parked 證據與 processing ledger 不得留 credential 副本。"""
+
+    def test_park_session_redacts_error_and_last_output_excerpt(self):
+        secret_err = "ghp_" + "A1b2C3d4" * 5
+        secret_out = "sk-ant-" + "a1B2c3D4" * 4
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_key = "claude:s1__" + "a" * 64
+            cache_dir = root / "runtime" / "cache" / "atomize"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / f"{cache_key}.json").write_text(
+                f"model chatter\napi_key = {secret_out}\ntail line",
+                encoding="utf-8",
+            )
+
+            pipeline._park_session(
+                root, session_key="claude:s1", category="backend_unavailable",
+                attempts=0, cache_key=cache_key,
+                error_text=f"HTTP 401: Authorization: Bearer {secret_err}",
+                now="2026-07-10T00:00:00Z", config_hash="h",
+            )
+
+            evidence_path = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertNotIn(secret_err, evidence["error"])
+            self.assertIn("REDACTED", evidence["error"])
+            self.assertNotIn(secret_out, evidence["last_output_excerpt"])
+            self.assertIn("REDACTED", evidence["last_output_excerpt"])
+            # 乾淨行保留（line-level redaction 不整段清空）
+            self.assertIn("model chatter", evidence["last_output_excerpt"])
+            self.assertIn("tail line", evidence["last_output_excerpt"])
+
+            ledger_blob = processing.processing_path(root).read_text(encoding="utf-8")
+            self.assertNotIn(secret_err, ledger_blob)
+            self.assertNotIn(secret_out, ledger_blob)
+
+    def test_promote_failure_with_credential_never_lands_anywhere(self):
+        secret = "ghp_" + "Q9w8E7r6" * 5
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            inner = ScriptedAgentClient([
+                agent_exec.AgentUnavailableError(
+                    f"backend rejected: Authorization: Bearer {secret}"
+                ),
+            ])
+            cached = agent_exec.CachingAgentClient(
+                inner, root / "runtime" / "cache" / "atomize"
+            )
+            promoter = llm_promoter.LLMPromoter(
+                cached, skill_text="REDACT-SKILL",
+                known_projects=["paulshaclaw"], model="fake-llm",
+            )
+
+            result = pipeline.run(root, config=cfg, config_hash=h,
+                                  now="2026-07-10T00:00:00Z", promoter=promoter)
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            ledger_blob = processing.processing_path(root).read_text(encoding="utf-8")
+            self.assertNotIn(secret, ledger_blob)
+            evidence_path = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            self.assertNotIn(secret, evidence_path.read_text(encoding="utf-8"))
+            # pipeline warnings 進 dream ledger／journald：同樣不得殘留
+            self.assertFalse(any(secret in warning for warning in result["warnings"]))
+
+
+class ParkSplitSessionsTests(unittest.TestCase):
+    """#15 review F2：atomizer 初始化失敗時 eligible split sessions 立即 park。"""
+
+    def test_parks_only_split_sessions_with_evidence(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            processing.append_state(root, session_key="claude:a", state="split",
+                                    now="2026-07-10T00:00:00Z", config_hash="h")
+            processing.append_state(root, session_key="claude:b", state="promoted",
+                                    now="2026-07-10T00:00:01Z", config_hash="h")
+            processing.append_state(root, session_key="codex:c", state="split",
+                                    now="2026-07-10T00:00:02Z", config_hash="h")
+            processing.append_state(root, session_key="claude:d", state="parked",
+                                    now="2026-07-10T00:00:03Z", config_hash="h",
+                                    failure_category="transient", attempts=6,
+                                    cache_key="", error="old")
+
+            parked = pipeline.park_split_sessions(
+                root, error_text="atomizer config invalid: agent_exec.command must be list",
+                now="2026-07-10T01:00:00Z", config_hash="unavailable",
+            )
+
+            self.assertEqual(parked, ["claude:a", "codex:c"])
+            self.assertEqual(processing.state_of(root, "claude:a"), "parked")
+            self.assertEqual(processing.state_of(root, "codex:c"), "parked")
+            self.assertEqual(processing.state_of(root, "claude:b"), "promoted")
+            event = processing.fold_events(root)["claude:a"]
+            self.assertEqual(event["failure_category"], "backend_unavailable")
+            self.assertEqual(event["attempts"], 0)
+            self.assertIn("agent_exec.command must be list", event["error"])
+            for name in ("claude__a.json", "codex__c.json"):
+                self.assertTrue(
+                    (root / "runtime" / "queue" / "_failed" / name).exists()
+                )
+
+    def test_second_call_is_noop_for_already_parked(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            processing.append_state(root, session_key="claude:a", state="split",
+                                    now="2026-07-10T00:00:00Z", config_hash="h")
+            first = pipeline.park_split_sessions(
+                root, error_text="boom", now="2026-07-10T01:00:00Z",
+                config_hash="unavailable",
+            )
+            second = pipeline.park_split_sessions(
+                root, error_text="boom", now="2026-07-10T02:00:00Z",
+                config_hash="unavailable",
+            )
+            self.assertEqual(first, ["claude:a"])
+            self.assertEqual(second, [])
+            parked_events = [
+                event for event in processing.read_events(root)
+                if event.get("state") == "parked"
+            ]
+            self.assertEqual(len(parked_events), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

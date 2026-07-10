@@ -161,6 +161,41 @@ class DoctorBackendProbeTests(unittest.TestCase):
         with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
             self.assertEqual(ops._service_effective_path_env(), "/usr/local/bin:/usr/bin:/bin")
 
+    def _doctor_with_command(self, command: tuple[str, ...]) -> int:
+        cfg = self._fake_cfg(agent_exec_command=command)
+        with mock.patch.dict("os.environ", self._ENV), \
+             mock.patch("paulsha_hippo.atomizer.config.load_config",
+                        return_value=(cfg, "h")), \
+             mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
+                        side_effect=lambda command: tuple(command)), \
+             mock.patch.object(ops, "_service_effective_path_env",
+                               return_value="/usr/bin:/bin"):
+            return ops.run_doctor()
+
+    def test_probe_fails_when_env_child_runtime_missing(self):
+        # review F3 反例：argv[0]（/usr/bin/env）is_file()+X_OK 全過，但實跑 exit 127。
+        # 只驗 argv[0] 的舊 probe 在此錯誤綠燈 → recovery gate 誤判 → requeue 再入失敗鏈。
+        self.assertEqual(
+            self._doctor_with_command(("/usr/bin/env", "definitely-no-such-runtime")),
+            1,
+        )
+
+    def test_probe_fails_when_shebang_interpreter_missing(self):
+        # argv[0] 存在且有 executable bit，但 shebang interpreter 缺失（#15 NVM 根因形狀）
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text("#!/no/such/interpreter-xyz\n", encoding="utf-8")
+            exe.chmod(0o755)
+            self.assertEqual(self._doctor_with_command((str(exe), "-p")), 1)
+
+    def test_probe_passes_on_nonzero_business_exit(self):
+        # exec 鏈可用、程式自身非零退出（非 126/127）→ 不是 backend 缺失，PASS
+        self.assertEqual(self._doctor_with_command(("/bin/sh", "-c", "exit 3")), 0)
+
+    def test_probe_timeout_counts_as_executable(self):
+        with mock.patch.object(ops, "_PROBE_TIMEOUT_SECS", 0.2):
+            self.assertEqual(self._doctor_with_command(("/bin/sleep", "5")), 0)
+
 
 class InstallServiceTests(unittest.TestCase):
     def test_installs_renamed_units_when_systemd_available(self):

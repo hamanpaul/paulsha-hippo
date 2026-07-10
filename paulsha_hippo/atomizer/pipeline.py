@@ -148,14 +148,21 @@ def _park_session(memory_root: Path, *, session_key: str, category: str, attempt
 
     ledger append 放最後當 commit point：中途 crash 只會多一次 bounded 重試（fail-open），
     不會留下「已 parked 但毒快取還在」的半套狀態。
+
+    去敏是本函式的職責（單一 choke point）：error 與 last_output_excerpt 落盤前
+    一律套用 policy secret redaction（fail-closed），caller 忘了先 sanitize 也不漏。
     """
+    error_text = processing.sanitize_error_text(error_text)
     cache_path = _cache_path(memory_root, cache_key)
     excerpt = ""
     if cache_path is not None and cache_path.exists():
         try:
-            excerpt = cache_path.read_text(encoding="utf-8")[:_EVIDENCE_EXCERPT_MAX_CHARS]
+            excerpt = cache_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             excerpt = ""
+    if excerpt:
+        # redaction 先於截斷：先截斷可能把 token 斬半、令 pattern 失配而留下敏感前綴
+        excerpt = processing.redact_secret_text(excerpt)[:_EVIDENCE_EXCERPT_MAX_CHARS]
     evidence = {
         "session_key": session_key,
         "failure_category": category,
@@ -182,6 +189,32 @@ def _park_session(memory_root: Path, *, session_key: str, category: str, attempt
         cache_key=cache_key,
         error=error_text,
     )
+
+
+def park_split_sessions(memory_root: Path, *, error_text: str, now: str,
+                        config_hash: str,
+                        category: str = "backend_unavailable") -> list[str]:
+    """#15 失敗鏈：atomizer 初始化即失敗（config 無效／promoter 建構失敗）時，
+    把 eligible（state == split）sessions 立即 park（含證據落盤）。
+
+    spec 契約「config 無效立即 parked」——否則 pending session 卡在 split、
+    無 failure category／evidence，timer 每輪重複整輪失敗。回傳被 park 的
+    session keys（排序後，決定性）。
+    """
+    parked: list[str] = []
+    for session_key, state in sorted(processing.fold_states(memory_root).items()):
+        if state != "split":
+            continue
+        agent, _, session = session_key.partition(":")
+        if not all(is_safe_path_component(value) for value in (agent, session)):
+            continue
+        _park_session(
+            memory_root, session_key=session_key, category=category,
+            attempts=0, cache_key="", error_text=error_text,
+            now=now, config_hash=config_hash,
+        )
+        parked.append(session_key)
+    return parked
 
 
 def _handle_promote_failure(
@@ -486,7 +519,11 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
             try:
                 promoted = _promote_fragments(promoter, fragments, config)
             except PromoteError as exc:
-                warnings.append(f"{session_key}: {exc}; session {session_key} left in split")
+                # 警告文字會進 dream ledger／journald：例外訊息一律先去敏
+                warnings.append(
+                    f"{session_key}: {processing.sanitize_error_text(str(exc))}; "
+                    f"session {session_key} left in split"
+                )
                 continue
             has_error = False
             for slice_ in promoted:
@@ -556,7 +593,10 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
                 config_hash=config_hash,
             )
             outcome = "parked" if parked else "left in split"
-            warnings.append(f"{session_key}: {exc}; session {session_key} {outcome}{note}")
+            warnings.append(
+                f"{session_key}: {processing.sanitize_error_text(str(exc))}; "
+                f"session {session_key} {outcome}{note}"
+            )
             continue
 
         # Phase 2: Validate all slices before any writes
