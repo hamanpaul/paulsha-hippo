@@ -19,6 +19,10 @@
 - `paulsha_hippo/dream/lock.py`：global dream lock（`dream_lock_path`／`acquire_dream_lock`），PR-C doctor 引用同一路徑。
 - `paulsha_hippo/ops.py`：`resolve_backend_argv` + `BackendUnavailableError`（PR-D preset registry 重用）。
 - `hippo locks cleanup-legacy --memory-root <root> [--apply]`：legacy per-session lock 檔一次性清理；預設 dry-run，apply 受三層安全閘保護——(1) 路徑閘：`runtime/locks` 逐層 `O_NOFOLLOW` 驗證＋dir_fd 相對列舉／unlink，locks 為 symlink 時拒絕（`unsafe_locks_dir`），杜絕經 symlink 刪到 memory_root 外部檔案；(2) 進程閘：`/proc` 掃描回傳 `scan_ok`，掃描失敗（proc 無法列舉、非 Linux、hidepid 的 EACCES）或偵測到其他 hippo 進程即拒絕（fail-closed，不把空清單當已淨空）；(3) 名稱閘：正向辨識歷史 per-session 命名（由 idempotency key 公式反推）才歸 legacy，未知命名 `.lock` 一律歸 `unknown`、保留並拒絕 --apply。通過後逐檔 flock 探測跳過 busy。僅供恢復序列維護窗口使用（#19）
+- `hippo recall`：跨 CLI consumer API——以 prompt 檢索任務相關 shortlist 並記 `offered`（含 `--tool` 歸因），供無 prompt-time hook 的平台顯式呼叫（#17）。
+- `hippo usage mark-applied`：applied 顯式訊號（agent structured acknowledgement）——ledger 事件 `{"kind":"applied","session_id","slice_id","tool","ts"}`；寫入前反查 `offered.jsonl` 做參照完整性驗證（無對應 offer 即拒寫，防偽造事件污染漏斗遙測）；shortlist 尾行注入回報指引（#18）。
+- `hippo usage` 報表新增 per-tool `offered / read / applied` 分列；`applied` 無訊號時顯示 `n/a`，不做內容 substring 猜測（#18）。
+- codex / copilot SessionStart 改注入顯式 recall 指引（不假裝 orientation 等同 task retrieval）；跨 CLI 能力矩陣（官方文件＋本機 probe 實測）落 `docs/cross-cli-capability-matrix.md`（#17）。
 
 ### Changed
 - dream systemd timer 排程改為 `OnCalendar=hourly`，並保留 `Persistent=true`。
@@ -53,6 +57,7 @@
 ### Security
 - parked／dream ledger 去敏升級（#15 review）：`sanitize_error_text`、`_failed` 證據（`error`／`last_output_excerpt`）與 dream record warnings 落盤前套用 policy 既有 secret redaction（GitHub PAT／Bearer／OpenAI・Anthropic／AWS key／JWT 等），且 redaction 先於截斷；redaction 機制失效時 fail-closed 以 placeholder 取代——credential 不落任何持久化副本。
 - 持久化 scrub 不可被 override 弱化（#15 Codex 複驗）：`redact_secret_text` 改以 `load_policy(override_path=None)` 載入 immutable baseline 規則——使用者 `policy.override.yaml` 的 `disable_rules`／`disable_rules_for_session` 只影響蒸餾管線，不再能停用持久化出口的強制去敏（先前 `disable_rules: [github_pat]` 會讓 PAT 原文落 `_failed/*.json`／processing.jsonl／dream.jsonl）；補 sanitize＋三持久化出口的全域停用情境回歸測試。
+- 文件漂移：`hippo usage` 實際同時讀 `offered.jsonl` 與 `memory_usage.jsonl`，openspec telemetry spec 誤稱「僅讀 memory_usage.jsonl」——以實作為準修正（含 `psc memory`→`hippo`、`paulshaclaw/memory/usage.py`→`paulsha_hippo/usage.py` 命名殘留）（#18）。
 
 ## [0.1.0] - 2026-07-07
 
