@@ -63,16 +63,20 @@ class HttpAgentClient(AgentClient):
     """openai-compatible 檔位：stdlib urllib 直呼 /v1/chat/completions。
 
     api_key 由 env 名解析（config 永不放值）；缺 key 時不帶 Authorization
-    （地端 ollama/vLLM 常無需驗證）。
+    （地端 ollama/vLLM 常無需驗證）。key 解析來源預設 os.environ；`env` 可
+    注入替代來源（#15 Codex B1：doctor probe 傳 service-effective manager
+    env——注入後即不回頭讀 os.environ，互動 shell 才有的 key 不得滲入判定）。
     """
 
     def __init__(self, base_url: str, model: str, *, api_key_env: str | None = None,
-                 timeout: int = 600, max_tokens: int = 8192) -> None:
+                 timeout: int = 600, max_tokens: int = 8192,
+                 env: dict | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
         self._timeout = timeout
         self._max_tokens = max_tokens
+        self._env = env
 
     def run(self, prompt: str) -> str:
         import json as _json
@@ -86,7 +90,8 @@ class HttpAgentClient(AgentClient):
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key_env:
-            key = os.environ.get(self._api_key_env, "").strip()
+            source = self._env if self._env is not None else os.environ
+            key = str(source.get(self._api_key_env, "") or "").strip()
             if key:
                 headers["Authorization"] = f"Bearer {key}"
         request = urllib.request.Request(

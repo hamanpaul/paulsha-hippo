@@ -1,10 +1,13 @@
 """第二刀元件測試：init/doctor/install service/supervise 與蒸餾 backend。"""
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -131,8 +134,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
                         return_value=(self._fake_cfg(), "h")), \
              mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
                         side_effect=lambda command: tuple(command)), \
-             mock.patch.object(ops, "_service_effective_path_env",
-                               return_value="/usr/bin:/bin"), \
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"PATH": "/usr/bin:/bin"}), \
              mock.patch.object(ops.shutil, "which", return_value=None):
             self.assertEqual(ops.run_doctor(), 1)
 
@@ -148,8 +151,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
                             return_value=(cfg, "h")), \
                  mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
                             side_effect=lambda command: tuple(command)), \
-                 mock.patch.object(ops, "_service_effective_path_env",
-                                   return_value="/usr/bin:/bin"):
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value={"PATH": "/usr/bin:/bin"}):
                 self.assertEqual(ops.run_doctor(), 0)
 
     def test_probe_openai_compatible_success_with_live_endpoint(self):
@@ -164,7 +167,9 @@ class DoctorBackendProbeTests(unittest.TestCase):
             )
             with mock.patch.dict("os.environ", self._ENV), \
                  mock.patch("paulsha_hippo.atomizer.config.load_config",
-                            return_value=(cfg, "h")):
+                            return_value=(cfg, "h")), \
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value={"PATH": "/usr/bin:/bin"}):
                 self.assertEqual(ops.run_doctor(), 0)
         finally:
             server.shutdown()
@@ -177,7 +182,9 @@ class DoctorBackendProbeTests(unittest.TestCase):
         )
         with mock.patch.dict("os.environ", self._ENV), \
              mock.patch("paulsha_hippo.atomizer.config.load_config",
-                        return_value=(cfg, "h")):
+                        return_value=(cfg, "h")), \
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"PATH": "/usr/bin:/bin"}):
             self.assertEqual(ops.run_doctor(), 1)
 
     def test_service_effective_path_falls_back_without_systemd(self):
@@ -191,8 +198,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
                         return_value=(cfg, "h")), \
              mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
                         side_effect=lambda command: tuple(command)), \
-             mock.patch.object(ops, "_service_effective_path_env",
-                               return_value="/usr/bin:/bin"):
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"PATH": "/usr/bin:/bin"}):
             return ops.run_doctor()
 
     def test_probe_fails_when_env_child_runtime_missing(self):
@@ -243,9 +250,180 @@ class DoctorBackendProbeTests(unittest.TestCase):
             )
             fake_backend.chmod(0o755)
             ok, _ = ops._exec_probe_service_effective(
-                [str(fake_backend), "-p"], "/usr/bin:/bin")
+                [str(fake_backend), "-p"], {"PATH": "/usr/bin:/bin"})
             self.assertTrue(ok)
             self.assertEqual(out.read_text(encoding="utf-8"), "1")
+
+    def _key_gated_backend(self, tmp: str, var: str) -> Path:
+        """假 backend：指定 env var 缺席即 exit 1（模擬認證必須的 API key）。"""
+        exe = Path(tmp) / "claude"
+        exe.write_text(
+            f'#!/bin/sh\nif [ -z "${{{var}}}" ]; then echo "missing {var}" >&2; exit 1; fi\n'
+            "echo ok\n",
+            encoding="utf-8",
+        )
+        exe.chmod(0o755)
+        return exe
+
+    def _doctor_with_key_gated_backend(self, exe: Path, *, shell_env: dict[str, str],
+                                       manager_env: dict[str, str] | None) -> int:
+        cfg = self._fake_cfg(agent_exec_command=(str(exe), "-p"))
+        with mock.patch.dict("os.environ", {**self._ENV, **shell_env}), \
+             mock.patch("paulsha_hippo.atomizer.config.load_config",
+                        return_value=(cfg, "h")), \
+             mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
+                        side_effect=lambda command: tuple(command)), \
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value=manager_env):
+            return ops.run_doctor()
+
+    def test_probe_fails_when_api_key_only_in_interactive_shell(self):
+        # Codex 複驗 B1 主方向：API key 只 export 在互動 shell、manager env 沒有
+        # → probe 不得誤判健康（否則 requeue 後 dream service 仍認證失敗再度 parked）。
+        with TemporaryDirectory() as tmp:
+            exe = self._key_gated_backend(tmp, "HIPPO_PROBE_FAKE_KEY")
+            self.assertEqual(
+                self._doctor_with_key_gated_backend(
+                    exe,
+                    shell_env={"HIPPO_PROBE_FAKE_KEY": "sk-shell-only"},
+                    manager_env={"PATH": "/usr/bin:/bin"},
+                ),
+                1,
+            )
+
+    def test_probe_passes_when_api_key_only_in_manager_env(self):
+        # B1 反向誤判：key 只設在 manager env（environment.d／set-environment）、
+        # 互動 shell 沒有 → 服務實際可用，probe 不得誤判故障。
+        self.assertNotIn("HIPPO_PROBE_FAKE_KEY", os.environ)
+        with TemporaryDirectory() as tmp:
+            exe = self._key_gated_backend(tmp, "HIPPO_PROBE_FAKE_KEY")
+            self.assertEqual(
+                self._doctor_with_key_gated_backend(
+                    exe,
+                    shell_env={},
+                    manager_env={"PATH": "/usr/bin:/bin",
+                                 "HIPPO_PROBE_FAKE_KEY": "sk-manager"},
+                ),
+                0,
+            )
+
+    def test_probe_fallback_marks_approximate_when_no_user_bus(self):
+        # 無 systemd user bus（CI 等）→ fallback 現行近似（os.environ + 保守 PATH），
+        # 且輸出必須明確標示「近似，非 service-effective」。
+        with TemporaryDirectory() as tmp:
+            exe = self._key_gated_backend(tmp, "HIPPO_PROBE_FAKE_KEY")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = self._doctor_with_key_gated_backend(
+                    exe,
+                    shell_env={"HIPPO_PROBE_FAKE_KEY": "sk-shell-only"},
+                    manager_env=None,
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("近似", buf.getvalue())
+            self.assertIn("非 service-effective", buf.getvalue())
+
+    def _doctor_openai_with_auth_server(self, *, shell_env: dict[str, str],
+                                        manager_env: dict[str, str] | None) -> int:
+        server = HTTPServer(("127.0.0.1", 0), _AuthRequiredHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            cfg = self._fake_cfg(
+                agent_exec_backend="openai-compatible",
+                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
+                agent_exec_api_key_env="HIPPO_PROBE_HTTP_KEY",
+            )
+            with mock.patch.dict("os.environ", {**self._ENV, **shell_env}), \
+                 mock.patch("paulsha_hippo.atomizer.config.load_config",
+                            return_value=(cfg, "h")), \
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value=manager_env):
+                return ops.run_doctor()
+        finally:
+            server.shutdown()
+
+    def test_probe_openai_compatible_key_only_in_shell_fails(self):
+        # B1 也涵蓋 openai-compatible：API key 解析須來自 manager env，
+        # 不得從 doctor 所在互動 shell 的 os.environ 借到 key 而誤判健康。
+        self.assertEqual(
+            self._doctor_openai_with_auth_server(
+                shell_env={"HIPPO_PROBE_HTTP_KEY": "sk-shell-only"},
+                manager_env={"PATH": "/usr/bin:/bin"},
+            ),
+            1,
+        )
+
+    def test_probe_openai_compatible_key_in_manager_env_passes(self):
+        self.assertNotIn("HIPPO_PROBE_HTTP_KEY", os.environ)
+        self.assertEqual(
+            self._doctor_openai_with_auth_server(
+                shell_env={},
+                manager_env={"PATH": "/usr/bin:/bin",
+                             "HIPPO_PROBE_HTTP_KEY": "sk-manager"},
+            ),
+            0,
+        )
+
+
+class ServiceManagerEnvironmentTests(unittest.TestCase):
+    @staticmethod
+    def _completed(stdout: str, returncode: int = 0):
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    def test_parses_manager_environment_lines(self):
+        out = (
+            "PATH=/usr/bin:/bin\n"
+            "HIPPO_X=plain\n"
+            "QUOTED=$'a b\\'c\\nd'\n"
+            "BROKEN-LINE\n"
+        )
+        with mock.patch.object(ops.subprocess, "run",
+                               return_value=self._completed(out)) as run:
+            env = ops._service_manager_environment()
+        run.assert_called_once_with(
+            ["systemctl", "--user", "show-environment"], capture_output=True, text=True
+        )
+        self.assertEqual(
+            env,
+            {"PATH": "/usr/bin:/bin", "HIPPO_X": "plain", "QUOTED": "a b'c\nd"},
+        )
+
+    def test_returns_none_when_command_fails(self):
+        with mock.patch.object(ops.subprocess, "run",
+                               return_value=self._completed("", returncode=1)):
+            self.assertIsNone(ops._service_manager_environment())
+
+    def test_returns_none_on_oserror(self):
+        with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
+            self.assertIsNone(ops._service_manager_environment())
+
+
+class ProbeEnvironmentTests(unittest.TestCase):
+    def test_manager_env_mode_excludes_interactive_environ(self):
+        # B1 核心：service-effective 模式下 probe env 只來自 manager env，
+        # 互動 shell 才有的變數（API key 等）不得滲入。
+        with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"PATH": "/usr/bin:/bin", "HOME": "/home/u"}):
+            env, service_effective = ops._probe_environment()
+        self.assertTrue(service_effective)
+        self.assertEqual(env, {"PATH": "/usr/bin:/bin", "HOME": "/home/u"})
+
+    def test_manager_env_without_path_gets_conservative_default(self):
+        with mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"HOME": "/home/u"}):
+            env, service_effective = ops._probe_environment()
+        self.assertTrue(service_effective)
+        self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+
+    def test_fallback_mode_keeps_interactive_approximation(self):
+        with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
+             mock.patch.object(ops, "_service_manager_environment", return_value=None):
+            env, service_effective = ops._probe_environment()
+        self.assertFalse(service_effective)
+        self.assertEqual(env["HIPPO_SHELL_ONLY_VAR"], "1")
+        self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
 
 
 class InstallServiceTests(unittest.TestCase):
@@ -339,6 +517,27 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
 
+class _AuthRequiredHandler(BaseHTTPRequestHandler):
+    """缺 Authorization header 即 401 的端點（模擬需認證的 openai-compatible 服務）。"""
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        if self.headers.get("Authorization"):
+            body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+            self.send_response(200)
+        else:
+            body = json.dumps({"error": "missing api key"}).encode()
+            self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # 靜默
+        return
+
+
 class HttpAgentClientTests(unittest.TestCase):
     def _serve(self):
         server = HTTPServer(("127.0.0.1", 0), _Handler)
@@ -366,6 +565,35 @@ class HttpAgentClientTests(unittest.TestCase):
         client = HttpAgentClient("http://127.0.0.1:1", "m", timeout=2)
         with self.assertRaises(AgentExecError):
             client.run("x")
+
+    def test_env_override_scopes_api_key_lookup(self):
+        # B1：doctor probe 注入 service-effective env——key 從注入的 env 解析
+        self.assertNotIn("HIPPO_PROBE_DIRECT_KEY", os.environ)
+        server = self._serve()
+        try:
+            client = HttpAgentClient(
+                f"http://127.0.0.1:{server.server_port}", "m",
+                api_key_env="HIPPO_PROBE_DIRECT_KEY", timeout=10,
+                env={"HIPPO_PROBE_DIRECT_KEY": "sk-injected"},
+            )
+            client.run("x")
+            self.assertEqual(server.captured["auth"], "Bearer sk-injected")  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+
+    def test_env_override_excludes_process_environ(self):
+        # B1：一旦注入 env，就不得回頭從 os.environ 借 key（互動 shell 滲漏）
+        server = self._serve()
+        try:
+            with mock.patch.dict("os.environ", {"HIPPO_TEST_KEY": "sk-local"}):
+                client = HttpAgentClient(
+                    f"http://127.0.0.1:{server.server_port}", "m",
+                    api_key_env="HIPPO_TEST_KEY", timeout=10, env={},
+                )
+                client.run("x")
+            self.assertIsNone(server.captured["auth"])  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
 
 
 class BackendConfigTests(unittest.TestCase):
@@ -481,8 +709,8 @@ class FixBackendMigrationTests(unittest.TestCase):
                 return None if path is not None else str(exe)
 
             with mock.patch.dict("os.environ", self._env(tmp)), \
-                 mock.patch.object(ops, "_service_effective_path_env",
-                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value={"PATH": "/usr/bin:/bin"}), \
                  mock.patch.object(ops.shutil, "which", side_effect=fake_which):
                 rc = ops.run_doctor(fix_backend=True)
 
@@ -504,8 +732,8 @@ class FixBackendMigrationTests(unittest.TestCase):
                 return None if path is not None else str(exe)
 
             with mock.patch.dict("os.environ", self._env(tmp)), \
-                 mock.patch.object(ops, "_service_effective_path_env",
-                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value={"PATH": "/usr/bin:/bin"}), \
                  mock.patch.object(ops.shutil, "which", side_effect=fake_which):
                 self.assertEqual(ops.run_doctor(fix_backend=True), 0)
                 first_body = override.read_text(encoding="utf-8")
@@ -528,7 +756,7 @@ class FixBackendMigrationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             self._write_override(tmp)
             with mock.patch.dict("os.environ", self._env(tmp)), \
-                 mock.patch.object(ops, "_service_effective_path_env",
-                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops, "_service_manager_environment",
+                                   return_value={"PATH": "/usr/bin:/bin"}), \
                  mock.patch.object(ops.shutil, "which", return_value=None):
                 self.assertEqual(ops.run_doctor(fix_backend=True), 1)

@@ -159,22 +159,78 @@ def run_doctor(*, fix_backend: bool = False) -> int:
     return 1 if failed else 0
 
 
-def _service_effective_path_env() -> str:
-    """systemd --user 服務實際看到的 PATH（非互動 shell；#15 根因是 NVM PATH 不在其中）。
+_FALLBACK_SERVICE_PATH = "/usr/local/bin:/usr/bin:/bin"
 
-    取不到（無 systemd／指令失敗）退保守預設。"""
+_SHOW_ENV_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"',
+}
+
+
+def _unquote_show_environment_value(value: str) -> str:
+    """還原 `systemctl show-environment` 對含特殊字元值的 `$'…'` shell quoting。"""
+    if not (value.startswith("$'") and value.endswith("'") and len(value) > 2):
+        return value
+    return re.sub(
+        r"\\(.)",
+        lambda match: _SHOW_ENV_ESCAPES.get(match.group(1), match.group(1)),
+        value[2:-1],
+    )
+
+
+def _service_manager_environment() -> dict[str, str] | None:
+    """systemd user manager 環境（`systemctl --user show-environment`）完整快照。
+
+    已安裝的 dream oneshot unit 無 Environment=/EnvironmentFile=，排程觸發時
+    實際繼承的就是 user manager 環境——這是 doctor probe 的 service-effective
+    真相來源（Codex 複驗 B1）。無 systemd user bus（CI／容器）→ None，呼叫端
+    fallback 並標示近似。"""
     try:
         completed = subprocess.run(
             ["systemctl", "--user", "show-environment"],
             capture_output=True, text=True,
         )
     except OSError:
-        completed = None
-    if completed is not None and completed.returncode == 0:
-        for line in completed.stdout.splitlines():
-            if line.startswith("PATH="):
-                return line[len("PATH="):]
-    return "/usr/local/bin:/usr/bin:/bin"
+        return None
+    if completed.returncode != 0:
+        return None
+    env: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep or not key:
+            continue
+        env[key] = _unquote_show_environment_value(value)
+    return env
+
+
+def _service_effective_path_env() -> str:
+    """systemd --user 服務實際看到的 PATH（非互動 shell；#15 根因是 NVM PATH 不在其中）。
+
+    取不到（無 systemd／指令失敗）退保守預設。"""
+    manager_env = _service_manager_environment()
+    if manager_env is not None and manager_env.get("PATH"):
+        return manager_env["PATH"]
+    return _FALLBACK_SERVICE_PATH
+
+
+def _probe_environment() -> tuple[dict[str, str], bool]:
+    """構造 backend probe 的執行環境。回傳 (env, service_effective)。
+
+    Codex 複驗 B1：早前 probe 繼承當前程序 os.environ（僅替換 PATH）——API key
+    只 export 在互動 shell 時 doctor 誤判健康（requeue 後 dream service 仍認證
+    失敗再度 parked）；反向（key 只在 manager env）亦誤判故障。改以
+    `systemctl --user show-environment` 顯式構造：oneshot unit 無 Environment/
+    EnvironmentFile，manager env 即 service-effective env——與 systemd-run
+    transient unit 所見等價，且 timeout／判定行為留在本程序內可控（systemd-run
+    中途被殺會殘留 transient unit），CI 亦可決定性測試。無 user bus →
+    fallback 現行近似（os.environ + 保守 PATH），呼叫端必須在輸出標示
+    「近似，非 service-effective」。"""
+    manager_env = _service_manager_environment()
+    if manager_env is not None:
+        env = dict(manager_env)
+        env.setdefault("PATH", _FALLBACK_SERVICE_PATH)
+        return env, True
+    return {**os.environ, "PATH": _FALLBACK_SERVICE_PATH}, False
 
 
 _PROBE_TIMEOUT_SECS = 60
@@ -184,9 +240,9 @@ _PROBE_SMOKE_PROMPT = (
 _PROBE_MAX_TOKENS = 32
 
 
-def _exec_probe_service_effective(command: list[str], service_path: str,
+def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
                                   *, runner=subprocess.run) -> tuple[bool, str]:
-    """在 service-effective PATH 下以 bounded smoke prompt「實際執行」backend argv。
+    """以 probe_env（見 `_probe_environment`）對 backend argv 送 bounded smoke prompt。
 
     doctor 是恢復序列的前置 gate（spec §4.1「實際喚起 backend 一次」）。早前
     判定把 timeout 與 126/127 以外的任何 exit code 都視為 PASS——backend hang
@@ -197,12 +253,16 @@ def _exec_probe_service_effective(command: list[str], service_path: str,
     126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈）
     一律 FAIL。
 
+    Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（manager env
+    或標示近似的 fallback），本函式不再自行繼承 os.environ——僅疊加
+    HIPPO_SELF_SESSION=1。
+
     #7：probe 實跑的是 configured backend argv（預設 `claude -p`），必須比照
     agent_exec.AgentExecClient.run 注入 HIPPO_SELF_SESSION=1——使用者已安裝的
     SessionEnd/PreCompact hooks 讀到此標記即早退，否則 doctor 探測會被當成
     真實 session 寫回 queue，重新引入遞迴自捕捉／queue 污染。
     """
-    env = {**os.environ, "PATH": service_path, "HIPPO_SELF_SESSION": "1"}
+    env = {**probe_env, "HIPPO_SELF_SESSION": "1"}
     try:
         completed = runner(
             command,
@@ -230,13 +290,18 @@ def _exec_probe_service_effective(command: list[str], service_path: str,
     return True, "smoke prompt exit 0、回應非空"
 
 
-def _probe_openai_compatible(cfg) -> tuple[str, bool]:
+def _probe_openai_compatible(cfg, probe_env: dict[str, str],
+                             *, env_label: str) -> tuple[str, bool]:
     """openai-compatible 檔位的實際 probe：bounded smoke prompt 打 /v1/chat/completions。
 
     先前僅回「probe 由 PR-D preset 接手」即綠燈——恢復 gate 拿不到真實可用性
     判定（端點掛掉／認證失效照樣 exit 0）。改為 fail-closed：端點不可達、HTTP
     錯誤、timeout、回應缺 choices[0].message.content 或內容為空（HttpAgentClient
-    對以上一律拋例外）→ FAIL。max_tokens／timeout 均受限，probe 不做實際工作。"""
+    對以上一律拋例外）→ FAIL。max_tokens／timeout 均受限，probe 不做實際工作。
+
+    Codex 複驗 B1：API key（`api_key_env`）從注入的 probe_env 解析，而非 doctor
+    所在互動 shell 的 os.environ——否則只 export 在 shell 的 key 會令 probe
+    誤判健康，排程的 dream service 實際仍認證失敗。"""
     from paulsha_hippo.atomizer.agent_exec import HttpAgentClient
 
     client = HttpAgentClient(
@@ -245,6 +310,7 @@ def _probe_openai_compatible(cfg) -> tuple[str, bool]:
         api_key_env=cfg.agent_exec_api_key_env or None,
         timeout=_PROBE_TIMEOUT_SECS,
         max_tokens=_PROBE_MAX_TOKENS,
+        env=probe_env,
     )
     try:
         client.run(_PROBE_SMOKE_PROMPT)
@@ -252,12 +318,12 @@ def _probe_openai_compatible(cfg) -> tuple[str, bool]:
         detail = " ".join(str(exc).split())[:200]
         return (
             f"FAIL distiller backend：openai-compatible（{cfg.agent_exec_base_url}）"
-            f"smoke probe 失敗：{detail}",
+            f"{env_label} smoke probe 失敗：{detail}",
             True,
         )
     return (
         f"- distiller backend：✓ openai-compatible（{cfg.agent_exec_base_url}；"
-        "smoke probe 有非空回應）",
+        f"{env_label} smoke probe 有非空回應）",
         False,
     )
 
@@ -267,35 +333,39 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
 
     dream service template 固定 --promoter llm，故 backend probe 不過一律 FAIL，
     不因 config 的 default promoter 軟化。openai-compatible 非 argv backend，
-    以 HttpAgentClient 直打端點做等價 smoke probe。"""
+    以 HttpAgentClient 直打端點做等價 smoke probe。probe 環境經
+    `_probe_environment()` 顯式構造（B1）；無 systemd user bus 時 fallback 近似
+    並在報告行標示，避免把近似判定當成 service-effective 真相。"""
     from paulsha_hippo.atomizer import config as atomizer_config
 
     try:
         cfg, _ = atomizer_config.load_config()
     except Exception as exc:  # config 壞掉本身就是 backend 不可用級的問題
         return f"FAIL distiller backend config 無法載入：{exc}", True
+    probe_env, service_effective = _probe_environment()
+    env_label = ("service-effective" if service_effective
+                 else "近似，非 service-effective（無 systemd user bus）")
     if cfg.agent_exec_backend == "openai-compatible":
-        return _probe_openai_compatible(cfg)
+        return _probe_openai_compatible(cfg, probe_env, env_label=env_label)
     command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
-    service_path = _service_effective_path_env()
     if not Path(argv0).is_absolute():
-        resolved = shutil.which(argv0, path=service_path)
+        resolved = shutil.which(argv0, path=probe_env.get("PATH", _FALLBACK_SERVICE_PATH))
         if resolved is None:
             return (
-                f"FAIL distiller backend：{argv0} 在 service-effective 環境解析不到"
+                f"FAIL distiller backend：{argv0} 在 {env_label} 環境解析不到"
                 "（hippo doctor --fix-backend 可嘗試自動遷移）",
                 True,
             )
         command[0] = resolved
-    ok, detail = _exec_probe_service_effective(command, service_path)
+    ok, detail = _exec_probe_service_effective(command, probe_env)
     if ok:
         return (
-            f"- distiller backend：✓ {command[0]}（service-effective smoke probe；{detail}）",
+            f"- distiller backend：✓ {command[0]}（{env_label} smoke probe；{detail}）",
             False,
         )
     return (
-        f"FAIL distiller backend：{' '.join(command)} 在 service-effective 環境 smoke probe 失敗"
+        f"FAIL distiller backend：{' '.join(command)} 在 {env_label} 環境 smoke probe 失敗"
         f"（{detail}；hippo doctor --fix-backend 可嘗試自動遷移）",
         True,
     )
