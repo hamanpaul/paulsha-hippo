@@ -228,3 +228,26 @@ def record_discovery(
             return True
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+
+def auto_write_enabled(config_path: str | Path | None = None) -> bool:
+    """讀 project_registry.auto_write（預設 off）；缺檔／缺鍵一律 False（opt-in）。"""
+    path = Path(config_path) if config_path is not None else paths.hippo_config_root() / "config.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    in_section = False
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = raw.strip()
+        if indent == 0:
+            in_section = stripped == "project_registry:"
+            continue
+        if in_section and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            if key.strip() == "auto_write":
+                return value.strip().strip("\"'").lower() in {"true", "yes", "on", "1"}
+    return False

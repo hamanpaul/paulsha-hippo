@@ -12,6 +12,7 @@ from unittest import mock
 from paulsha_hippo import paths
 from paulsha_hippo.importer.config import ProjectConfig
 from paulsha_hippo.importer.registry import (
+    auto_write_enabled,
     load_registry,
     merge_discovery,
     parse_registry,
@@ -280,6 +281,35 @@ class CrashRecoveryTests(_ScratchDirTestCase):
             names,
             {"project-hippo.yaml", ".project-hippo.yaml.lock", ".project-hippo.yaml.tmp"},
         )
+
+
+class AutoWriteEnabledTests(_ScratchDirTestCase):
+    def write_config(self, text: str) -> Path:
+        path = self.root / "config.yaml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_missing_config_defaults_off(self):
+        self.assertFalse(auto_write_enabled(self.root / "absent.yaml"))
+
+    def test_enabled_when_true(self):
+        path = self.write_config("memory_root: /data/agents/memory\nproject_registry:\n  auto_write: true\n")
+        self.assertTrue(auto_write_enabled(path))
+
+    def test_disabled_when_false_or_wrong_section(self):
+        self.assertFalse(auto_write_enabled(self.write_config("project_registry:\n  auto_write: false\n")))
+        self.assertFalse(auto_write_enabled(self.write_config("other_section:\n  auto_write: true\n")))
+        self.assertFalse(auto_write_enabled(self.write_config("auto_write: true\n")))
+
+    def test_truthy_variants(self):
+        for raw in ("true", "True", "yes", "on", "1", '"true"'):
+            path = self.write_config(f"project_registry:\n  auto_write: {raw}\n")
+            self.assertTrue(auto_write_enabled(path), raw)
+
+    def test_default_path_uses_hippo_config_root(self):
+        with mock.patch.dict(os.environ, {"HIPPO_CONFIG_ROOT": str(self.root)}, clear=False):
+            self.write_config("project_registry:\n  auto_write: true\n")
+            self.assertTrue(auto_write_enabled())
 
 
 if __name__ == "__main__":
