@@ -252,6 +252,19 @@ def _build_parser() -> argparse.ArgumentParser:
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
 
+    requeue_p = memory_subparsers.add_parser(
+        "requeue", help="把 parked session 送回 split 重走 promote（#15 恢復路徑）"
+    )
+    requeue_p.add_argument("session_key", nargs="?", default=None,
+                           help="session key（如 claude:s1）；與 --all-parked 擇一")
+    requeue_p.add_argument("--all-parked", action="store_true",
+                           help="requeue 全部 parked sessions")
+    requeue_p.add_argument("--memory-root", required=True)
+    requeue_p.add_argument("--reason", default="",
+                           help="requeue 原因（記入 ledger requeue_reason）")
+    requeue_p.add_argument("--now", default=None)
+    requeue_p.set_defaults(func=_requeue)
+
     return parser
 
 
@@ -811,6 +824,27 @@ def _ops_install_service(args) -> int:
     from paulsha_hippo import ops
 
     return ops.run_install_service(enable=args.enable)
+
+
+def _requeue(args: argparse.Namespace) -> int:
+    from . import requeue as requeue_mod
+
+    if bool(args.session_key) == bool(args.all_parked):
+        print("error: 需指定 <session-key> 或 --all-parked（擇一）", file=sys.stderr)
+        return 2
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    summary = requeue_mod.requeue(
+        root,
+        session_key=args.session_key,
+        all_parked=args.all_parked,
+        now=now,
+        reason=args.reason,
+    )
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    if not summary["requeued"] and summary["skipped"]:
+        return 1
+    return 0
 
 
 def _dream_supervise(args) -> int:
