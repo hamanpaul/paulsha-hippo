@@ -48,3 +48,14 @@ def test_recall_no_match_prints_nothing_exit0(tmp_path, monkeypatch, capsys):
 
 def test_recall_missing_required_flags_exit2(capsys):
     assert cli.main(["recall"]) == 2
+
+
+def test_recall_traversal_tool_rejected_exit2(tmp_path, capsys):
+    # 迴歸（#17 review [high]）：--tool 夾帶路徑分隔符時，過去會把 offered map
+    # 原子 replace 到 memory root 之外——argparse 層直接拒絕（exit 2），零落檔。
+    rc = cli.main(["recall", "--memory-root", str(tmp_path), "--cwd", "/x",
+                   "--tool", "../../../outside", "--session-id", "s", "--prompt", "x"])
+    assert rc == 2
+    assert "invalid tool" in capsys.readouterr().err
+    assert not (tmp_path / "runtime").exists()
+    assert not (tmp_path.parent / "outside__s.offered.json").exists()

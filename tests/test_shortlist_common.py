@@ -2,6 +2,9 @@
 import json
 import multiprocessing
 from pathlib import Path
+
+import pytest
+
 from paulsha_hippo.moc import search as S
 from paulsha_hippo.hooks import _shortlist_common as SC
 
@@ -231,6 +234,45 @@ def test_record_offered_concurrent_writers_keep_both_slice_sets(tmp_path):
     assert missing == []
     offered_ids = SC._load_offered_ids(tmp_path, "claude-code", "sidCC")
     assert {sid for sid, _ in slices_a + slices_b} <= offered_ids
+
+
+@pytest.mark.parametrize("evil", [
+    "../../outside",     # 相對 traversal
+    "..",                # 純父目錄
+    "a/b",               # POSIX 分隔符
+    "a\\b",              # Windows 分隔符
+    "/etc",              # 絕對路徑
+    ".hidden",           # 前導 '.'（dotfile / '..' 家族）
+    "a:b",               # 冒號（sanitize_id 同級拒絕）
+    "",                  # 空值
+])
+def test_offered_map_path_rejects_non_path_safe_tool(tmp_path, evil):
+    # 迴歸（#17 review [high]）：tool 未驗證即嵌入檔名，路徑分隔符/.. 可把
+    # offered map 組出 runtime/wakeup 之外——一律 ValueError，不得產生路徑。
+    with pytest.raises(ValueError):
+        SC._offered_map_path(tmp_path, evil, "sid")
+
+
+def test_offered_map_path_valid_tool_stays_under_wakeup(tmp_path):
+    p = SC._offered_map_path(tmp_path, "claude-code", "sid/1")
+    assert p.parent == tmp_path / "runtime" / "wakeup"
+    assert p.name == "claude-code__sid__1.offered.json"
+
+
+def test_shortlist_traversal_tool_fails_closed_writes_nothing(tmp_path, monkeypatch):
+    # 迴歸（#17 review [high]）：tool="../../../outside" 過去會讓 _record_offered
+    # 的原子 replace 把 map 寫到 memory root 之外（可覆寫任意檔）。現在整條
+    # pipeline fail-closed：不注入 shortlist、不記 offered、root 外無任何落檔。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    out = SC.build_shortlist_and_record(
+        tmp_path, "../../../outside", "sidT", cwd="/x", prompt="SerialWrap 執行")
+    assert out == ""
+    assert not (tmp_path / "runtime" / "ledger" / "offered.jsonl").exists()
+    assert not (tmp_path / "runtime" / "wakeup").exists()
+    # 逃逸落點（root 外）：map 本體與 lock/tmp 一律不得出現
+    assert not (tmp_path.parent / "outside__sidT.offered.json").exists()
+    assert list(tmp_path.parent.glob(".outside__sidT.offered.json*")) == []
 
 
 def test_record_offered_concurrent_writers_leave_no_tmp_residue(tmp_path):

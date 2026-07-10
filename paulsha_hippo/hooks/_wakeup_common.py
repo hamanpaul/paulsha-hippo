@@ -86,6 +86,25 @@ def sanitize_id(value: str) -> str:
     return re.sub(r"[/\\:]+", "__", value)
 
 
+_TOOL_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def validate_tool(value: str) -> str:
+    """Validate a tool attribution token that gets embedded in runtime file names.
+
+    tool 會直接進入 `runtime/wakeup/<tool>__<sid>.offered.json` 檔名，而
+    `hippo recall --tool` 是外部輸入：只接受單一 path-safe token（英數開頭，
+    其後限英數與 `. _ -`），拒絕路徑分隔符、`:`、`..`、前導 `.` 等任何可讓
+    路徑逃出 memory root 的形態（traversal）。合法即原值返回，否則 ValueError。
+    """
+    if not _TOOL_TOKEN_RE.fullmatch(value):
+        raise ValueError(
+            f"invalid tool {value!r}: expected a path-safe token matching "
+            "[A-Za-z0-9][A-Za-z0-9._-]* (no path separators, no leading '.')"
+        )
+    return value
+
+
 def hippo_invocation(root: Path) -> list[str]:
     """Return an argv prefix that can invoke the hippo CLI in this deployment."""
     venv_python = root / "hooks" / ".venv" / "bin" / "python"

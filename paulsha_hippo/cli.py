@@ -30,6 +30,16 @@ def _pct_arg(s):
     return v
 
 
+def _tool_arg(s: str) -> str:
+    """`--tool` 會嵌入 runtime/wakeup 檔名：argparse 層即拒絕非 path-safe token（防 traversal）。"""
+    from .hooks._wakeup_common import validate_tool
+
+    try:
+        return validate_tool(s)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -299,7 +309,7 @@ def _build_parser() -> argparse.ArgumentParser:
     recall_p.add_argument("--memory-root", default=str(paths.memory_root()))
     recall_p.add_argument("--cwd", default=None)
     recall_p.add_argument("--prompt", required=True)
-    recall_p.add_argument("--tool", required=True)
+    recall_p.add_argument("--tool", required=True, type=_tool_arg)
     recall_p.add_argument("--session-id", required=True)
     recall_p.set_defaults(func=_recall)
 
