@@ -66,7 +66,10 @@ class TestDreamOrchestrator(unittest.TestCase):
 
             self.assertEqual(calls, ["a", "j"])
             record = dream.last_run(root)
-            self.assertEqual(record["passes"]["atomize"], {"error": "RuntimeError"})
+            self.assertEqual(
+                record["passes"]["atomize"],
+                {"error": "RuntimeError", "error_message": "boom", "errno": None},
+            )
             self.assertEqual(record["errors"], ["atomize:RuntimeError"])
 
     def test_warnings_produce_partial(self):
@@ -175,26 +178,51 @@ class TestDreamOrchestrator(unittest.TestCase):
             self.assertNotIn("warnings", source_summary)
             self.assertNotIn("warnings_total", source_summary)
 
-    def test_failure_record_redacts_exception_message(self):
+    def test_failure_record_keeps_bounded_error_message_and_errno(self):
         def atomize_fn():
-            raise RuntimeError("raw prompt leaked")
+            raise OSError(36, "File name too long: " + "x" * 600)
 
         def janitor_fn():
             return {"summary": {"skipped": 0}, "warnings": []}
 
         with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
             record = orchestrator.run_dream(
-                root,
+                Path(tmpdir),
                 atomize_fn=atomize_fn,
                 janitor_fn=janitor_fn,
-                now="2026-06-02T00:00:00Z",
+                now="2026-07-10T00:00:00Z",
                 config_hash="cfg",
             )
 
-            rendered = str(record)
-            self.assertIn("RuntimeError", rendered)
-            self.assertNotIn("raw prompt leaked", rendered)
+            atomize = record["passes"]["atomize"]
+            self.assertEqual(atomize["error"], "OSError")
+            self.assertEqual(atomize["errno"], 36)
+            self.assertIn("File name too long", atomize["error_message"])
+            self.assertLessEqual(len(atomize["error_message"]), 500)
+            self.assertEqual(record["errors"], ["atomize:OSError"])
+
+    def test_errno_extracted_from_cause_chain(self):
+        def atomize_fn():
+            try:
+                raise OSError(2, "No such file or directory")
+            except OSError as exc:
+                raise RuntimeError("wrapper") from exc
+
+        def janitor_fn():
+            return {"summary": {"skipped": 0}, "warnings": []}
+
+        with TemporaryDirectory() as tmpdir:
+            record = orchestrator.run_dream(
+                Path(tmpdir),
+                atomize_fn=atomize_fn,
+                janitor_fn=janitor_fn,
+                now="2026-07-10T00:00:00Z",
+                config_hash="cfg",
+            )
+
+            atomize = record["passes"]["atomize"]
+            self.assertEqual(atomize["error"], "RuntimeError")
+            self.assertEqual(atomize["errno"], 2)
 
     def test_dry_run_writes_no_ledger(self):
         def atomize_fn():
