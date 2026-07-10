@@ -1,6 +1,0 @@
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"fragment:claude__sess-e2e__000","to":"session:claude:sess-e2e","ts":"2026-06-03T05:00:00Z","type":"fragment_of"}
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"fragment:claude__sess-e2e__001","to":"session:claude:sess-e2e","ts":"2026-06-03T05:00:00Z","type":"fragment_of"}
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"fragment:claude__sess-e2e__000","to":"slice:sl-f53f3434e9e62f53","ts":"2026-06-03T05:00:00Z","type":"promoted_to"}
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"slice:sl-f53f3434e9e62f53","to":"session:claude:sess-e2e","ts":"2026-06-03T05:00:00Z","type":"distilled_from"}
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"fragment:claude__sess-e2e__001","to":"slice:sl-fab0c9f710b4ecef","ts":"2026-06-03T05:00:00Z","type":"promoted_to"}
-{"atomizer_config_hash":"e68932b485acb60282f07bae20c4c76f8ad16dbac163f7d0af13acdbba674fa6","from":"slice:sl-fab0c9f710b4ecef","to":"session:claude:sess-e2e","ts":"2026-06-03T05:00:00Z","type":"distilled_from"}
