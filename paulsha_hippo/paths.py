@@ -141,6 +141,23 @@ def projects_config_path(memory_root_value: str | Path | None = None) -> Path:
     return agents_path("config", "projects.yaml")
 
 
+def project_registry_path(memory_root_value: str | Path | None = None) -> Path:
+    """project-hippo.yaml（generated registry）定位——與 projects.yaml 同 config 根、paulsha/ 子層。
+
+    契約：docs/project-registry-contract.md（issue #14）。優先序與 projects_config_path 同構。
+    """
+    legacy_base = _env_path("PSC_CONFIG_ROOT")
+    if legacy_base is not None:
+        if legacy_base.name == "paulshaclaw" and legacy_base.parent.name == ".config":
+            base = legacy_base.parents[1]
+        else:
+            base = legacy_base
+        return base / ".agents" / "config" / "paulsha" / "project-hippo.yaml"
+    if memory_root_value is not None:
+        return Path(memory_root_value).expanduser().parent / "config" / "paulsha" / "project-hippo.yaml"
+    return agents_path("config", "paulsha", "project-hippo.yaml")
+
+
 def resolution_report() -> dict[str, str]:
     """doctor 用：各表面實際解析結果 + 雙 root 衝突偵測素材。"""
     report = {
