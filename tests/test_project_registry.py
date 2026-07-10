@@ -312,5 +312,35 @@ class AutoWriteEnabledTests(_ScratchDirTestCase):
             self.assertTrue(auto_write_enabled())
 
 
+class ProducerContractTests(_ScratchDirTestCase):
+    FIXTURE = REPO_ROOT / "tests" / "fixtures" / "registry" / "project-hippo.expected.yaml"
+    CONTRACT_DOC = REPO_ROOT / "docs" / "project-registry-contract.md"
+    MARKER = "<!-- contract-fixture:tests/fixtures/registry/project-hippo.expected.yaml -->"
+
+    def test_producer_output_matches_fixture_byte_for_byte(self):
+        path = self.root / "paulsha" / "project-hippo.yaml"
+        record_discovery(
+            slug="github.com/acme/widget",
+            roots=("/data/projects/widget",),
+            remotes=("github.com/acme/widget",),
+            registry_path=path,
+        )
+        record_discovery(
+            slug="scratch-notes",
+            roots=("/data/scratch/notes",),
+            remotes=(),
+            registry_path=path,
+        )
+        self.assertEqual(path.read_bytes(), self.FIXTURE.read_bytes())
+
+    def test_contract_doc_canonical_example_matches_fixture(self):
+        doc = self.CONTRACT_DOC.read_text(encoding="utf-8")
+        self.assertIn(self.MARKER, doc)
+        after = doc.split(self.MARKER, 1)[1]
+        self.assertTrue(after.lstrip().startswith("```yaml"))
+        block = after.split("```yaml\n", 1)[1].split("```", 1)[0]
+        self.assertEqual(block, self.FIXTURE.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
