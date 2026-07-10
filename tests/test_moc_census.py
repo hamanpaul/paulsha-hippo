@@ -195,5 +195,48 @@ class IndexVerifyCliTests(unittest.TestCase):
             self.assertTrue(payload["problems"])
 
 
+class IndexRebuildE2ETests(unittest.TestCase):
+    def test_overlong_title_poison_noise_full_chain(self):
+        """#16 全鏈驗收：超長 title 正常收編、壞 slice fail-soft 不中止整輪、
+        excluded 各有去向、三方對賬全綠（動態計算，不寫死數字）。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            k = root / "knowledge" / "proj"
+            _write(k / "long.md",
+                   "---\nslice_id: sl-long\nmemory_layer: knowledge\nproject: proj\n"
+                   "artifact_kind: research\ntitle: " + "超長標題" * 80 + "\n"
+                   "captured_at: 2026-07-10T00:00:00Z\n---\n超長標題 slice 的真實內容\n")
+            k.joinpath("broken.md").write_bytes(b"---\nslice_id: sl-broken\n\xff\xfe---\nbody\n")
+            _write(k / "rev--sl-rev.md",
+                   "---\nslice_id: sl-rev\nmemory_layer: knowledge\nproject: proj\n"
+                   "title: PR Review\nartifact_kind: review\n---\nreview body\n")
+            _write(k / "echo--sl-echo.md",
+                   "---\nslice_id: sl-echo\nmemory_layer: knowledge\nproject: proj\n"
+                   "title: X\nartifact_kind: report\n---\n## CWD\n/tmp\n")
+
+            result = runner.run_moc(root, now="2026-07-10T00:00:00Z")
+
+            # 超長 title：rename 成功、byte-bound、無 ENAMETOOLONG
+            renamed = [p.name for p in k.iterdir() if p.name.endswith("--sl-long.md")]
+            self.assertEqual(len(renamed), 1)
+            self.assertLessEqual(len(renamed[0].encode("utf-8")), 255)
+            # 壞 slice fail-soft：整輪未中止、索引照建、warning 有記
+            self.assertTrue(result["indexed"])
+            self.assertTrue(any("broken.md" in w for w in result["warnings"]))
+            # 強不變量（三方對賬版）：indexed IDs == eligible IDs
+            verdict = census.reconcile_index(root, result["index_coverage"])
+            self.assertEqual(verdict.problems, [])
+            self.assertTrue(verdict.ok)
+            self.assertIn("sl-long", verdict.indexed_ids)
+            self.assertNotIn("sl-rev", verdict.indexed_ids)     # pool-excluded 有去向
+            self.assertNotIn("sl-broken", verdict.indexed_ids)  # invalid 有去向
+            # CLI 全鏈（讀 coverage 落盤 + DB 反查）
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["index", "verify", "--memory-root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(json.loads(buf.getvalue())["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()
