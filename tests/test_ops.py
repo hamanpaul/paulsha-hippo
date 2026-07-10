@@ -118,6 +118,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
             agent_exec_backend="custom-argv",
             agent_exec_command=("claude", "-p"),
             agent_exec_base_url="",
+            agent_exec_model="test-model",
+            agent_exec_api_key_env="",
             default_promoter="llm",
         )
         base.update(overrides)
@@ -137,7 +139,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
     def test_probe_passes_with_absolute_executable(self):
         with TemporaryDirectory() as tmp:
             exe = Path(tmp) / "claude"
-            exe.write_text("#!/bin/sh\n", encoding="utf-8")
+            # fail-closed 判定下 PASS 需 exit 0＋非空回應（不只 exec 得起來）
+            exe.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
             exe.chmod(0o755)
             cfg = self._fake_cfg(agent_exec_command=(str(exe), "-p"))
             with mock.patch.dict("os.environ", self._ENV), \
@@ -149,13 +152,33 @@ class DoctorBackendProbeTests(unittest.TestCase):
                                    return_value="/usr/bin:/bin"):
                 self.assertEqual(ops.run_doctor(), 0)
 
-    def test_probe_reports_openai_compatible_as_delegated(self):
-        cfg = self._fake_cfg(agent_exec_backend="openai-compatible",
-                             agent_exec_base_url="http://127.0.0.1:11434")
+    def test_probe_openai_compatible_success_with_live_endpoint(self):
+        # openai-compatible 不再「PR-D 接手」綠燈——實際打 /v1/chat/completions
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            cfg = self._fake_cfg(
+                agent_exec_backend="openai-compatible",
+                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
+            )
+            with mock.patch.dict("os.environ", self._ENV), \
+                 mock.patch("paulsha_hippo.atomizer.config.load_config",
+                            return_value=(cfg, "h")):
+                self.assertEqual(ops.run_doctor(), 0)
+        finally:
+            server.shutdown()
+
+    def test_probe_openai_compatible_unreachable_fails_closed(self):
+        # 端點不可達（連線拒絕）→ FAIL；早前版本此情境仍 exit 0（恢復 gate 誤判）
+        cfg = self._fake_cfg(
+            agent_exec_backend="openai-compatible",
+            agent_exec_base_url="http://127.0.0.1:1",
+        )
         with mock.patch.dict("os.environ", self._ENV), \
              mock.patch("paulsha_hippo.atomizer.config.load_config",
                         return_value=(cfg, "h")):
-            self.assertEqual(ops.run_doctor(), 0)
+            self.assertEqual(ops.run_doctor(), 1)
 
     def test_service_effective_path_falls_back_without_systemd(self):
         with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
@@ -188,13 +211,24 @@ class DoctorBackendProbeTests(unittest.TestCase):
             exe.chmod(0o755)
             self.assertEqual(self._doctor_with_command((str(exe), "-p")), 1)
 
-    def test_probe_passes_on_nonzero_business_exit(self):
-        # exec 鏈可用、程式自身非零退出（非 126/127）→ 不是 backend 缺失，PASS
-        self.assertEqual(self._doctor_with_command(("/bin/sh", "-c", "exit 3")), 0)
+    def test_probe_fails_on_nonzero_business_exit(self):
+        # fail-closed：認證／model／quota／config 錯誤都以非零 exit 呈現——
+        # 一律 FAIL，否則恢復 gate 綠燈後 requeue 立即再度失敗或 parked。
+        self.assertEqual(self._doctor_with_command(("/bin/sh", "-c", "exit 3")), 1)
 
-    def test_probe_timeout_counts_as_executable(self):
+    def test_probe_fails_on_timeout(self):
+        # backend hang（上游卡住）≠ 健康；timeout fail-closed
         with mock.patch.object(ops, "_PROBE_TIMEOUT_SECS", 0.2):
-            self.assertEqual(self._doctor_with_command(("/bin/sleep", "5")), 0)
+            self.assertEqual(self._doctor_with_command(("/bin/sleep", "5")), 1)
+
+    def test_probe_fails_on_empty_output(self):
+        # exit 0 但無可解析回應（空輸出）→ FAIL
+        self.assertEqual(self._doctor_with_command(("/bin/sh", "-c", "exit 0")), 1)
+
+    def test_probe_passes_when_smoke_prompt_answered(self):
+        # cat 把 stdin 的 smoke prompt 原樣回吐：exit 0＋非空輸出 → PASS，
+        # 同時驗證 prompt 確實經 stdin 餵入（比照 AgentExecClient.run）
+        self.assertEqual(self._doctor_with_command(("/bin/cat",)), 0)
 
     def test_probe_env_carries_self_session_marker(self):
         # #7 回歸：probe 實跑 backend argv，需比照 agent_exec.AgentExecClient.run
@@ -204,7 +238,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
             out = Path(tmp) / "env.txt"
             fake_backend = Path(tmp) / "claude"
             fake_backend.write_text(
-                f'#!/bin/sh\nprintf "%s" "${{HIPPO_SELF_SESSION:-MISSING}}" > "{out}"\n',
+                f'#!/bin/sh\nprintf "%s" "${{HIPPO_SELF_SESSION:-MISSING}}" > "{out}"\necho ok\n',
                 encoding="utf-8",
             )
             fake_backend.chmod(0o755)
@@ -429,7 +463,8 @@ class FixBackendMigrationTests(unittest.TestCase):
     def _real_exe(self, tmp: str) -> Path:
         exe = Path(tmp) / "bin" / "claude"
         exe.parent.mkdir(parents=True, exist_ok=True)
-        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        # migration 後 doctor 會對 exe 做 smoke probe：需 exit 0＋非空回應
+        exe.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
         exe.chmod(0o755)
         return exe
 

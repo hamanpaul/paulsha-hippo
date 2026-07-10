@@ -177,20 +177,25 @@ def _service_effective_path_env() -> str:
     return "/usr/local/bin:/usr/bin:/bin"
 
 
-_PROBE_TIMEOUT_SECS = 10
+_PROBE_TIMEOUT_SECS = 60
+_PROBE_SMOKE_PROMPT = (
+    "hippo doctor smoke probe: reply with the single word ok and nothing else."
+)
+_PROBE_MAX_TOKENS = 32
 
 
 def _exec_probe_service_effective(command: list[str], service_path: str,
                                   *, runner=subprocess.run) -> tuple[bool, str]:
-    """在 service-effective PATH 下「實際執行」完整 backend argv。回傳 (ok, 說明)。
+    """在 service-effective PATH 下以 bounded smoke prompt「實際執行」backend argv。
 
-    只驗 argv[0] 的 is_file()+executable bit 會漏掉 interpreter／shebang 斷鏈
-    （例：`/usr/bin/env node` 之下 node 不在 service PATH、或
-    `('/usr/bin/env', 'definitely-no-such-runtime')`），造成 doctor 綠燈但
-    service 實跑必敗（recovery gate 誤判 → requeue 再入失敗鏈）。判定：
-    exec 失敗（ENOENT／EACCES 等）與 exit 126/127（not executable／command
-    not found，含 env 的子命令缺失）→ FAIL；timeout 或其他 exit code 代表
-    exec 鏈已啟動 → PASS。stdin 關閉、受限 timeout，probe 不做實際工作。
+    doctor 是恢復序列的前置 gate（spec §4.1「實際喚起 backend 一次」）。早前
+    判定把 timeout 與 126/127 以外的任何 exit code 都視為 PASS——backend hang
+    （上游卡住）與認證／model／quota／config 錯誤（一律非零 exit）全被誤判為
+    健康，gate 綠燈後 requeue 立即再度失敗或 parked。改為 fail-closed：經 stdin
+    送 bounded smoke prompt（比照 AgentExecClient.run 的餵入方式），timeout 內
+    exit 0 且 stdout 非空（可解析回應）才 PASS；timeout、任何非零 exit（含
+    126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈）
+    一律 FAIL。
 
     #7：probe 實跑的是 configured backend argv（預設 `claude -p`），必須比照
     agent_exec.AgentExecClient.run 注入 HIPPO_SELF_SESSION=1——使用者已安裝的
@@ -202,32 +207,67 @@ def _exec_probe_service_effective(command: list[str], service_path: str,
         completed = runner(
             command,
             env=env,
-            stdin=subprocess.DEVNULL,
+            input=_PROBE_SMOKE_PROMPT,
             capture_output=True,
             text=True,
             timeout=_PROBE_TIMEOUT_SECS,
         )
     except subprocess.TimeoutExpired:
-        return True, f"{_PROBE_TIMEOUT_SECS}s 內未退出（exec 鏈已啟動）"
+        return False, (f"smoke prompt {_PROBE_TIMEOUT_SECS}s 內未完成"
+                       "（backend hang／上游卡住；fail-closed）")
     except FileNotFoundError:
         return False, "exec 失敗：檔案或 shebang interpreter 不存在"
     except PermissionError:
         return False, "exec 失敗：無執行權限"
     except OSError as exc:
         return False, f"exec 失敗：{exc}"
-    if completed.returncode in (126, 127):
+    if completed.returncode != 0:
         stderr_tail = " ".join(str(completed.stderr or "").split())[:200]
-        return False, (f"exit {completed.returncode}"
-                       f"（command not found / not executable）：{stderr_tail}")
-    return True, f"exit {completed.returncode}"
+        return False, (f"exit {completed.returncode}（smoke prompt 失敗；"
+                       f"認證／model／quota／config 錯誤同屬此類）：{stderr_tail}")
+    if not str(completed.stdout or "").strip():
+        return False, "exit 0 但回應為空（無可解析輸出）"
+    return True, "smoke prompt exit 0、回應非空"
+
+
+def _probe_openai_compatible(cfg) -> tuple[str, bool]:
+    """openai-compatible 檔位的實際 probe：bounded smoke prompt 打 /v1/chat/completions。
+
+    先前僅回「probe 由 PR-D preset 接手」即綠燈——恢復 gate 拿不到真實可用性
+    判定（端點掛掉／認證失效照樣 exit 0）。改為 fail-closed：端點不可達、HTTP
+    錯誤、timeout、回應缺 choices[0].message.content 或內容為空（HttpAgentClient
+    對以上一律拋例外）→ FAIL。max_tokens／timeout 均受限，probe 不做實際工作。"""
+    from paulsha_hippo.atomizer.agent_exec import HttpAgentClient
+
+    client = HttpAgentClient(
+        cfg.agent_exec_base_url,
+        cfg.agent_exec_model,
+        api_key_env=cfg.agent_exec_api_key_env or None,
+        timeout=_PROBE_TIMEOUT_SECS,
+        max_tokens=_PROBE_MAX_TOKENS,
+    )
+    try:
+        client.run(_PROBE_SMOKE_PROMPT)
+    except Exception as exc:  # noqa: BLE001 —probe fail-closed：任何失敗都判 FAIL
+        detail = " ".join(str(exc).split())[:200]
+        return (
+            f"FAIL distiller backend：openai-compatible（{cfg.agent_exec_base_url}）"
+            f"smoke probe 失敗：{detail}",
+            True,
+        )
+    return (
+        f"- distiller backend：✓ openai-compatible（{cfg.agent_exec_base_url}；"
+        "smoke probe 有非空回應）",
+        False,
+    )
 
 
 def _probe_backend_service_effective() -> tuple[str, bool]:
-    """以 service-effective 環境驗證 atomizer backend 可執行。回傳 (報告行, is_failure)。
+    """以 service-effective 環境對 atomizer backend 做 smoke probe。回傳 (報告行, is_failure)。
 
-    dream service template 固定 --promoter llm，故 argv backend 解析不到一律 FAIL，
+    dream service template 固定 --promoter llm，故 backend probe 不過一律 FAIL，
     不因 config 的 default promoter 軟化。openai-compatible 非 argv backend，
-    probe 由 PR-D preset registry 接手。"""
+    以 HttpAgentClient 直打端點做等價 smoke probe。"""
     from paulsha_hippo.atomizer import config as atomizer_config
 
     try:
@@ -235,11 +275,7 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
     except Exception as exc:  # config 壞掉本身就是 backend 不可用級的問題
         return f"FAIL distiller backend config 無法載入：{exc}", True
     if cfg.agent_exec_backend == "openai-compatible":
-        return (
-            f"- distiller backend：openai-compatible（{cfg.agent_exec_base_url}；"
-            "probe 由 PR-D preset 接手）",
-            False,
-        )
+        return _probe_openai_compatible(cfg)
     command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
     service_path = _service_effective_path_env()
@@ -255,11 +291,11 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
     ok, detail = _exec_probe_service_effective(command, service_path)
     if ok:
         return (
-            f"- distiller backend：✓ {command[0]}（service-effective 實測可執行；{detail}）",
+            f"- distiller backend：✓ {command[0]}（service-effective smoke probe；{detail}）",
             False,
         )
     return (
-        f"FAIL distiller backend：{' '.join(command)} 在 service-effective 環境無法執行"
+        f"FAIL distiller backend：{' '.join(command)} 在 service-effective 環境 smoke probe 失敗"
         f"（{detail}；hippo doctor --fix-backend 可嘗試自動遷移）",
         True,
     )

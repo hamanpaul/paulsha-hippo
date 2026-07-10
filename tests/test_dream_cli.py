@@ -43,7 +43,7 @@ class DreamCliTests(unittest.TestCase):
             _seed(root)
             buf = io.StringIO()
             with patch(
-                "paulsha_hippo.dream.cli.atomizer_config.load_config",
+                "paulsha_hippo.atomizer.cli.atomizer_config.load_config",
                 return_value=(SimpleNamespace(default_promoter="identity"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             ), patch(
                 "paulsha_hippo.dream.cli.janitor_config.load_config",
@@ -72,7 +72,7 @@ class DreamCliTests(unittest.TestCase):
             _seed(root)
             buf = io.StringIO()
             with patch(
-                "paulsha_hippo.dream.cli.atomizer_config.load_config",
+                "paulsha_hippo.atomizer.cli.atomizer_config.load_config",
                 return_value=(SimpleNamespace(default_promoter="identity"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             ), patch(
                 "paulsha_hippo.dream.cli.janitor_config.load_config",
@@ -190,7 +190,7 @@ class DreamCliTests(unittest.TestCase):
             _seed(root)
             patches = dict(
                 atomizer=patch(
-                    "paulsha_hippo.dream.cli.atomizer_config.load_config",
+                    "paulsha_hippo.atomizer.cli.atomizer_config.load_config",
                     return_value=(SimpleNamespace(default_promoter="identity"),
                                   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                 ),

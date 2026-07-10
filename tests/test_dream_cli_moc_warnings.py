@@ -58,7 +58,7 @@ class DreamCliMocWarningsTest(unittest.TestCase):
             
             buf = io.StringIO()
             with patch(
-                "paulsha_hippo.dream.cli.atomizer_config.load_config",
+                "paulsha_hippo.atomizer.cli.atomizer_config.load_config",
                 return_value=(SimpleNamespace(default_promoter="identity"), "aaaa"*10),
             ), patch(
                 "paulsha_hippo.dream.cli.janitor_config.load_config",

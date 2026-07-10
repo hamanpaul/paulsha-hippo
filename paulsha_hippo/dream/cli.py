@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from ..atomizer import cli as atomizer_cli
-from ..atomizer import config as atomizer_config
 from ..atomizer import pipeline as atomizer_pipeline
 from ..instruction_corpus import corpus_for_roots
 from ..janitor import config as janitor_config
@@ -81,18 +80,13 @@ def _run(args: argparse.Namespace) -> int:
 
         # #15 失敗鏈：config 載入與 promoter 建構是 atomize 失敗邊界的一部分，
         # 不得逃出 run_dream 記錄邊界（否則無 failure category／evidence／dream
-        # error record，timer 每輪重複整輪失敗）。初始化失敗分類為
-        # backend_unavailable：eligible split sessions 立即 park（含證據），
-        # 失敗本身由 run_dream 記為 dream error record。
-        atom_error: Exception | None = None
-        atom_cfg = None
-        atom_hash = ""
-        promoter = None
-        try:
-            atom_cfg, atom_hash = atomizer_config.load_config()
-            promoter = atomizer_cli._build_promoter(args, atom_cfg, memory_root)
-        except Exception as exc:  # noqa: BLE001 —初始化失敗需入 park 鏈並被記錄
-            atom_error = exc
+        # error record，timer 每輪重複整輪失敗）。初始化改走 atomizer_cli 共用
+        # 邊界（直呼 `hippo atomize` 同一套）：失敗分類 backend_unavailable，
+        # eligible split sessions 立即 park（含證據），失敗本身由 run_dream 記
+        # 為 dream error record。
+        atom_cfg, atom_hash, promoter, atom_error = atomizer_cli.prepare_pipeline_inputs(
+            args, memory_root
+        )
 
         jan_error: Exception | None = None
         jan_cfg = None
@@ -106,13 +100,10 @@ def _run(args: argparse.Namespace) -> int:
 
         def atomize_fn() -> dict[str, object]:
             if atom_error is not None:
-                if not args.dry_run:
-                    atomizer_pipeline.park_split_sessions(
-                        memory_root,
-                        error_text=str(atom_error),
-                        now=now,
-                        config_hash=atom_hash or "unavailable",
-                    )
+                atomizer_cli.park_init_failure(
+                    memory_root, error=atom_error, now=now,
+                    config_hash=atom_hash, dry_run=args.dry_run,
+                )
                 raise atom_error
             return atomizer_pipeline.run(
                 memory_root,
