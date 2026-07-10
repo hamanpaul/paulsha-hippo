@@ -96,6 +96,21 @@ class RetitleUntitledTests(unittest.TestCase):
             self.assertTrue(out.exists())           # other out of scope -> untouched
             self.assertEqual(summary["retitled"], 1)
 
+    def test_apply_bounds_overlong_distilled_title_filename(self):
+        # 蒸餾出超長 title 時，rename 後檔名必須 byte-bound（走 naming.slice_filename）
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "p", "untitled--sl-long1.md",
+                   "## 問題\n某真實技術問題的描述與其根因分析。")
+            summary = retitle.retitle_untitled(
+                root, now="2026-06-25T00:00:00Z", apply=True,
+                distill=lambda b: "長" * 300)
+            self.assertEqual(summary["retitled"], 1)
+            renamed = [p for p in (root / "knowledge" / "p").iterdir()
+                       if p.name.endswith("--sl-long1.md")]
+            self.assertEqual(len(renamed), 1)
+            self.assertLessEqual(len(renamed[0].name.encode("utf-8")), 255)
+
     def test_non_untitled_slice_is_ignored(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

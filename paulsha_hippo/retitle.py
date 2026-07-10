@@ -85,7 +85,7 @@ def retitle_untitled(
             rows.append({**base, "status": "skipped", "reason": "distill-failed"})
             continue
         title = title.strip()
-        new_name = f"{_naming.slugify(title)}--{slice_id}.md"
+        new_name = _naming.slice_filename(title, slice_id)
 
         if not apply:
             rows.append({**base, "new_name": new_name, "title": title, "status": "dry-run"})

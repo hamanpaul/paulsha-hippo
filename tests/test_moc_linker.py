@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from paulsha_hippo.lib.lifecycle.schema import compute_checksum, validate_frontmatter
 from paulsha_hippo.ledger import relations
@@ -31,7 +32,8 @@ class LinkerTests(unittest.TestCase):
             b = _slice(root, "sl-b", "beta")
             relations.append_edge(root, type="relates_to", frm="slice:sl-a", to="slice:sl-b", now="t", config_hash="h")
             relations.append_edge(root, type="mentions", frm="slice:sl-a", to="entity:MTK", now="t", config_hash="h")
-            weights = linker.materialize_links(root)
+            weights, warnings = linker.materialize_links(root)
+            self.assertEqual(warnings, [])
             fm_a, body_a = fio.read(a.read_text(encoding="utf-8"))
             fm_b, _ = fio.read(b.read_text(encoding="utf-8"))
             self.assertIn("[[beta--sl-b]]", fm_a["related"])
@@ -41,6 +43,39 @@ class LinkerTests(unittest.TestCase):
             self.assertTrue(validate_frontmatter(frontmatter=fm_a, body=body_a).ok)  # checksum intact
             self.assertEqual(fm_a.get("aliases"), ["alpha"])
             self.assertEqual(weights["sl-a"], 2)
+
+    def test_single_bad_slice_fails_soft(self):
+        # #16：單一 slice 寫入失敗只記 warning 跳過，其餘照常物化
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-a", "alpha")
+            b = _slice(root, "sl-b", "beta")
+            relations.append_edge(root, type="relates_to", frm="slice:sl-a", to="slice:sl-b", now="t", config_hash="h")
+            real_update = fio.update
+
+            def flaky_update(path, updates):
+                if path.name.startswith("alpha--"):
+                    raise OSError(28, "No space left on device")
+                real_update(path, updates)
+
+            with mock.patch("paulsha_hippo.moc.linker.fio.update", side_effect=flaky_update):
+                weights, warnings = linker.materialize_links(root)
+            self.assertNotIn("sl-a", weights)
+            self.assertIn("sl-b", weights)
+            self.assertTrue(any("alpha--sl-a.md" in w for w in warnings))
+            fm_b, _ = fio.read(b.read_text(encoding="utf-8"))
+            self.assertIn("[[alpha--sl-a]]", fm_b["related"])  # 好 slice 照常完成
+
+    def test_undecodable_file_skipped_with_warning(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-a", "alpha")
+            kdir = root / "knowledge" / "p"
+            (kdir / "broken.md").write_bytes(b"---\nslice_id: sl-bad\n\xff\xfe---\nbody\n")
+            weights, warnings = linker.materialize_links(root)
+            self.assertIn("sl-a", weights)
+            self.assertNotIn("sl-bad", weights)
+            self.assertTrue(any("broken.md" in w for w in warnings))
 
 
 if __name__ == "__main__":

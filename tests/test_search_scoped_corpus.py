@@ -58,11 +58,11 @@ def test_missing_roots_means_zero_exclusion(tmp_path):
     memory_root = tmp_path / "memory"
     _slice(memory_root, "proj-x", "sl-proj-x", "unique-note", "unique body content")
 
-    stats = search.build_index(memory_root, link_weights={})
+    report = search.build_index(memory_root, link_weights={})
 
-    project_stats = stats.per_project["proj-x"]
-    assert project_stats.excluded == 0
-    assert project_stats.indexed == 1
+    project_stats = report["per_project"]["proj-x"]
+    assert project_stats["excluded"] == 0
+    assert project_stats["indexed"] == 1
     hits = search.search(memory_root, "unique", project="proj-x", limit=5, include_decayed=True)
     assert [hit["slice_id"] for hit in hits] == ["sl-proj-x"]
 
@@ -78,12 +78,12 @@ def test_exclude_rate_warns_over_40pct(tmp_path, caplog):
     _slice(memory_root, "proj-a", "sl-keep", "kept-doc", "project unique retrieval note")
 
     with caplog.at_level(logging.WARNING, logger="paulsha_hippo.moc.search"):
-        stats = search.build_index(memory_root, link_weights={})
+        report = search.build_index(memory_root, link_weights={})
 
-    project_stats = stats.per_project["proj-a"]
-    assert project_stats.indexed == 1
-    assert project_stats.excluded == 1
-    assert project_stats.exclude_rate == 0.5
+    project_stats = report["per_project"]["proj-a"]
+    assert project_stats["indexed"] == 1
+    assert project_stats["excluded"] == 1
+    assert project_stats["exclude_rate"] == 0.5
     assert any("proj-a" in record.message and "exclude_rate=0.50" in record.message
                for record in caplog.records)
-    assert any("proj-a" in warning and "exclude_rate=0.50" in warning for warning in stats.warnings)
+    assert any("proj-a" in warning and "exclude_rate=0.50" in warning for warning in report["warnings"])

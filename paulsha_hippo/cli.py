@@ -171,6 +171,13 @@ def _build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("--include-decayed", action="store_true")
     search_p.set_defaults(func=_search)
 
+    index_p = memory_subparsers.add_parser("index", help="檢索索引維護")
+    index_subparsers = index_p.add_subparsers(dest="index_command", required=True)
+    index_verify = index_subparsers.add_parser(
+        "verify", help="三方對賬：filesystem census × coverage 報表 × index DB 反查")
+    index_verify.add_argument("--memory-root", required=True)
+    index_verify.set_defaults(func=_index_verify)
+
     wakeup_p = memory_subparsers.add_parser("wakeup")
     wakeup_p.add_argument("--memory-root", default=str(paths.memory_root()))
     wakeup_p.add_argument("--project", default=None)
@@ -334,6 +341,12 @@ def _search(args: argparse.Namespace) -> int:
     from .moc.cli import run as search_run
 
     return search_run(args)
+
+
+def _index_verify(args: argparse.Namespace) -> int:
+    from .moc.cli import run_index_verify
+
+    return run_index_verify(args)
 
 
 def _wakeup(args: argparse.Namespace) -> int:
