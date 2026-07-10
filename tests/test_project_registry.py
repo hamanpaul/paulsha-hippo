@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -8,7 +9,9 @@ from paulsha_hippo import paths
 from paulsha_hippo.importer.config import ProjectConfig
 from paulsha_hippo.importer.registry import (
     load_registry,
+    merge_discovery,
     parse_registry,
+    record_discovery,
     registry_schema_version,
     render_registry,
 )
@@ -131,6 +134,89 @@ class RenderParseTests(_ScratchDirTestCase):
         projects = (ProjectConfig(slug="alpha", roots=("/data/a",), remotes=()),)
         path.write_text(render_registry(projects), encoding="utf-8")
         self.assertEqual(load_registry(path), projects)
+
+
+class MergeDiscoveryTests(unittest.TestCase):
+    def test_merge_unions_and_sorts_same_slug(self):
+        existing = (
+            ProjectConfig(slug="alpha", roots=("/data/b",), remotes=("github.com/acme/alpha",)),
+        )
+        merged = merge_discovery(
+            existing, ProjectConfig(slug="alpha", roots=("/data/a", "/data/b"), remotes=())
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].roots, ("/data/a", "/data/b"))
+        self.assertEqual(merged[0].remotes, ("github.com/acme/alpha",))
+
+    def test_merge_appends_new_slug(self):
+        existing = (ProjectConfig(slug="alpha", roots=("/data/a",), remotes=()),)
+        merged = merge_discovery(existing, ProjectConfig(slug="beta", roots=("/data/b",), remotes=()))
+        self.assertEqual([project.slug for project in merged], ["alpha", "beta"])
+
+
+class RecordDiscoveryTests(_ScratchDirTestCase):
+    def registry_path(self) -> Path:
+        return self.root / "project-hippo.yaml"
+
+    def test_first_discovery_creates_file(self):
+        path = self.registry_path()
+        changed = record_discovery(
+            slug="alpha",
+            roots=("/data/a",),
+            remotes=("github.com/acme/alpha",),
+            registry_path=path,
+        )
+        self.assertTrue(changed)
+        parsed = parse_registry(path.read_text(encoding="utf-8"))
+        self.assertEqual([project.slug for project in parsed], ["alpha"])
+
+    def test_repeat_discovery_is_idempotent(self):
+        path = self.registry_path()
+        record_discovery(
+            slug="alpha",
+            roots=("/data/a",),
+            remotes=("github.com/acme/alpha",),
+            registry_path=path,
+        )
+        before = path.read_bytes()
+        changed = record_discovery(
+            slug="alpha",
+            roots=("/data/a",),
+            remotes=("github.com/acme/alpha",),
+            registry_path=path,
+        )
+        self.assertFalse(changed)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_empty_slug_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            record_discovery(slug="", roots=("/data/a",), registry_path=self.registry_path())
+
+    def test_lock_and_artifacts_use_fixed_names_only(self):
+        path = self.registry_path()
+        for index in range(5):
+            record_discovery(slug=f"p-{index}", roots=(f"/data/p-{index}",), registry_path=path)
+        names = {item.name for item in self.root.iterdir()}
+        self.assertLessEqual(
+            names,
+            {"project-hippo.yaml", ".project-hippo.yaml.lock", ".project-hippo.yaml.tmp"},
+        )
+        self.assertIn(".project-hippo.yaml.lock", names)
+
+    def test_concurrent_discoveries_all_land(self):
+        path = self.registry_path()
+        slugs = [f"proj-{index:02d}" for index in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(
+                pool.map(
+                    lambda slug: record_discovery(
+                        slug=slug, roots=(f"/data/{slug}",), registry_path=path
+                    ),
+                    slugs,
+                )
+            )
+        parsed = parse_registry(path.read_text(encoding="utf-8"))
+        self.assertEqual([project.slug for project in parsed], sorted(slugs))
 
 
 if __name__ == "__main__":
