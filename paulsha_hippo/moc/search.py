@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,8 +54,9 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
                 doc_corpus: "object | None" = None) -> BuildIndexStats:
     path = index_path(memory_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        path.unlink()
+    tmp_path = path.with_name(path.name + ".tmp")
+    if tmp_path.exists():  # 上一次 crash 殘留的半成品
+        tmp_path.unlink()
     # 先讀 projects.yaml/建語料，全部成功後才開 sqlite 連線——否則 scoping-config
     # 壞掉會洩漏連線且把整個 retrieval index 打掉（reviewer Important）。
     project_roots = _project_roots(memory_root)
@@ -62,7 +64,7 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     empty_corpus = instruction_corpus.corpus_for_roots(())
     stats = BuildIndexStats()
 
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(tmp_path)
     try:
         conn.execute("CREATE VIRTUAL TABLE slices_fts USING fts5("
                      "slice_id UNINDEXED, project, title, tags, body, tokenize='unicode61')")
@@ -142,9 +144,16 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
             LOGGER.warning(warning)
             stats.warnings.append(warning)
         conn.commit()
-        return stats
-    finally:
+    except BaseException:
         conn.close()
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    conn.close()
+    os.replace(tmp_path, path)  # atomic：讀者永遠只看到完整 DB
+    return stats
 
 
 def search(memory_root: Path, query: str, *, project: str | None, limit: int,

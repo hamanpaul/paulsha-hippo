@@ -35,6 +35,38 @@ class SearchTests(unittest.TestCase):
             with self.assertRaises(search.SearchIndexError):
                 search.search(Path(tmp), "x", project=None, limit=5, include_decayed=False)
 
+    def test_build_index_failure_preserves_existing_db(self):
+        # #16：建索引中途失敗，舊 DB 必須完整保留（廢除先 unlink）
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            before = search.search(root, "alpha", project=None, limit=5, include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in before], ["sl-1"])
+
+            _slice(root, "sl-2", "proj", "beta", "beta body")
+            with mock.patch(
+                "paulsha_hippo.moc.search.retrieval_set.active_records",
+                side_effect=RuntimeError("boom mid-build"),
+            ), self.assertRaises(RuntimeError):
+                search.build_index(root, link_weights={})
+
+            after = search.search(root, "alpha", project=None, limit=5, include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in after], ["sl-1"])  # 舊 DB 未損毀
+            self.assertFalse((search.index_path(root).parent / "retrieval.db.tmp").exists())
+
+    def test_build_index_success_replaces_db_atomically(self):
+        # 守護測試（舊實作下也綠）：成功重建後新內容可查、tmp 不殘留
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            _slice(root, "sl-2", "proj", "beta", "beta body")
+            search.build_index(root, link_weights={})
+            hits = search.search(root, "beta", project=None, limit=5, include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-2"])
+            self.assertFalse((search.index_path(root).parent / "retrieval.db.tmp").exists())
+
     def test_build_index_batches_active_record_lookups(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
