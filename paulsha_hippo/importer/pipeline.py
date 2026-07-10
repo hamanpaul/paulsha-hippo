@@ -298,6 +298,52 @@ def _record_registry_discovery(memory_root: Path, discovery: dict[str, Any] | No
         LOGGER.warning("project registry auto-write failed (fail-open): %s", exc)
 
 
+def _discovery_candidate(
+    *,
+    slug: str,
+    main_root: str | None,
+    remotes: tuple[str, ...],
+    memory_root: Path,
+) -> dict[str, Any] | None:
+    """Discovery 寫入 gate（#14）：僅當 slug 由 remote 正規化派生時才產生 registry 候選。
+
+    dir-name / basename fallback slug 一律 skip（記 debug log）——寫入 gate 一刀切掉
+    整個污染家族：
+    - 無 remote 錨定（remoteless repo / linked worktree / 非 repo 目錄）：slug 必為
+      fallback 派生，寫入後經 union-read 反饋污染解析（如「worktree 目錄名 slug ↦
+      主 repo root」的自我矛盾 mapping 翻轉主 repo 歸屬）。
+    - 有 remote 但 slug 非由該 remote 派生（cwd 已刪的 ephemeral worktree、git 逾時
+      → basename fallback）：垃圾 slug 掛真 remote，真 repo 下個 session 經 remote
+      match 解析成垃圾 slug（自我強化污染）。
+    remote 派生判準：slug 等於某 anchor remote 的正規形（無 config 匹配時
+    resolve_project 的 raw remote slug），或等於 config/registry 以該 remote
+    重解析（remote-only，不帶 cwd）出的 slug。
+    """
+    anchor_remotes = tuple(sorted({value for value in remotes if value}))
+    if not slug or slug == "_unknown" or not anchor_remotes:
+        LOGGER.debug(
+            "project registry discovery skipped（無 remote 錨定，fallback slug 不落盤）: slug=%s",
+            slug,
+        )
+        return None
+    remote_derived = any(
+        slug == remote or slug == resolve_project(remote_url=remote, memory_root=str(memory_root))
+        for remote in anchor_remotes
+    )
+    if not remote_derived:
+        LOGGER.debug(
+            "project registry discovery skipped（slug 非 remote 派生，不落盤）: slug=%s remotes=%s",
+            slug,
+            anchor_remotes,
+        )
+        return None
+    return {
+        "slug": slug,
+        "roots": [main_root] if main_root else [],
+        "remotes": list(anchor_remotes),
+    }
+
+
 def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | Path) -> dict[str, Any]:
     queue_path = Path(queue_item)
     root = Path(memory_root)
@@ -391,11 +437,12 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     )
     decision["classifier_bucket"] = bucket
     decision["project"] = project
-    decision["discovery"] = {
-        "slug": discovery_slug,
-        "roots": [main_root] if main_root else [],
-        "remotes": sorted({value for value in (payload_remote, discovered_remote) if value}),
-    }
+    decision["discovery"] = _discovery_candidate(
+        slug=discovery_slug,
+        main_root=main_root,
+        remotes=(payload_remote, discovered_remote),
+        memory_root=root,
+    )
     decision["rendered"] = render_markdown(
         rendered_session,
         project=project,

@@ -153,11 +153,11 @@ class RegistryAutoWriteTest(unittest.TestCase):
         self.assertEqual(len(projects[0].roots), 1)
         self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
 
-    def test_remoteless_worktree_slug_derived_from_main_root(self):
-        # 回歸釘（#14 review blocking finding）：無 origin remote 的 linked worktree，
-        # discovery slug 必須與 roots 同源（由 main root 推導）。否則會寫入
-        # 「worktree 目錄名 slug ↦ 主 repo root」的自我矛盾 mapping，union-read
-        # 後把主 repo 本體 session 的歸屬翻轉成 worktree 名。
+    def test_remoteless_worktree_discovery_skipped(self):
+        # 回歸釘（#14 review blocking finding F3）：無 origin remote 的 linked worktree，
+        # slug 只能落 dir-name fallback（無 remote 錨定）——寫入 gate 一律 skip discovery，
+        # 不得寫入「fallback slug ↦ 主 repo root」的 mapping；否則 union-read 後
+        # 把主 repo 本體 session 的歸屬翻轉（自我矛盾 mapping 反饋污染）。
         self.enable_auto_write()
         repo = self.make_repo(name="mainrepo", remote=None)
         subprocess.run(
@@ -175,21 +175,64 @@ class RegistryAutoWriteTest(unittest.TestCase):
             name="wt-remoteless.json",
         )
         self.assertEqual(decision["status"], "written")
-        # session 本身的歸屬維持既有 dir-name fallback（worktree 名），不受本修正影響
+        # session 本身的歸屬維持既有 dir-name fallback（worktree 名），不受 gate 影響
         self.assertEqual(decision["project"], f"{self.base.name}/wt")
-        projects = self.read_projects()
-        self.assertEqual(len(projects), 1)
-        # slug 與 roots 同源：main root 的 dir-name 解析，不得是 worktree 目錄名
-        self.assertEqual(projects[0].slug, f"{self.base.name}/mainrepo")
-        self.assertEqual(len(projects[0].roots), 1)
-        self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
-        self.assertEqual(projects[0].remotes, ())
+        # gate：fallback slug 不落盤——registry 完全不寫
+        self.assertIsNone(decision.get("discovery"))
+        self.assertFalse(self.registry_path.exists())
         # 反饋面：主 repo 本體的後續 session 歸屬不被 registry 翻轉成 worktree 名
         main_decision = self.ingest(
             self.payload(cwd=repo, session_id="registry-sid-main-after-wt"),
             name="main-after-wt.json",
         )
         self.assertEqual(main_decision["project"], f"{self.base.name}/mainrepo")
+
+    def test_unresolvable_cwd_with_explicit_remote_not_recorded(self):
+        # 回歸釘（#14 review blocking finding F4）：cwd 無法解析為 git repo
+        # （ephemeral worktree 已刪、git 逾時）時 slug 落 basename fallback，
+        # 顯式 payload remote 不得跟著持久化——否則垃圾 slug 掛真 remote，
+        # 真 repo 下個 session 經 remote match 解析成垃圾 slug（自我強化污染）。
+        self.enable_auto_write()
+        gone = self.base / "gone-worktree"  # 不存在：模擬已刪的 ephemeral worktree
+        with self.assertLogs("paulsha_hippo.importer", level="DEBUG") as captured:
+            decision = self.ingest(
+                self.payload(
+                    cwd=gone,
+                    session_id="registry-sid-gone",
+                    remote_url="git@github.com:acme/real.git",
+                ),
+                name="gone.json",
+            )
+        self.assertEqual(decision["status"], "written")
+        self.assertEqual(decision["project"], "gone-worktree")  # basename fallback
+        self.assertIsNone(decision.get("discovery"))
+        self.assertFalse(self.registry_path.exists())
+        self.assertIn("discovery skipped", "\n".join(captured.output))
+
+    def test_manual_remote_match_slug_still_recorded(self):
+        # gate 正面釘：slug 由 config/registry 的 remote 匹配派生（非 raw remote 形）
+        # 仍屬「remote 正規化派生」，不得被 gate 誤擋。
+        self.enable_auto_write()
+        projects_yaml = self.base / "agents" / "config" / "projects.yaml"
+        projects_yaml.parent.mkdir(parents=True, exist_ok=True)
+        projects_yaml.write_text(
+            "projects:\n"
+            "  widget-manual:\n"
+            "    remotes:\n"
+            "      - github.com/acme/widget\n",
+            encoding="utf-8",
+        )
+        repo = self.make_repo()
+        decision = self.ingest(
+            self.payload(cwd=repo, session_id="registry-sid-manual-match"),
+            name="manual-match.json",
+        )
+        self.assertEqual(decision["status"], "written")
+        self.assertEqual(decision["project"], "widget-manual")
+        projects = self.read_projects()
+        self.assertEqual([project.slug for project in projects], ["widget-manual"])
+        self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
+        self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
 
     def test_registry_failure_does_not_break_ingest(self):
         self.enable_auto_write()

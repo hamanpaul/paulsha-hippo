@@ -19,7 +19,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 - 檔頭：固定 3 行 `#` 註解（generated 宣告、override 指引、本文件路徑）。
 - `schema_version`：int，必填，目前 `1`。
 - `projects`：list（空集輸出 inline `projects: []`）。每項：
-  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。**與 `roots` 同源**：session cwd 位於 linked worktree 時，slug 以歸併後的主 repo root 重新推導（不得記 worktree 目錄名 slug 配主 repo root 的矛盾 mapping）。
+  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。**一律由 remote 正規化派生**（raw remote 形，或 config/registry 依 remote 匹配出的 slug）；dir-name / basename fallback slug 不寫入（見 §5 寫入 gate）。**與 `roots` 同源**：session cwd 位於 linked worktree 時，slug 以歸併後的主 repo root 重新推導（不得記 worktree 目錄名 slug 配主 repo root 的矛盾 mapping）。
   - `roots`：list[str]——絕對路徑；**linked worktree 一律歸併為主 repo root**（`git rev-parse --git-common-dir`）。
   - `remotes`：list[str]——正規化 remote 識別（見 §3）。
   - `aliases`：list[str]——v1 producer 恆輸出 `[]`（hippo 無 alias 發現來源；欄位保留前向相容），inline 形式。
@@ -47,6 +47,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 
 - **Opt-in**：`~/.config/paulsha-hippo/config.yaml` 設 `project_registry.auto_write: true` 才寫（預設 off）。
 - 觸發點：importer ingest 完成（dry-run 不寫）；`slug` 為 `_unknown`、或 roots 與 remotes 全空的 session 不寫。
+- **寫入 gate（remotes 必須是真 remote）**：僅當 slug 由 remote 正規化派生（session 的 git remote，或顯式 payload remote 鍵 `remote_url` / `remote` 經 config/registry 匹配）才寫；dir-name / basename fallback slug 一律 skip（記 debug log）——杜絕 remoteless worktree 的自我矛盾 mapping，與已刪 cwd / git 逾時下「垃圾 slug 掛真 remote」的自我強化污染。path 形 `repo` 欄位（toplevel 路徑輸入）僅供解析比對，不得寫入 `remotes`。
 - 互斥：固定名 lock `flock(LOCK_EX)`；原子性：寫 `.project-hippo.yaml.tmp` 後 `os.replace`；內容未變則跳寫（冪等）。
 - Fail-open：registry 寫入失敗不影響 ingest 主流程（記 warning）。
 - **分權**：generated 檔不允許手改（檔頭註明；手改內容會在下次寫入被 canonical 化覆蓋）。使用者 override 一律放 manual 檔——hippo 側 legacy `projects.yaml`，或 cortex 側 `project-cortex.yaml`。
