@@ -247,6 +247,35 @@ class IndexVerifyCliTests(unittest.TestCase):
             payload = json.loads(buf.getvalue())
             self.assertIn("error", payload)
 
+    def test_cli_index_verify_reads_db_coverage_when_json_missing(self):
+        # 派生 JSON 缺席（衍生失敗情境）：verify 以 DB 內權威 coverage 對賬
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_mixed_tree(root)
+            search.build_index(root, link_weights={})
+            search.coverage_path(root).unlink()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["index", "verify", "--memory-root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(json.loads(buf.getvalue())["ok"])
+
+    def test_cli_index_verify_falls_back_to_json_for_legacy_db(self):
+        # coverage 表出現前的舊版 DB：退回讀派生 JSON，不無故報缺
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_mixed_tree(root)
+            search.build_index(root, link_weights={})
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("DROP TABLE coverage")
+            conn.commit()
+            conn.close()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["index", "verify", "--memory-root", str(root)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(json.loads(buf.getvalue())["ok"])
+
     def test_cli_index_verify_detects_drift(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

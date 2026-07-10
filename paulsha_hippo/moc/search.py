@@ -49,7 +49,13 @@ def index_path(memory_root: Path) -> Path:
 
 
 def coverage_path(memory_root: Path) -> Path:
-    """build_index() 成功後原子落盤的六欄 coverage 報表（三方對賬的比對基準）。"""
+    """索引成功發布後派生的六欄 coverage JSON（便利輸出）。
+
+    權威 coverage 存於 retrieval.db 內的 ``coverage`` 表（read_coverage()），
+    與索引由同一次 os.replace 原子發布；本檔為發布後的派生輸出，衍生失敗
+    只記 warning、可能 stale——讀取端（cli.run_index_verify）以 DB 為準，
+    僅對沒有 coverage 表的舊版 DB 退回讀本檔。
+    """
     return memory_root / "runtime" / "indexes" / "retrieval.coverage.json"
 
 
@@ -69,8 +75,9 @@ def _index_write_lock(memory_root: Path) -> "Iterator[None]":
 
     global dream lock（PR-A 契約 #3，dream run 入口）擋不住 rekey / retitle
     在 dream 入口外直接呼叫 run_moc 的重建路徑；互斥必須落在所有 writer
-    共用的最低層——本函式由 build_index 全程持有（掃描→temp DB→atomic
-    replace→coverage 落盤為單一 critical section，DB 與 coverage 永遠成對）。
+    共用的最低層——本函式由 build_index 全程持有（掃描→temp DB（含
+    coverage 表）→單次 atomic replace 為單一 critical section，索引與
+    coverage 永遠成對；coverage JSON 為發布後派生輸出）。
     持鎖進程死亡時 kernel 自動釋放 flock，不會殘留死鎖。
     """
     lock_path = index_lock_path(memory_root)
@@ -95,13 +102,60 @@ def _unique_tmp(target: Path) -> Path:
 
 
 def _write_coverage(memory_root: Path, coverage: dict[str, object]) -> None:
+    """派生 coverage JSON（成功發布後的便利輸出；權威版在 DB coverage 表）。"""
     cov_path = coverage_path(memory_root)
     tmp = _unique_tmp(cov_path)
-    tmp.write_text(
-        json.dumps(coverage, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, cov_path)
+    try:
+        tmp.write_text(
+            json.dumps(coverage, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, cov_path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _persist_coverage_table(conn: sqlite3.Connection,
+                            coverage: dict[str, object]) -> None:
+    """coverage 併入 temp DB 的 ``coverage`` 表（單一 JSON payload 列）。
+
+    必須在 os.replace **之前**執行：索引與 coverage 由同一次 replace 原子
+    發布，這裡任何失敗都留在 temp 檔內、舊 DB 與舊 coverage 完整保留——
+    關閉「replace 已換新 DB、coverage 尚未落盤」的半發布視窗。
+    """
+    conn.execute("CREATE TABLE coverage (payload TEXT NOT NULL)")
+    conn.execute("INSERT INTO coverage VALUES (?)",
+                 (json.dumps(coverage, ensure_ascii=False, sort_keys=True),))
+
+
+def read_coverage(memory_root: Path) -> "dict[str, object] | None":
+    """讀已發布索引 DB 內的六欄 coverage（權威來源；與索引同次 replace 發布）。
+
+    回傳 None 表示不可得：索引不存在、DB 無 coverage 表（本表出現前的
+    舊版 DB）或 payload 不可解析——讀取端自行決定 fallback（派生 JSON）
+    或回報缺失。
+    """
+    path = index_path(memory_root)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute("SELECT payload FROM coverage").fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def build_index(memory_root: Path, link_weights: dict[str, int],
@@ -111,8 +165,10 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     回傳 dict（跨批次契約 #6）：六欄 ``scanned / invalid_frontmatter /
     pool_excluded / noise_excluded / eligible / indexed``（excluded 兩欄為
     {reason: count}），外加 repo 內部鍵 ``per_project``（exclude-rate 觀測）
-    與 ``warnings``。同一份六欄 coverage 會原子落盤到 ``coverage_path()``，
-    供 `hippo index verify` 三方對賬（census.py）。
+    與 ``warnings``。同一份六欄 coverage 先寫進 temp DB 的 ``coverage`` 表、
+    與索引由**單次** os.replace 原子發布（read_coverage() 為 `hippo index
+    verify` 三方對賬的權威來源，census.py）；發布成功後另派生
+    ``coverage_path()`` JSON，衍生失敗僅記 warning、不影響已發布的索引。
 
     掃描檔案唯一去向（census._fate 以刻意雙寫的獨立規則對齊——分支順序與
     reason 字串一字不差；規則有意圖內變更時兩邊必須同步改，見 census.py
@@ -258,6 +314,12 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
         # indexed 從 DB 讀回而非回抄迴圈計數——報表對 DB 的最小自檢
         coverage["indexed"] = conn.execute(
             "SELECT COUNT(*) FROM slice_meta").fetchone()[0]
+        # coverage 併入同一顆 temp DB：與索引同一次 os.replace 原子發布。
+        # 若 coverage 寫在 replace 之後，寫入失敗（ENOSPC）或程序在兩步間
+        # 終止會留下「新 DB＋舊/缺 coverage」且整體回報失敗——違反「建索引
+        # 失敗時舊 DB 完整保留」契約（Codex 複驗 blocking）。
+        _persist_coverage_table(conn, coverage)
+        conn.commit()
     except BaseException:
         conn.close()
         try:
@@ -266,8 +328,14 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
             pass
         raise
     conn.close()
-    os.replace(tmp_path, path)  # atomic：讀者永遠只看到完整 DB
-    _write_coverage(memory_root, coverage)
+    os.replace(tmp_path, path)  # atomic：索引＋coverage 一次發布，讀者永遠看到完整成對
+    try:
+        _write_coverage(memory_root, coverage)  # 派生 JSON；權威版已隨 DB 發布
+    except OSError as exc:
+        message = (f"index: coverage json derivation failed ({exc}); "
+                   "index published, authoritative coverage in retrieval.db")
+        LOGGER.warning(message)
+        warnings.append(message)
     return {
         **coverage,
         "per_project": {

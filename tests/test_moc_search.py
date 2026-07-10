@@ -232,6 +232,90 @@ class SearchTests(unittest.TestCase):
         return rows
 
 
+class AtomicCoveragePublishTests(unittest.TestCase):
+    """索引與 coverage 必須由單次 os.replace 原子發布（Codex 複驗 blocking）。
+
+    舊實作先 replace 新 DB、之後才寫 coverage JSON：coverage 寫入失敗
+    （ENOSPC/OSError）或程序在兩步間終止時，build_index 回報失敗但舊 DB
+    已被不可逆替換——留下新 DB＋舊/缺 coverage，違反「建索引失敗時舊 DB
+    完整保留」驗收契約。修正：coverage 併入同一顆 temp DB（coverage 表），
+    replace 之前任何失敗都只丟 temp 檔；coverage JSON 改為發布成功後的
+    派生輸出，衍生失敗僅記 warning、不推翻已原子發布的索引。
+    """
+
+    def _built_with_baseline(self, tmp: str) -> "tuple[Path, str]":
+        root = Path(tmp)
+        _slice(root, "sl-1", "proj", "alpha", "alpha body")
+        search.build_index(root, link_weights={})
+        old_cov = search.coverage_path(root).read_text(encoding="utf-8")
+        _slice(root, "sl-2", "proj", "beta", "beta body")
+        return root, old_cov
+
+    def test_coverage_merge_failure_preserves_old_db_and_coverage(self):
+        # (a) coverage 合併進 temp DB 階段失敗 → 舊 DB 與舊 coverage 完整保留
+        with TemporaryDirectory() as tmp:
+            root, old_cov = self._built_with_baseline(tmp)
+            with mock.patch(
+                "paulsha_hippo.moc.search._persist_coverage_table",
+                side_effect=OSError(28, "No space left on device"),
+            ), self.assertRaises(OSError):
+                search.build_index(root, link_weights={})
+
+            hits = search.search(root, "alpha OR beta", project=None, limit=10,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])  # 舊 DB 未被替換
+            self.assertEqual(
+                search.coverage_path(root).read_text(encoding="utf-8"), old_cov)
+            self.assertEqual(list(search.index_path(root).parent.glob("*.tmp")), [])
+
+    def test_coverage_json_derivation_failure_keeps_index_published(self):
+        # (b) replace 成功後派生 JSON 失敗 → 索引可用、不回報整體失敗、僅記 warning
+        with TemporaryDirectory() as tmp:
+            root, old_cov = self._built_with_baseline(tmp)
+            with mock.patch(
+                "paulsha_hippo.moc.search._write_coverage",
+                side_effect=OSError(28, "No space left on device"),
+            ):
+                report = search.build_index(root, link_weights={})
+
+            self.assertEqual(report["indexed"], 2)
+            self.assertTrue(any("coverage json" in w for w in report["warnings"]))
+            ids = {h["slice_id"] for h in search.search(
+                root, "alpha OR beta", project=None, limit=10, include_decayed=True)}
+            self.assertEqual(ids, {"sl-1", "sl-2"})  # 新索引已原子發布可用
+            # 派生 JSON 停在舊版：讀取端以 DB 內權威 coverage 為準
+            self.assertEqual(
+                search.coverage_path(root).read_text(encoding="utf-8"), old_cov)
+            self.assertEqual(search.read_coverage(root)["indexed"], 2)
+
+    def test_read_coverage_matches_derived_json_after_success(self):
+        # 權威（DB coverage 表）與派生（JSON）在成功發布後內容一致、恰六鍵
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            from_db = search.read_coverage(root)
+            from_json = json.loads(
+                search.coverage_path(root).read_text(encoding="utf-8"))
+            self.assertEqual(from_db, from_json)
+            self.assertEqual(
+                set(from_db),
+                {"scanned", "invalid_frontmatter", "pool_excluded",
+                 "noise_excluded", "eligible", "indexed"})
+
+    def test_read_coverage_absent_index_or_legacy_db_returns_none(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(search.read_coverage(root))  # 索引不存在
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("DROP TABLE coverage")  # 模擬本表出現前的舊版 DB
+            conn.commit()
+            conn.close()
+            self.assertIsNone(search.read_coverage(root))
+
+
 class ConcurrentRebuildTests(unittest.TestCase):
     """並發重建不得發布半成品（Codex review blocking）。
 
