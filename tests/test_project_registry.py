@@ -1,8 +1,19 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from paulsha_hippo import paths
+from paulsha_hippo.importer.config import ProjectConfig
+from paulsha_hippo.importer.registry import (
+    load_registry,
+    parse_registry,
+    registry_schema_version,
+    render_registry,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProjectRegistryPathTests(unittest.TestCase):
@@ -38,6 +49,88 @@ class ProjectRegistryPathTests(unittest.TestCase):
                 str(paths.project_registry_path()),
                 "/data/agents2/config/paulsha/project-hippo.yaml",
             )
+
+
+class _ScratchDirTestCase(unittest.TestCase):
+    def setUp(self):
+        self.scratch = REPO_ROOT / ".test-work"
+        self.scratch.mkdir(exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=self.scratch)
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        try:
+            self.scratch.rmdir()
+        except OSError:
+            pass
+
+
+class RenderParseTests(_ScratchDirTestCase):
+    def test_render_registry_is_deterministic_and_sorted(self):
+        projects = (
+            ProjectConfig(slug="zeta", roots=("/data/z2", "/data/z1", "/data/z1"), remotes=()),
+            ProjectConfig(
+                slug="alpha",
+                roots=(),
+                remotes=("github.com/acme/alpha",),
+                aliases=("a2", "a1"),
+            ),
+        )
+        expected = (
+            "# GENERATED — 本檔由 paulsha-hippo 自動產生（project registry discovery record），請勿手改。\n"
+            "# 使用者 override 請寫 manual 檔（projects.yaml / project-cortex.yaml），詳見契約文件。\n"
+            "# contract: docs/project-registry-contract.md\n"
+            "schema_version: 1\n"
+            "projects:\n"
+            "  - slug: alpha\n"
+            "    roots: []\n"
+            "    remotes:\n"
+            "      - github.com/acme/alpha\n"
+            "    aliases: [a1, a2]\n"
+            "  - slug: zeta\n"
+            "    roots:\n"
+            "      - /data/z1\n"
+            "      - /data/z2\n"
+            "    remotes: []\n"
+            "    aliases: []\n"
+        )
+        self.assertEqual(render_registry(projects), expected)
+
+    def test_render_registry_empty_projects(self):
+        rendered = render_registry(())
+        self.assertTrue(rendered.endswith("schema_version: 1\nprojects: []\n"))
+
+    def test_parse_registry_round_trips_render(self):
+        projects = (
+            ProjectConfig(
+                slug="alpha",
+                roots=("/data/a",),
+                remotes=("github.com/acme/alpha",),
+                aliases=("a1",),
+            ),
+            ProjectConfig(slug="zeta", roots=("/data/z",), remotes=(), aliases=()),
+        )
+        self.assertEqual(parse_registry(render_registry(projects)), projects)
+
+    def test_parse_registry_tolerates_comments_and_empty(self):
+        self.assertEqual(parse_registry(""), ())
+        self.assertEqual(parse_registry("# only comment\nschema_version: 1\nprojects: []\n"), ())
+
+    def test_registry_schema_version_reads_header(self):
+        self.assertEqual(registry_schema_version("schema_version: 1\nprojects: []\n"), 1)
+        self.assertIsNone(registry_schema_version("projects: []\n"))
+        self.assertIsNone(registry_schema_version("schema_version: abc\n"))
+
+    def test_load_registry_missing_file_returns_empty(self):
+        self.assertEqual(load_registry(self.root / "absent.yaml"), ())
+        self.assertEqual(load_registry(None), ())
+
+    def test_load_registry_reads_rendered_file(self):
+        path = self.root / "project-hippo.yaml"
+        projects = (ProjectConfig(slug="alpha", roots=("/data/a",), remotes=()),)
+        path.write_text(render_registry(projects), encoding="utf-8")
+        self.assertEqual(load_registry(path), projects)
 
 
 if __name__ == "__main__":
