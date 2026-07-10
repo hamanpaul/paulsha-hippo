@@ -2,12 +2,33 @@
 Test suite for processing ledger (session state machine).
 """
 import json
+import os
+from contextlib import contextmanager
 from unittest import mock
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paulsha_hippo.ledger import processing
+
+
+@contextmanager
+def _global_disable_rules_override(rule_ids):
+    """模擬使用者 policy.override.yaml 的全域 disable_rules 生效（Codex 複驗情境）。
+
+    HOME 與 PSC_CONFIG_ROOT 同時導向暫存 config，確保無論環境變數解析路徑為何，
+    無參數 load_policy() 都會讀到這份 override。
+    """
+    with TemporaryDirectory() as tmp:
+        config_dir = Path(tmp) / ".config" / "paulshaclaw"
+        config_dir.mkdir(parents=True)
+        (config_dir / "policy.override.yaml").write_text(
+            json.dumps({"disable_rules": list(rule_ids)}), encoding="utf-8"
+        )
+        with mock.patch.dict(
+            os.environ, {"HOME": str(tmp), "PSC_CONFIG_ROOT": str(config_dir)}
+        ):
+            yield
 
 
 class TestProcessingLedger(unittest.TestCase):
@@ -213,6 +234,24 @@ class TestSanitizeErrorText(unittest.TestCase):
         self.assertNotIn(secret, out)
         self.assertNotIn("boom", out)
         self.assertEqual(out, processing._REDACTION_FAILED_PLACEHOLDER)
+
+    # Codex 複驗 blocking：policy.override.yaml 的 disable_rules 是正式功能（使用者
+    # 可停用誤判規則），但持久化出口的強制 scrub 必須用不可被 override 停用的
+    # baseline 規則——否則 disable_rules 一設，credential 原文直落 _failed/*.json、
+    # processing.jsonl、dream.jsonl。
+    def test_global_disable_rules_override_cannot_weaken_sanitize(self):
+        from paulsha_hippo.policy import load_default_policy, load_policy
+
+        all_rule_ids = sorted(load_default_policy().secret_rules)
+        with _global_disable_rules_override(all_rule_ids):
+            # 情境武裝確認：一般（可 override）load_policy 確實讀到全域停用
+            self.assertEqual(set(load_policy().disabled_rules), set(all_rule_ids))
+            for name, secret in self._SECRET_SAMPLES.items():
+                with self.subTest(rule=name):
+                    out = processing.sanitize_error_text(f"HTTP 401: {secret} rejected")
+                    self.assertNotIn(secret, out)
+                    self.assertNotIn("xyzzy-token-123456", out)
+                    self.assertIn("REDACTED", out)
 
     def test_redact_secret_text_keeps_clean_lines_in_multiline_text(self):
         secret = "sk-ant-" + "a1B2c3D4" * 4

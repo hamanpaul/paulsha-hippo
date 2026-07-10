@@ -18,19 +18,25 @@ _REDACTION_FAILED_PLACEHOLDER = "[REDACTION UNAVAILABLE: text withheld]"
 
 
 def redact_secret_text(text: str) -> str:
-    """套用 repo 既有 policy secret redaction 規則（fail-closed）。
+    """套用 baseline policy secret redaction 規則（fail-closed、不可被 override 弱化）。
 
     命中 credential（GitHub PAT／Bearer token／OpenAI・Anthropic key 等
     `policy/secrets.yaml` 規則）的行整行以 `[REDACTED LINE: <rule> xN]` 佔位
     （沿用 `policy.redact_lines` 既有語意）。redaction 機制本身失效（policy
     載入／regex 錯誤）時整段以 placeholder 取代——秘密永不落 ledger／evidence。
+
+    Codex 複驗 blocking：這裡是持久化出口（parked evidence、processing ledger、
+    dream ledger）的強制 scrub，必須以 `override_path=None` 載入 immutable
+    baseline 規則——使用者 policy.override.yaml 的 `disable_rules`／
+    `disable_rules_for_session` 是給蒸餾管線調誤判用的，不得停用持久化 sanitize，
+    否則 credential 原文直落 `_failed/*.json`／processing.jsonl／dream.jsonl。
     """
     try:
         from paulsha_hippo.policy import load_policy, redact_lines
 
         return redact_lines(
             str(text),
-            policy=load_policy(),
+            policy=load_policy(override_path=None),
             session_ref=None,
             boundary="raw_to_distilled",
         ).text

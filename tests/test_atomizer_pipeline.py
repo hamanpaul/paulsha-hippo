@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -1426,6 +1428,21 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertEqual(result["summary"]["split_sessions"], 0)
 
 
+@contextmanager
+def _global_disable_rules_override(rule_ids):
+    """模擬使用者 policy.override.yaml 的全域 disable_rules 生效（Codex 複驗情境）。"""
+    with TemporaryDirectory() as tmp:
+        config_dir = Path(tmp) / ".config" / "paulshaclaw"
+        config_dir.mkdir(parents=True)
+        (config_dir / "policy.override.yaml").write_text(
+            json.dumps({"disable_rules": list(rule_ids)}), encoding="utf-8"
+        )
+        with mock.patch.dict(
+            os.environ, {"HOME": str(tmp), "PSC_CONFIG_ROOT": str(config_dir)}
+        ):
+            yield
+
+
 class ParkEvidenceRedactionTests(unittest.TestCase):
     """#15 review F1：parked 證據與 processing ledger 不得留 credential 副本。"""
 
@@ -1458,6 +1475,40 @@ class ParkEvidenceRedactionTests(unittest.TestCase):
             # 乾淨行保留（line-level redaction 不整段清空）
             self.assertIn("model chatter", evidence["last_output_excerpt"])
             self.assertIn("tail line", evidence["last_output_excerpt"])
+
+            ledger_blob = processing.processing_path(root).read_text(encoding="utf-8")
+            self.assertNotIn(secret_err, ledger_blob)
+            self.assertNotIn(secret_out, ledger_blob)
+
+    def test_global_disable_rules_override_cannot_weaken_park_evidence(self):
+        """Codex 複驗 blocking：override 全域 disable_rules 停用規則後，parked 證據
+        與 processing ledger 的強制 scrub 不得弱化——credential 原文仍不得落
+        _failed/*.json 與 processing.jsonl。"""
+        secret_err = "ghp_" + "A1b2C3d4" * 5
+        secret_out = "sk-ant-" + "a1B2c3D4" * 4
+        rule_ids = ["github_pat", "openai_key", "anthropic_key", "bearer_token", "jwt"]
+        with _global_disable_rules_override(rule_ids), TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_key = "claude:s1__" + "a" * 64
+            cache_dir = root / "runtime" / "cache" / "atomize"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / f"{cache_key}.json").write_text(
+                f"api_key = {secret_out}", encoding="utf-8"
+            )
+
+            pipeline._park_session(
+                root, session_key="claude:s1", category="backend_unavailable",
+                attempts=0, cache_key=cache_key,
+                error_text=f"HTTP 401: Authorization: Bearer {secret_err}",
+                now="2026-07-10T00:00:00Z", config_hash="h",
+            )
+
+            evidence_blob = (
+                root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn(secret_err, evidence_blob)
+            self.assertNotIn(secret_out, evidence_blob)
+            self.assertIn("REDACTED", evidence_blob)
 
             ledger_blob = processing.processing_path(root).read_text(encoding="utf-8")
             self.assertNotIn(secret_err, ledger_blob)
