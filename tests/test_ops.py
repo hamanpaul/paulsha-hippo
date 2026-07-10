@@ -349,3 +349,99 @@ class InstallHooksResolverTests(unittest.TestCase):
         argv = run.call_args[0][0]
         self.assertIn("--memory-root", argv)
         self.assertEqual(argv[argv.index("--memory-root") + 1], "/resolved/from/env")
+
+
+class FixBackendMigrationTests(unittest.TestCase):
+    _OVERRIDE = (
+        'schema_version: "1"\n'
+        "agent_exec:\n"
+        "  command:\n"
+        "    - claude\n"
+        "    - -p\n"
+    )
+
+    def _env(self, tmp: str) -> dict[str, str]:
+        return {
+            "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+            "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+            "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            "PSC_MEMORY_ROOT": f"{tmp}/memory",
+        }
+
+    def _write_override(self, tmp: str) -> Path:
+        override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_text(self._OVERRIDE, encoding="utf-8")
+        return override
+
+    def _real_exe(self, tmp: str) -> Path:
+        exe = Path(tmp) / "bin" / "claude"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        exe.chmod(0o755)
+        return exe
+
+    def test_fix_backend_rewrites_bare_command_and_backs_up(self):
+        with TemporaryDirectory() as tmp:
+            override = self._write_override(tmp)
+            exe = self._real_exe(tmp)
+
+            def fake_which(cmd, path=None):
+                # 只攔 claude：service-effective PATH（path 給定）→ 解析不到；互動環境 → 找得到。
+                # systemctl 等其他查詢一律 None，讓 doctor 走無 systemd fallback（確定性）。
+                if cmd != "claude":
+                    return None
+                return None if path is not None else str(exe)
+
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(ops, "_service_effective_path_env",
+                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops.shutil, "which", side_effect=fake_which):
+                rc = ops.run_doctor(fix_backend=True)
+
+            self.assertEqual(rc, 0)
+            body = override.read_text(encoding="utf-8")
+            self.assertIn(f"    - {exe}\n", body)
+            self.assertNotIn("\n    - claude\n", body)
+            backup = override.with_name(override.name + ".bak")
+            self.assertIn("    - claude\n", backup.read_text(encoding="utf-8"))
+
+    def test_fix_backend_is_idempotent_on_second_run(self):
+        with TemporaryDirectory() as tmp:
+            override = self._write_override(tmp)
+            exe = self._real_exe(tmp)
+
+            def fake_which(cmd, path=None):
+                if cmd != "claude":
+                    return None
+                return None if path is not None else str(exe)
+
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(ops, "_service_effective_path_env",
+                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops.shutil, "which", side_effect=fake_which):
+                self.assertEqual(ops.run_doctor(fix_backend=True), 0)
+                first_body = override.read_text(encoding="utf-8")
+                self.assertEqual(ops.run_doctor(fix_backend=True), 0)
+                second_body = override.read_text(encoding="utf-8")
+
+            self.assertEqual(first_body, second_body)
+            backup = override.with_name(override.name + ".bak")
+            # 第二輪 no-op：備份仍是第一輪存下的原始裸命令版
+            self.assertIn("    - claude\n", backup.read_text(encoding="utf-8"))
+
+    def test_fix_backend_without_override_is_noop(self):
+        with TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(ops, "_probe_backend_service_effective",
+                                   return_value=("- distiller backend：✓ mocked", False)):
+                self.assertEqual(ops.run_doctor(fix_backend=True), 0)
+
+    def test_fix_backend_unresolvable_everywhere_fails(self):
+        with TemporaryDirectory() as tmp:
+            self._write_override(tmp)
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(ops, "_service_effective_path_env",
+                                   return_value="/usr/bin:/bin"), \
+                 mock.patch.object(ops.shutil, "which", return_value=None):
+                self.assertEqual(ops.run_doctor(fix_backend=True), 1)

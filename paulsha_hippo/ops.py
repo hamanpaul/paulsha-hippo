@@ -6,6 +6,7 @@ fallback 指引而非硬錯（G3「先驗證再選路」）。
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -116,7 +117,12 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
 
 # ---------------------------------------------------------------- doctor
 
-def run_doctor() -> int:
+def run_doctor(*, fix_backend: bool = False) -> int:
+    if fix_backend:
+        code, message = _fix_backend_override()
+        print(message, file=sys.stderr if code else sys.stdout)
+        if code:
+            return code
     report = paths.resolution_report()
     failed = False
     print("# hippo doctor")
@@ -202,6 +208,65 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
         "（hippo doctor --fix-backend 可嘗試自動遷移）",
         True,
     )
+
+
+_COMMAND_LIST_HEAD_RE = re.compile(r"^(\s*-\s+)(\S+)\s*$")
+
+
+def _rewrite_override_command_head(text: str, bare: str, resolved: str) -> tuple[str, bool]:
+    """單點改寫：agent_exec.command 清單第一項 == bare 的 token 換成 resolved。
+
+    只處理 init 產生的 override 結構（`command:` 下第一個 `- <token>`）；
+    結構對不上回 (原文, False)，交上層報「需人工」。"""
+    lines = text.splitlines(keepends=True)
+    in_command = False
+    for index, line in enumerate(lines):
+        if line.strip() == "command:":
+            in_command = True
+            continue
+        if in_command:
+            match = _COMMAND_LIST_HEAD_RE.match(line.rstrip("\n"))
+            if match and match.group(2) == bare:
+                newline = "\n" if line.endswith("\n") else ""
+                lines[index] = f"{match.group(1)}{resolved}{newline}"
+                return "".join(lines), True
+            return "".join(lines), False
+    return "".join(lines), False
+
+
+def _fix_backend_override() -> tuple[int, str]:
+    """冪等 migration（#15 既有部署救援）：override 內 service-effective 解析不到的
+    裸 backend 命令 → 備份原檔 → 改寫為絕對路徑。回傳 (exit_code, 訊息)。"""
+    from paulsha_hippo.atomizer import config as atomizer_config
+
+    override = paths.config_path("atomizer.override.yaml")
+    if not override.is_file():
+        return 0, f"fix-backend: override 不存在（{override}），無可遷移"
+    try:
+        cfg, _ = atomizer_config.load_config()
+    except Exception as exc:
+        return 1, f"fix-backend: config 無法載入：{exc}"
+    if cfg.agent_exec_backend == "openai-compatible":
+        return 0, "fix-backend: openai-compatible backend 無 argv，無可遷移"
+    command = atomizer_config.resolve_command_argv(cfg.agent_exec_command)
+    argv0 = command[0]
+    if Path(argv0).is_absolute():
+        return 0, f"fix-backend: argv[0] 已是絕對路徑（{argv0}），無可遷移"
+    if shutil.which(argv0, path=_service_effective_path_env()) is not None:
+        return 0, f"fix-backend: {argv0} 在 service-effective PATH 已可解析，無可遷移"
+    try:
+        resolved = resolve_backend_argv([argv0])[0]
+    except BackendUnavailableError as exc:
+        return 1, f"fix-backend: {exc}（互動環境也解析不到，請先安裝 backend）"
+    text = override.read_text(encoding="utf-8")
+    new_text, replaced = _rewrite_override_command_head(text, argv0, resolved)
+    if not replaced:
+        return 1, (f"fix-backend: override 未含 agent_exec.command 首項 {argv0!r}，"
+                   "無法自動改寫（請手動修改或重跑 hippo init）")
+    backup = override.with_name(override.name + ".bak")
+    shutil.copy2(override, backup)
+    override.write_text(new_text, encoding="utf-8")
+    return 0, f"fix-backend: {argv0} → {resolved}（備份：{backup}）"
 
 
 # ---------------------------------------------------------------- install hooks

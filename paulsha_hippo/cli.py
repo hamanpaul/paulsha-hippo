@@ -64,6 +64,9 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.set_defaults(func=_ops_init)
 
     doctor_p = memory_subparsers.add_parser("doctor", help="健檢：路徑契約/hooks/服務/backend")
+    doctor_p.add_argument(
+        "--fix-backend", action="store_true",
+        help="冪等遷移：override 中 service-effective 解析不到的裸 backend 命令改寫為絕對路徑（先備份）")
     doctor_p.set_defaults(func=_ops_doctor)
 
     install_p = memory_subparsers.add_parser("install")
@@ -811,7 +814,7 @@ def _ops_init(args) -> int:
 def _ops_doctor(args) -> int:
     from paulsha_hippo import ops
 
-    return ops.run_doctor()
+    return ops.run_doctor(fix_backend=getattr(args, "fix_backend", False))
 
 
 def _ops_install_hooks(args) -> int:
