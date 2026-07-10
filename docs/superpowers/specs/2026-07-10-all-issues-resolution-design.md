@@ -173,8 +173,10 @@
   2. test agent（targeted + 全套 pytest）
   3. adversarial verify ×3 lens 並行（正確性／policy 合規／迴歸風險）。**fail-closed 裁決**：任一 lens 報 blocking severity（critical/high）→ 該批 fail，不得以多數決覆蓋——三個 lens 是互補視角，不是冗餘投票。
   4. fix loop ≤ 2 輪（verify fail → fix agent → re-verify）
-  5. **merge gate（在最新 main 上重驗）**：rebase 到 latest main → 重跑全套 pytest + `python3 -m policy_check --repo .` + changelog.d 碎片存在。sibling 先合入導致綠燈失效 → 回 fix loop。
-  6. 開 PR（title conventional-commit、body `Closes #N` + checklist 全勾、zh-tw）→ `gh pr merge --squash`
+  5. **Codex 異質 gate**（Claude×Codex 分工：Claude 寫＋編排，Codex 審）：以 forwarder subagent 驅動 codex-companion 對該 branch 跑 adversarial-review（gpt-5.6-sol）。**fail-closed**：Codex blocking finding 同樣擋 merge、回 fix loop。防護：45 分鐘 timeout → cancel + resume thread 要結論 → 仍失敗則該批標「Codex review 缺席」，以 3-lens 結果 + 使用者事後補審決定 merge（缺席事實必須回報，不得靜默）。Codex 為單線 queue，review 請求排隊執行。
+  6. **merge gate（在最新 main 上重驗）**：rebase 到 latest main → 重跑全套 pytest + `python3 -m policy_check --repo .` + changelog.d 碎片存在。sibling 先合入導致綠燈失效 → 回 fix loop。
+  7. 開 PR（title conventional-commit、body `Closes #N` + checklist 全勾、zh-tw）→ `gh pr merge --squash`
+- **Plan 前審**：6 份 plan 完成後、workflow 啟動前，先送 Codex 一次 plan-level adversarial review（上游攔截成本最低）；blocking finding 修 plan 後才開工。
 - **失敗語義**：批次 2 輪 fix 仍 fail → 標 `blocked`、不 merge；下游批次不啟動、如實回報。merge conflict → rebase 重試一次，再衝突 → 人工介入點。
 - **產出**：每批次回報 {branch, PR url, merge SHA, 測試摘要, verify 裁決}；恢復序列回報每步證據；收口回報 issue 連結。
 
