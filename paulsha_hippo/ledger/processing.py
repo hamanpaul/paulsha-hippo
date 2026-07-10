@@ -11,7 +11,21 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_STATES = {"split", "promoted", "skipped"}
+VALID_STATES = {"split", "promoted", "skipped", "parked"}
+PARKED_FAILURE_CATEGORIES = {"backend_unavailable", "transient", "invalid_output"}
+_ERROR_TEXT_MAX_CHARS = 500
+
+
+def sanitize_error_text(text: str, limit: int = _ERROR_TEXT_MAX_CHARS) -> str:
+    """Bounded、去敏的錯誤文字：壓平 whitespace、遮蔽 home 前綴、截斷。
+
+    parked 事件與 dream orchestrator 的 error 欄位共用（契約：≤500 字元、去敏）。
+    """
+    collapsed = " ".join(str(text).split())
+    home = str(Path.home())
+    if home and home != "/":
+        collapsed = collapsed.replace(home, "~")
+    return collapsed[:limit]
 
 
 class ProcessingLedgerError(Exception):
@@ -49,7 +63,11 @@ def append_state(
     """
     if state not in VALID_STATES:
         raise ValueError(f"invalid processing state: {state}")
-    
+    if state == "parked" and extra.get("failure_category") not in PARKED_FAILURE_CATEGORIES:
+        raise ValueError(
+            f"parked event requires failure_category in {sorted(PARKED_FAILURE_CATEGORIES)}"
+        )
+
     ledger_path = processing_path(memory_root)
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     

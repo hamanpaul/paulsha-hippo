@@ -104,5 +104,75 @@ class TestProcessingLedger(unittest.TestCase):
             fsync.assert_called_once()
 
 
+class TestParkedState(unittest.TestCase):
+    def test_parked_is_valid_state_with_required_fields(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            processing.append_state(
+                root,
+                session_key="claude:s5",
+                state="parked",
+                now="2026-07-10T00:00:00Z",
+                config_hash="hash1",
+                failure_category="invalid_output",
+                attempts=6,
+                cache_key="claude:s5__" + "a" * 64,
+                error="llm promote failed: no JSON array found",
+            )
+            self.assertEqual(processing.state_of(root, "claude:s5"), "parked")
+            event = processing.read_events(root)[-1]
+            self.assertEqual(event["failure_category"], "invalid_output")
+            self.assertEqual(event["attempts"], 6)
+            self.assertEqual(event["cache_key"], "claude:s5__" + "a" * 64)
+
+    def test_parked_requires_known_failure_category(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaises(ValueError):
+                processing.append_state(
+                    root, session_key="claude:s6", state="parked",
+                    now="2026-07-10T00:00:00Z", config_hash="hash1",
+                    failure_category="weird", attempts=1, cache_key="", error="x",
+                )
+            with self.assertRaises(ValueError):
+                processing.append_state(
+                    root, session_key="claude:s6", state="parked",
+                    now="2026-07-10T00:00:00Z", config_hash="hash1",
+                )
+
+    def test_requeue_event_returns_session_to_split(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            processing.append_state(
+                root, session_key="claude:s7", state="parked",
+                now="2026-07-10T00:00:00Z", config_hash="hash1",
+                failure_category="transient", attempts=6, cache_key="", error="t",
+            )
+            processing.append_state(
+                root, session_key="claude:s7", state="split",
+                now="2026-07-10T01:00:00Z", config_hash="hash1",
+                requeued_from="parked", requeue_reason="backend fixed",
+            )
+            self.assertEqual(processing.state_of(root, "claude:s7"), "split")
+            event = processing.read_events(root)[-1]
+            self.assertEqual(event["requeued_from"], "parked")
+            self.assertEqual(event["requeue_reason"], "backend fixed")
+
+
+class TestSanitizeErrorText(unittest.TestCase):
+    def test_truncates_to_limit(self):
+        self.assertEqual(len(processing.sanitize_error_text("x" * 2000)), 500)
+        self.assertEqual(processing.sanitize_error_text("x" * 2000, limit=10), "x" * 10)
+
+    def test_collapses_whitespace_and_masks_home(self):
+        home = str(Path.home())
+        raw = f"boom\n  at {home}/secret\tplace"
+        out = processing.sanitize_error_text(raw)
+        self.assertNotIn(home, out)
+        self.assertIn("~/secret", out)
+        self.assertNotIn("\n", out)
+        self.assertNotIn("\t", out)
+
+
 if __name__ == "__main__":
     unittest.main()
