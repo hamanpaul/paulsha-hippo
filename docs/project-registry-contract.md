@@ -62,6 +62,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 
 - 破壞性變更（欄位改名／語義改變／格式改變）→ `schema_version` +1，並同步更新本文件與 producer contract test fixture。
 - 純新增欄位 → 不 bump（consumer 忽略未知欄位）。
+- **Producer 前向防護（不降級）**：`record_discovery` 讀到既有檔 `schema_version` **高於**自身支援版本時，拒絕寫入並記 warning（回「未變更」）——舊版 producer 不得把新版檔案 parse→render 降級重繪（會刪除未知欄位；混版部署下即永久資料遺失），除非日後提供顯式 migration。低版→現版的 canonical 化升級寫入不受此限。
 
 ## 8. Canonical example（producer contract test 錨點）
 

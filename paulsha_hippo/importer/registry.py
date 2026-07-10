@@ -206,6 +206,8 @@ def record_discovery(
 
     互斥：同目錄固定名 lock（LOCK_FILENAME）flock(LOCK_EX)——固定名、非 per-key，
     不產生無界 lock namespace（對照 #19 教訓）。內容未變則跳寫（冪等）。
+    前向防護：既有檔 schema_version 高於 SCHEMA_VERSION 時拒寫並記 warning
+    （回 False），避免舊 producer 把新版檔案降級重繪、刪除未知欄位。
     """
     if not slug:
         raise ValueError("slug must be non-empty")
@@ -221,6 +223,21 @@ def record_discovery(
                 # 壞 bytes 視同缺檔：下一筆 discovery 重寫 canonical bytes（自癒，
                 # 契約 §5 手改情境以 canonical 化覆蓋而非 crash）。
                 existing_text = None
+            if existing_text is not None:
+                existing_version = registry_schema_version(existing_text)
+                if existing_version is not None and existing_version > SCHEMA_VERSION:
+                    # 前向防護（契約 §7）：新版 producer 已寫入更高 schema_version 時，
+                    # 本 v1 writer 若照舊 parse→render 會把檔案降級重繪、刪除未知欄位
+                    # （混版部署下永久資料遺失）。無顯式 migration 前一律拒寫。
+                    LOGGER.warning(
+                        "project registry schema_version %s 高於本 producer 支援的 %s，"
+                        "拒絕以 v%s 重寫（避免降級刪除新版欄位），跳過本筆 discovery: %s",
+                        existing_version,
+                        SCHEMA_VERSION,
+                        SCHEMA_VERSION,
+                        path,
+                    )
+                    return False
             existing = parse_registry(existing_text) if existing_text is not None else ()
             incoming = ProjectConfig(
                 slug=slug,

@@ -213,6 +213,40 @@ class RecordDiscoveryTests(_ScratchDirTestCase):
         parsed = parse_registry(path.read_text(encoding="utf-8"))
         self.assertEqual([project.slug for project in parsed], ["alpha"])
 
+    def test_newer_schema_version_refuses_write_and_keeps_bytes_intact(self):
+        # 混版部署回歸釘（契約 §7 前向防護）：新版 producer 已寫 schema_version: 2
+        # （含 v1 不認識的 per-project 與頂層欄位），仍在跑的 v1 producer 下一筆
+        # discovery 不得 parse→render 降級重繪——v2 bytes 必須逐 byte 完全不變。
+        path = self.registry_path()
+        v2_text = (
+            "# GENERATED — v2 producer output\n"
+            "schema_version: 2\n"
+            "last_scan: 2026-07-11T00:00:00Z\n"
+            "projects:\n"
+            "  - slug: alpha\n"
+            "    roots:\n"
+            "      - /data/a\n"
+            "    remotes: []\n"
+            "    aliases: []\n"
+            "    labels: [core, v2-only]\n"
+        )
+        path.write_text(v2_text, encoding="utf-8")
+        before = path.read_bytes()
+        with self.assertLogs("paulsha_hippo.importer", level="WARNING") as captured:
+            changed = record_discovery(slug="beta", roots=("/data/b",), registry_path=path)
+        self.assertFalse(changed)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(any("schema_version" in message for message in captured.output))
+
+    def test_same_schema_version_still_merges(self):
+        # 對照組：schema_version 等於支援版本時照常併入（防護只擋「更高」版本）。
+        path = self.registry_path()
+        record_discovery(slug="alpha", roots=("/data/a",), registry_path=path)
+        changed = record_discovery(slug="beta", roots=("/data/b",), registry_path=path)
+        self.assertTrue(changed)
+        parsed = parse_registry(path.read_text(encoding="utf-8"))
+        self.assertEqual([project.slug for project in parsed], ["alpha", "beta"])
+
     def test_lock_and_artifacts_use_fixed_names_only(self):
         path = self.registry_path()
         for index in range(5):
