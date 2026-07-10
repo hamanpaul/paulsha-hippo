@@ -69,6 +69,16 @@ Resume     copilot --resume=44f7ffe5-d150-4750-babd-ce84c75ab922
 
 ## offered → read → applied 實證（Task 8 填）
 
-（雙層證據：CI 迴歸保護由 hermetic 全鏈整合測試 `tests/test_cross_cli_funnel_integration.py`
-常駐承擔；live 補充證據由 Task 8 執行 `tests/cross_cli_live_check.sh` 後貼入去識別 ledger 輸出：
-offered 事件、read 事件（offered=true、同 session_id）、negative control 前後行數、applied 事件。）
+- 執行日期：`2026-07-11`
+- hermetic 證據：`tests/test_cross_cli_funnel_integration.py` 已納入 `tests.yml`，常駐保護 hook wiring。
+- live 補充證據：`bash tests/cross_cli_live_check.sh`
+  - `offered（平台注入）OK`
+  - `offered→read 同 session 綁定 OK`
+  - `negative control OK（offered 行數 1 → 1，不變）`
+  - `applied 實證 OK`
+
+```text
+offered| {"ts": "2026-07-10T20:12:49.017332+00:00", "session_id": "8d631067-2ac9-428e-a42e-fadde17e49de", "tool": "claude-code", "project": "proj", "offered": [{"sl_id": "sl-e2e0000000000001", "path": "<tmp>/memory/knowledge/proj/serialwrap.md"}]}
+usage  | {"ts": "2026-07-10T20:12:54.883605+00:00", "session_id": "8d631067-2ac9-428e-a42e-fadde17e49de", "tool": "claude-code", "project": "proj", "sl_id": "sl-e2e0000000000001", "path": "<tmp>/memory/knowledge/proj/serialwrap.md", "source": "read", "offered": true}
+usage  | {"kind": "applied", "session_id": "8d631067-2ac9-428e-a42e-fadde17e49de", "slice_id": "sl-e2e0000000000001", "tool": "claude-code", "ts": "2026-07-10T20:13:03.158621+00:00"}
+```
