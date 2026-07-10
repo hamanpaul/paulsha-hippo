@@ -36,6 +36,17 @@ class RunnerTests(unittest.TestCase):
             wiki2 = (root / "knowledge" / "wiki-moc.md").read_text(encoding="utf-8")
             self.assertEqual(wiki1, wiki2)
 
+    def test_run_moc_reports_index_coverage(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "Alpha")
+            result = runner.run_moc(root, now="2026-06-03T00:00:00Z")
+            cov = result["index_coverage"]
+            self.assertEqual(cov["eligible"], 1)
+            self.assertEqual(cov["indexed"], 1)
+            self.assertGreaterEqual(cov["scanned"], 2)  # slice + build_mocs 產生的 moc 檔
+            self.assertGreaterEqual(sum(cov["pool_excluded"].values()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 # tests/test_moc_search.py
 from __future__ import annotations
 
+import json
 import sqlite3
 import unittest
 from pathlib import Path
@@ -66,6 +67,61 @@ class SearchTests(unittest.TestCase):
             hits = search.search(root, "beta", project=None, limit=5, include_decayed=True)
             self.assertEqual([h["slice_id"] for h in hits], ["sl-2"])
             self.assertFalse((search.index_path(root).parent / "retrieval.db.tmp").exists())
+
+    def test_build_index_returns_six_column_coverage(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            k = root / "knowledge" / "proj"
+            k.mkdir(parents=True)
+            _slice(root, "sl-good", "proj", "good-note", "真實 知識 內容")
+            (k / "rev.md").write_text(
+                "---\nmemory_layer: knowledge\nslice_id: sl-rev\nproject: proj\n"
+                "title: PR Review\nartifact_kind: review\n---\nreview body\n",
+                encoding="utf-8")
+            (k / "echo.md").write_text(
+                "---\nmemory_layer: knowledge\nslice_id: sl-echo\nproject: proj\n"
+                "title: X\nartifact_kind: report\n---\n## CWD\n/tmp\n",
+                encoding="utf-8")
+            (k / "badyaml.md").write_text("---\ntitle: [unclosed\n---\nbody\n", encoding="utf-8")
+            (k / "nosid.md").write_text(
+                "---\nmemory_layer: knowledge\nproject: proj\ntitle: t\n---\nbody\n",
+                encoding="utf-8")
+            (root / "knowledge" / "wiki-moc.md").write_text(
+                "---\nmemory_layer: moc\nmoc_kind: wiki\n---\n# Wiki\n", encoding="utf-8")
+
+            report = search.build_index(root, link_weights={})
+
+            self.assertEqual(report["scanned"], 6)
+            self.assertEqual(report["invalid_frontmatter"], 2)  # badyaml + nosid
+            self.assertEqual(report["pool_excluded"],
+                             {"non-knowledge-layer:moc": 1, "review-record": 1})
+            self.assertEqual(report["noise_excluded"], {"structural-echo:CWD": 1})
+            self.assertEqual(report["eligible"], 1)
+            self.assertEqual(report["indexed"], 1)
+
+    def test_build_index_persists_coverage_json_atomically(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            report = search.build_index(root, link_weights={})
+            cov_path = search.coverage_path(root)
+            self.assertTrue(cov_path.exists())
+            cov = json.loads(cov_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                set(cov),
+                {"scanned", "invalid_frontmatter", "pool_excluded",
+                 "noise_excluded", "eligible", "indexed"})
+            self.assertEqual(cov["eligible"], cov["indexed"])
+            self.assertEqual(cov["indexed"], report["indexed"])
+
+    def test_build_index_report_keeps_per_project_and_warnings(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            report = search.build_index(root, link_weights={})
+            self.assertEqual(report["per_project"]["proj"],
+                             {"indexed": 1, "excluded": 0, "exclude_rate": 0.0})
+            self.assertEqual(report["warnings"], [])
 
     def test_build_index_batches_active_record_lookups(self):
         with TemporaryDirectory() as tmp:
