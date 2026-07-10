@@ -255,10 +255,21 @@ def _build_parser() -> argparse.ArgumentParser:
     rekey_p.set_defaults(func=_rekey)
 
     usage_p = memory_subparsers.add_parser("usage")
-    usage_p.add_argument("--memory-root", required=True)
+    # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
+    # still errors with exit 2 when the flag is omitted.
+    usage_p.add_argument("--memory-root", default=None)
     usage_p.add_argument("--since", default=None)
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
+    usage_sub = usage_p.add_subparsers(dest="usage_command")
+    mark_applied_p = usage_sub.add_parser(
+        "mark-applied", help="記錄 applied 顯式訊號（agent structured acknowledgement，契約 8）"
+    )
+    mark_applied_p.add_argument("--memory-root", required=True)
+    mark_applied_p.add_argument("--session-id", required=True)
+    mark_applied_p.add_argument("--slice-id", required=True)
+    mark_applied_p.add_argument("--tool", required=True)
+    mark_applied_p.set_defaults(func=_usage_mark_applied)
 
     locks_p = memory_subparsers.add_parser("locks", help="runtime lock 維運")
     locks_sub = locks_p.add_subparsers(dest="locks_command", required=True)
@@ -640,6 +651,10 @@ def _rekey(args: argparse.Namespace) -> int:
 def _memory_usage(args: argparse.Namespace) -> int:
     from collections import defaultdict
 
+    if not args.memory_root:
+        print("hippo usage: error: --memory-root is required", file=sys.stderr)
+        return 2
+
     root = Path(args.memory_root)
     led = root / "runtime" / "ledger"
 
@@ -712,6 +727,60 @@ def _recall(args: argparse.Namespace) -> int:
         Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt)
     if block:
         print(block)
+    return 0
+
+
+def _usage_mark_applied(args: argparse.Namespace) -> int:
+    """applied 顯式訊號（契約 8）：agent 主動回報某條記憶實際影響了做法。
+
+    寫入前反查 offered.jsonl：同 (session_id, tool) 必須存在先行 offered 記錄，且
+    slice_id 必須屬於那些 offered slices，否則 exit 1 並拒絕寫入偽造事件。
+    """
+    led_dir = Path(args.memory_root) / "runtime" / "ledger"
+    session_seen = False
+    offered_slices: set[str] = set()
+    offered_path = led_dir / "offered.jsonl"
+    if offered_path.exists():
+        for line in offered_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("session_id") != args.session_id or e.get("tool") != args.tool:
+                continue
+            session_seen = True
+            for offered in e.get("offered", []):
+                sid = offered.get("sl_id") if isinstance(offered, dict) else offered
+                if sid:
+                    offered_slices.add(str(sid))
+    if not session_seen:
+        print(
+            f"hippo usage mark-applied: error: 查無 (session_id={args.session_id}, "
+            f"tool={args.tool}) 的先行 offered 記錄——拒絕寫入（applied 只能回報真實被 offer 的記憶）",
+            file=sys.stderr,
+        )
+        return 1
+    if args.slice_id not in offered_slices:
+        print(
+            f"hippo usage mark-applied: error: slice_id={args.slice_id} 不在 "
+            f"(session_id={args.session_id}, tool={args.tool}) 的 offered slice 集合內——拒絕寫入",
+            file=sys.stderr,
+        )
+        return 1
+    ev = {
+        "kind": "applied",
+        "session_id": args.session_id,
+        "slice_id": args.slice_id,
+        "tool": args.tool,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    led_dir.mkdir(parents=True, exist_ok=True)
+    with (led_dir / "memory_usage.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    print(json.dumps(ev, ensure_ascii=False))
     return 0
 
 

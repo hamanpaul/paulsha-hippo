@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
 from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
 from paulsha_hippo.retrieval import format_shortlist, to_fts_query
-from paulsha_hippo.hooks._wakeup_common import log_warn, sanitize_id
+from paulsha_hippo.hooks._wakeup_common import hippo_invocation, log_warn, sanitize_id
 
 SHORTLIST_K = 3
 SHORTLIST_FETCH_K = 12
@@ -109,6 +110,19 @@ def _record_offered(root: Path, tool: str, session_id: str, project: str,
         log_warn(root, tool, f"failed to record offered: {exc}")
 
 
+def _applied_hint(root: Path, tool: str, session_id: str) -> str:
+    """applied 顯式訊號回報指引（契約 8）：附完整可貼命令（session 歸因已填）。"""
+    argv = hippo_invocation(root) + [
+        "usage", "mark-applied", "--memory-root", str(root),
+        "--session-id", session_id, "--tool", tool, "--slice-id",
+    ]
+    cmd = " ".join(shlex.quote(arg) for arg in argv)
+    return (
+        f"> 若上列某條記憶實際影響了你的做法，回報 applied（--slice-id 值＝"
+        f"該筆記 frontmatter 的 slice_id）：`{cmd} <slice_id>`"
+    )
+
+
 def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                                cwd: str | None, prompt: str) -> str:
     """Resolve project, search by prompt, build shortlist, record offered. Returns '' if nothing."""
@@ -142,7 +156,7 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             return ""
         offered = [(h["slice_id"], h["path"]) for h in hits if h.get("path")]
         _record_offered(root, tool, session_id, project, offered)
-        return block
+        return block + "\n" + _applied_hint(root, tool, session_id)
     except Exception as exc:
         log_warn(root, tool, f"shortlist failed: {exc}")
         return ""

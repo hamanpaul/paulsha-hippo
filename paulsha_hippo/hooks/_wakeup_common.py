@@ -86,6 +86,14 @@ def sanitize_id(value: str) -> str:
     return re.sub(r"[/\\:]+", "__", value)
 
 
+def hippo_invocation(root: Path) -> list[str]:
+    """Return an argv prefix that can invoke the hippo CLI in this deployment."""
+    venv_python = root / "hooks" / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return [str(venv_python), "-m", "paulsha_hippo"]
+    return ["python3", "-m", "paulsha_hippo"]
+
+
 def write_queue_payload(
     root: Path,
     tool: str,

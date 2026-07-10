@@ -163,3 +163,23 @@ def test_summary_first_line_kept_when_not_echo(tmp_path):
     p = tmp_path / "n.md"
     p.write_text("---\ntitle: x\n---\n具體結論第一行。\n", encoding="utf-8")
     assert SC._summary(str(p), "x") == "具體結論第一行。"
+
+
+def test_shortlist_appends_applied_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidA", cwd="/x", prompt="SerialWrap 執行"
+    )
+    assert "usage mark-applied" in out
+    assert "--session-id sidA" in out and "--tool claude-code" in out
+    assert f"--memory-root {tmp_path}" in out
+
+
+def test_shortlist_empty_result_has_no_applied_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "s", cwd="/x", prompt="zzzznomatch"
+    )
+    assert out == ""
