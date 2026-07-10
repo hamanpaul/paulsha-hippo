@@ -155,7 +155,8 @@ def load_registry(path: str | Path | None) -> tuple[ProjectConfig, ...]:
     registry_path = Path(path)
     try:
         text = registry_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
+        # UnicodeDecodeError ⊂ ValueError：壞 bytes 同樣 fail-open 回空，不阻斷讀取端。
         return ()
     version = registry_schema_version(text)
     if version is not None and version > SCHEMA_VERSION:
@@ -216,7 +217,9 @@ def record_discovery(
         try:
             try:
                 existing_text: str | None = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, ValueError):
+                # 壞 bytes 視同缺檔：下一筆 discovery 重寫 canonical bytes（自癒，
+                # 契約 §5 手改情境以 canonical 化覆蓋而非 crash）。
                 existing_text = None
             existing = parse_registry(existing_text) if existing_text is not None else ()
             incoming = ProjectConfig(
@@ -237,11 +240,13 @@ def record_discovery(
 
 
 def auto_write_enabled(config_path: str | Path | None = None) -> bool:
-    """讀 project_registry.auto_write（預設 off）；缺檔／缺鍵一律 False（opt-in）。"""
+    """讀 project_registry.auto_write（預設 off）；缺檔／壞檔／缺鍵一律 False（opt-in）。"""
     path = Path(config_path) if config_path is not None else paths.hippo_config_root() / "config.yaml"
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
+        # corrupt config.yaml（UnicodeDecodeError）不得炸穿 ingest：本函式在
+        # pipeline._record_registry_discovery 的 try 之外被呼叫，fail-open 回 False。
         return False
     in_section = False
     for raw in text.splitlines():

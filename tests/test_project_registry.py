@@ -140,6 +140,13 @@ class RenderParseTests(_ScratchDirTestCase):
         path.write_text(render_registry(projects), encoding="utf-8")
         self.assertEqual(load_registry(path), projects)
 
+    def test_load_registry_corrupt_bytes_fail_open(self):
+        # 檔案與手寫 project-cortex.yaml 同層，手改／壞 byte 情境真實存在：
+        # UnicodeDecodeError（ValueError 子類）必須 fail-open 回空，不得炸穿讀取端。
+        path = self.root / "project-hippo.yaml"
+        path.write_bytes(b"schema_version: 1\nprojects:\n  - slug: alpha\n\xff\xfe\xfa\n")
+        self.assertEqual(load_registry(path), ())
+
 
 class MergeDiscoveryTests(unittest.TestCase):
     def test_merge_unions_and_sorts_same_slug(self):
@@ -196,6 +203,15 @@ class RecordDiscoveryTests(_ScratchDirTestCase):
     def test_empty_slug_raises_value_error(self):
         with self.assertRaises(ValueError):
             record_discovery(slug="", roots=("/data/a",), registry_path=self.registry_path())
+
+    def test_corrupt_registry_treated_as_absent_and_rewritten(self):
+        # 壞 bytes 視同缺檔：寫入端不炸、下一筆 discovery 重寫 canonical bytes（自癒）。
+        path = self.registry_path()
+        path.write_bytes(b"\xff\xfe corrupt registry bytes\n")
+        changed = record_discovery(slug="alpha", roots=("/data/a",), registry_path=path)
+        self.assertTrue(changed)
+        parsed = parse_registry(path.read_text(encoding="utf-8"))
+        self.assertEqual([project.slug for project in parsed], ["alpha"])
 
     def test_lock_and_artifacts_use_fixed_names_only(self):
         path = self.registry_path()
@@ -291,6 +307,13 @@ class AutoWriteEnabledTests(_ScratchDirTestCase):
 
     def test_missing_config_defaults_off(self):
         self.assertFalse(auto_write_enabled(self.root / "absent.yaml"))
+
+    def test_corrupt_bytes_config_defaults_off(self):
+        # auto_write_enabled 於 pipeline 的 fail-open try 之外被呼叫：
+        # corrupt config.yaml（UnicodeDecodeError）必須回 False 而非 raise。
+        path = self.root / "config.yaml"
+        path.write_bytes(b"project_registry:\n  auto_write: true\n\xff\xfe\n")
+        self.assertFalse(auto_write_enabled(path))
 
     def test_enabled_when_true(self):
         path = self.write_config("memory_root: /data/agents/memory\nproject_registry:\n  auto_write: true\n")

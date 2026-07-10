@@ -360,7 +360,11 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     discovered_remote = normalize_remote(_git.git_remote(discovered_toplevel))
     provenance_repo = discovered_remote or "_unknown"
     main_root = _git.git_main_toplevel(discovered_toplevel)
-    payload_remote = normalize_remote(remote_url)
+    # 持久化面只信顯式 remote 鍵（remote_url / remote）：remote_url 的 fallback 鏈含
+    # session['repo']（toplevel 路徑形輸入，僅供 resolve_project 比對 match-only），
+    # normalize_remote 會把路徑變造成假 remote（work/...、github.com/a/b），不得寫入 registry（#14）。
+    explicit_remote = result.raw_payload.get("remote_url") or result.raw_payload.get("remote")
+    payload_remote = normalize_remote(explicit_remote) if isinstance(explicit_remote, str) else ""
     decision = _decision_entry(
         status=status,
         key=key,

@@ -120,6 +120,21 @@ class RegistryAutoWriteTest(unittest.TestCase):
         projects = self.read_projects()
         self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
 
+    def test_path_shaped_payload_repo_not_persisted_as_remote(self):
+        # 對齊 test_idempotency 的既有紀律：path 形 payload['repo'] 是 toplevel 路徑輸入
+        # （僅供 resolve_project 比對），不得被 normalize_remote 變造成假 remote
+        # （work/...）持久化進 registry remotes（spec §3.3.2、契約 §2/§3）。
+        self.enable_auto_write()
+        repo = self.make_repo(name="pathrepo", remote="git@github.com:acme/pathrepo.git")
+        payload = self.payload(cwd=repo, session_id="registry-sid-pathshape")
+        payload["repo"] = "/work/custom-claw-tools/obs-auto-moc"
+        decision = self.ingest(payload, name="pathshape.json")
+        self.assertEqual(decision["status"], "written")
+        projects = self.read_projects()
+        all_remotes = {remote for project in projects for remote in project.remotes}
+        self.assertEqual(all_remotes, {"github.com/acme/pathrepo"})
+        self.assertNotIn("work/custom-claw-tools/obs-auto-moc", all_remotes)
+
     def test_worktree_cwd_registers_main_root(self):
         self.enable_auto_write()
         repo = self.make_repo(name="mainrepo", remote="git@github.com:acme/mainrepo.git")
