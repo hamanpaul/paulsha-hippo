@@ -1,0 +1,16 @@
+# GENERATED — 本檔由 paulsha-hippo 自動產生（project registry discovery record），請勿手改。
+# 使用者 override 請寫 manual 檔（projects.yaml / project-cortex.yaml），詳見契約文件。
+# contract: docs/project-registry-contract.md
+schema_version: 1
+projects:
+  - slug: "github.com/acme/widget"
+    roots:
+      - "/data/projects/widget"
+    remotes:
+      - "github.com/acme/widget"
+    aliases: []
+  - slug: "scratch-notes"
+    roots:
+      - "/data/scratch/notes"
+    remotes: []
+    aliases: []

@@ -7,7 +7,8 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from . import _git
-from .config import ProjectsConfig, default_projects_path, load_projects_config
+from .config import ProjectsConfig, default_projects_path
+from .registry import default_registry_path, load_union_projects_config
 
 
 def _path_parts(value: str | None) -> tuple[str, ...]:
@@ -80,8 +81,15 @@ def resolve_project(
     projects: ProjectsConfig | None = None,
     config_path: str | None = None,
     memory_root: str | None = None,
+    registry_path: str | None = None,
 ) -> str:
-    loaded_projects = projects or load_projects_config(config_path or default_projects_path(memory_root))
+    loaded_projects = projects
+    if loaded_projects is None:
+        # union-read（#14 過渡）：legacy projects.yaml ∪ generated project-hippo.yaml
+        loaded_projects = load_union_projects_config(
+            config_path or default_projects_path(memory_root),
+            registry_path or default_registry_path(memory_root),
+        )
     for candidate in (cwd, git_toplevel):
         matched = _best_root_match(candidate, loaded_projects)
         if matched:

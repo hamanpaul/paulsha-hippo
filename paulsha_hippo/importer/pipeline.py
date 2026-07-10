@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import re
 import shutil
 import threading
@@ -16,6 +17,7 @@ from typing import Any
 from .adapters import claude, codex, copilot
 from .adapters.base import AdapterResult, NormalizedSession
 from . import _git
+from . import registry
 from . import title
 from .classifier import classify_session
 from .frontmatter import render_markdown
@@ -26,6 +28,8 @@ _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "wa
 _TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip"}
 _LEDGER_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _LEDGER_THREAD_LOCKS_GUARD = threading.Lock()
+
+LOGGER = logging.getLogger("paulsha_hippo.importer")
 
 
 class PipelineError(Exception):
@@ -266,6 +270,85 @@ def _persisted_session(session: NormalizedSession, *, raw_payload_pointer: str) 
     return persisted
 
 
+def _record_registry_discovery(memory_root: Path, discovery: dict[str, Any] | None) -> None:
+    """Opt-in（project_registry.auto_write）時把已解析的 project mapping 寫回 registry（#14）。
+
+    Fail-open：registry 寫入失敗不得影響 ingest 主流程，僅記 warning。
+    slug 為 _unknown 或 roots+remotes 全空（非 repo、無 remote 的雜訊 session）不寫。
+    """
+    if not discovery:
+        return
+    slug = discovery.get("slug")
+    roots = [item for item in discovery.get("roots", []) if item]
+    remotes = [item for item in discovery.get("remotes", []) if item]
+    if not slug or slug == "_unknown":
+        return
+    if not roots and not remotes:
+        return
+    if not registry.auto_write_enabled():
+        return
+    try:
+        registry.record_discovery(
+            slug=slug,
+            roots=roots,
+            remotes=remotes,
+            registry_path=registry.default_registry_path(memory_root),
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("project registry auto-write failed (fail-open): %s", exc)
+
+
+def _discovery_candidate(
+    *,
+    slug: str,
+    main_root: str | None,
+    remotes: tuple[str, ...],
+    memory_root: Path,
+) -> dict[str, Any] | None:
+    """Discovery 寫入 gate（#14）：僅當 slug 由 remote 正規化派生時才產生 registry 候選。
+
+    dir-name / basename fallback slug 一律 skip（記 debug log）——寫入 gate 一刀切掉
+    整個污染家族：
+    - 無 remote 錨定（remoteless repo / linked worktree / 非 repo 目錄）：slug 必為
+      fallback 派生，寫入後經 union-read 反饋污染解析（如「worktree 目錄名 slug ↦
+      主 repo root」的自我矛盾 mapping 翻轉主 repo 歸屬）。
+    - 有 remote 但 slug 非由該 remote 派生（cwd 已刪的 ephemeral worktree、git 逾時
+      → basename fallback）：垃圾 slug 掛真 remote，真 repo 下個 session 經 remote
+      match 解析成垃圾 slug（自我強化污染）。
+    remote 派生判準：slug 等於某 anchor remote 的正規形（無 config 匹配時
+    resolve_project 的 raw remote slug），或等於 config/registry 以該 remote
+    重解析（remote-only，不帶 cwd）出的 slug。判準逐 remote 套用：只有個別
+    通過驗證的 remote 才寫入輸出 remotes——payload 夾帶不相干 remote_url 而
+    slug 實由現場探測 remote 派生時，不相干 remote 不得搭便車落盤（否則真
+    remote 恰為該值的無關 repo 會經 union-read remote match 被誤判成本 slug，
+    自我強化污染的另一變體）。
+    """
+    anchor_remotes = tuple(sorted({value for value in remotes if value}))
+    if not slug or slug == "_unknown" or not anchor_remotes:
+        LOGGER.debug(
+            "project registry discovery skipped（無 remote 錨定，fallback slug 不落盤）: slug=%s",
+            slug,
+        )
+        return None
+    validated_remotes = tuple(
+        remote
+        for remote in anchor_remotes
+        if slug == remote or slug == resolve_project(remote_url=remote, memory_root=str(memory_root))
+    )
+    if not validated_remotes:
+        LOGGER.debug(
+            "project registry discovery skipped（slug 非 remote 派生，不落盤）: slug=%s remotes=%s",
+            slug,
+            anchor_remotes,
+        )
+        return None
+    return {
+        "slug": slug,
+        "roots": [main_root] if main_root else [],
+        "remotes": list(validated_remotes),
+    }
+
+
 def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | Path) -> dict[str, Any]:
     queue_path = Path(queue_item)
     root = Path(memory_root)
@@ -324,7 +407,29 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         status = "stale-skip"
     archive_path = _archive_path(root, month, key, status, incoming_hash)
     rendered_session = _persisted_session(session, raw_payload_pointer=str(archive_path))
-    provenance_repo = normalize_remote(_git.git_remote(_git.git_toplevel(session.get("cwd")))) or "_unknown"
+    discovered_toplevel = _git.git_toplevel(session.get("cwd"))
+    discovered_remote = normalize_remote(_git.git_remote(discovered_toplevel))
+    provenance_repo = discovered_remote or "_unknown"
+    main_root = _git.git_main_toplevel(discovered_toplevel)
+    # 持久化面只信顯式 remote 鍵（remote_url / remote）：remote_url 的 fallback 鏈含
+    # session['repo']（toplevel 路徑形輸入，僅供 resolve_project 比對 match-only），
+    # normalize_remote 會把路徑變造成假 remote（work/...、github.com/a/b），不得寫入 registry（#14）。
+    explicit_remote = result.raw_payload.get("remote_url") or result.raw_payload.get("remote")
+    payload_remote = normalize_remote(explicit_remote) if isinstance(explicit_remote, str) else ""
+    # discovery 的 slug 必須與 roots 同源（#14）：roots 記歸併後的主 repo root，但
+    # project 是以 session cwd（可能是 linked worktree）解析。remoteless worktree 會
+    # 落到 worktree 目錄名 fallback，寫入「worktree 名 slug ↦ 主 repo root」的自我
+    # 矛盾 mapping，union-read 後反饋汙染主 repo 本體 session 的歸屬。linked worktree
+    # 情境一律改以 main_root 重新推導 slug——依構造保證該 root 的未來解析結果就是
+    # 此 slug；有 remote 時 worktree 與主 checkout 共用 remote，推導結果不變。
+    discovery_slug = project
+    if main_root and discovered_toplevel and Path(main_root) != Path(discovered_toplevel):
+        discovery_slug = resolve_project(
+            cwd=main_root,
+            git_toplevel=main_root,
+            remote_url=remote_url,
+            memory_root=str(root),
+        )
     decision = _decision_entry(
         status=status,
         key=key,
@@ -337,6 +442,12 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     )
     decision["classifier_bucket"] = bucket
     decision["project"] = project
+    decision["discovery"] = _discovery_candidate(
+        slug=discovery_slug,
+        main_root=main_root,
+        remotes=(payload_remote, discovered_remote),
+        memory_root=root,
+    )
     decision["rendered"] = render_markdown(
         rendered_session,
         project=project,
@@ -373,6 +484,7 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
             with _locked_ledger(root):
                 decision = _preview_queue_item_unlocked(queue_path, memory_root=root)
                 rendered = decision.pop("rendered")
+                discovery = decision.pop("discovery", None)
                 inbox_path = Path(decision["inbox_path"])
                 archive_path = Path(decision["archive_path"])
                 if decision["status"] in {"written", "updated"}:
@@ -385,6 +497,9 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
                     _archive_queue(queue_path, archive_path)
                     _append_ledger(root, decision)
                     _remove_queue(queue_path)
+            _record_registry_discovery(root, discovery)
+            if discovery is not None:
+                decision["discovery"] = discovery
             return decision
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)

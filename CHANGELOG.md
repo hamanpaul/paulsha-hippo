@@ -12,6 +12,7 @@
 - `hippo dream supervise` 偵測 systemd dream timer 已接管時會讓位，避免與 timer 雙跑。
 - 索引 coverage 六欄報表（`scanned / invalid_frontmatter / pool_excluded(by reason) / noise_excluded(by reason) / eligible / indexed`）：`build_index()` 回傳、隨索引寫入 `retrieval.db` 的 `coverage` 表（權威來源，與索引成對原子發布）並派生 `runtime/indexes/retrieval.coverage.json`；`dream run` 輸出新增 `index_coverage`。
 - `hippo index verify`：三方對賬（獨立 filesystem census × coverage 報表 × index DB 反查），驗證強不變量 `indexed IDs == eligible IDs`；供 runtime 恢復序列驗證使用。DB 反查驗到實際提供搜尋結果的兩張表（slice_meta ↔ slices_fts slice_id multiset 一對一 + FTS integrity-check）——FTS 缺行／幽靈行／重複行而 metadata 完整時不再 false green。
+- Project registry（#14）：importer ingest 後將已解析的 project mapping（slug/roots/remotes）寫入 generated 檔 `paulsha/project-hippo.yaml`——schema_version 1、deterministic 輸出（排序去重、逐 byte 可重現）、remote 正規化去 credential、worktree 歸併主 repo root（slug 與 roots 同源——linked worktree 的 discovery slug 以主 repo root 重新推導）、discovery 寫入 gate（僅 slug 由 remote 正規化派生才寫入，且驗證逐 remote 套用——僅個別通過驗證的 remote 落盤，payload 夾帶的不相干 remote 不得搭便車；dir-name/basename fallback slug 一律 skip 並記 debug log——杜絕 remoteless worktree 矛盾 mapping 汙染主 repo 歸屬、與已刪 cwd／git 逾時下垃圾 slug 掛真 remote 的自我強化污染；path 形 repo 欄位不入 remotes）、temp+atomic replace+固定名 lock、寫入端 slug 驗證與 reader 丟棄邊界對齊（全空白 slug 拒收 `ValueError`——否則落盤後 reader 解析時靜默丟棄、下一筆任意 discovery 重繪即無聲永久抹除該 entry）、schema_version 前向防護（既有檔版本高於 producer 支援時拒寫不降級，避免混版部署刪除新版欄位）、opt-in `project_registry.auto_write`（預設 off）、fail-open；讀取端（resolve_project 預設載入）union-read legacy `projects.yaml` 與新檔（非破壞過渡）；檔案契約文件 `docs/project-registry-contract.md` 由 producer contract test 逐 byte 錨定。
 
 ### Changed
 - dream systemd timer 排程改為 `OnCalendar=hourly`，並保留 `Persistent=true`。
@@ -27,6 +28,7 @@
 - `build_index()` 對磁碟上重複 `slice_id`（naming dedup fail-soft 跳過後的殘留態）fail-soft：掃描迴圈先到先贏去重，後到者歸 `pool_excluded[duplicate-slice-id-on-disk]` 並記 warning——不再讓 `slice_meta` PK 的 `IntegrityError` 炸掉整批重建、連健康無關 slices 都退回舊索引；census 對賬鏡像同一規則（分佈對齊），`duplicate slice_id on disk` 仍由 `hippo index verify` 顯性回報。
 - census 三方對賬的 fate/eligible 身份改以自身 line-based 獨立解析（`CensusEntry.slice_id/memory_layer`）為基準，並逐檔與 `fio.read` 交叉比對、任何 identity divergence 記入 problems——與 build_index 共用的 parser 誤判磁碟 ID（合法 YAML tag/anchor 如 `!!str sl-x`、或 parser bug）時，eligible 端與 DB 端不再拿到同一個錯 ID 而 false green（spec §3.2 防同源自證）。
 - `build_index()` row 正規化嚴格驗證 `tags` 型別（必須為 list[str]；缺欄/null 視為空）＋逐檔分類全程包 per-slice 例外邊界：合法 YAML 的 `tags: [1]` 之類錯型歸 `invalid_frontmatter` 記路徑 warning、非預期分類例外亦只犧牲該檔——不再讓單一毒 slice 的 `TypeError` 炸掉整批重建、健康 slices 不發布或持續供應 stale index；census 雙寫同一 tags 型別規則（分佈對齊）。
+- Project registry（#14）YAML quoting：`render_registry` 原樣插值動態值（slug／roots／remotes／aliases），含 `#`、`: `、`[]` 等合法字元的值（如 `/tmp/team #1/widget`）會被標準 YAML parser 誤讀（截斷成註解、巢狀 mapping、flow list）——獨立 consumer（cortex）靜默掉專案或拿錯路徑。修正：動態值一律輸出 double-quoted scalar（僅 escape `\` 與 `"`；stdlib-only），`parse_registry` 同步支援 quoted 形（unquote＋unescape、quote-aware inline list）並容忍 legacy plain 形；fixture／契約文件同步（表層格式調整、標準 YAML 語義不變，依契約 §7 不 bump schema_version）；新增 PyYAML oracle contract tests（僅測試側依賴）錨定特殊字元讀回原值。
 
 ## [0.1.0] - 2026-07-07
 

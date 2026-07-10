@@ -6,8 +6,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from paulsha_hippo.importer.config import ProjectsConfig, default_projects_path, load_projects_config
+from paulsha_hippo.importer.config import (
+    ProjectConfig,
+    ProjectsConfig,
+    default_projects_path,
+    load_projects_config,
+)
 from paulsha_hippo.importer.project_resolver import resolve_project
+from paulsha_hippo.importer.registry import load_union_projects_config, render_registry
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -462,6 +468,120 @@ class ResolveAutoDetectTests(unittest.TestCase):
             _init_repo(repo)
 
             self.assertEqual(resolve_project(cwd=str(repo), remote_url="/tmp/ws/repo", projects=_EMPTY), "solo")
+
+
+class UnionReadTests(unittest.TestCase):
+    def setUp(self):
+        self.scratch = REPO_ROOT / ".test-work"
+        self.scratch.mkdir(exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=self.scratch)
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        try:
+            self.scratch.rmdir()
+        except OSError:
+            pass
+
+    def write_projects_config(self, text: str) -> Path:
+        path = self.root / "projects.yaml"
+        path.write_text(textwrap.dedent(text).strip() + "\n", encoding="utf-8")
+        return path
+
+    def write_registry(self, projects) -> Path:
+        path = self.root / "config" / "paulsha" / "project-hippo.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_registry(projects), encoding="utf-8")
+        return path
+
+    def test_union_adds_registry_only_projects(self):
+        legacy = self.write_projects_config(
+            """
+            version: 1
+            projects:
+              manual-proj:
+                remotes:
+                  - github.com/acme/manual
+            """
+        )
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="widget", remotes=("github.com/acme/widget",)),)
+        )
+        config = load_union_projects_config(legacy, registry_path)
+        self.assertEqual([project.slug for project in config.projects], ["manual-proj", "widget"])
+
+    def test_union_merges_same_slug_manual_first(self):
+        legacy = self.write_projects_config(
+            """
+            version: 1
+            projects:
+              widget:
+                roots:
+                  - /data/manual-root
+            """
+        )
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="widget", roots=("/data/discovered-root",), remotes=("github.com/acme/widget",)),)
+        )
+        config = load_union_projects_config(legacy, registry_path)
+        self.assertEqual(len(config.projects), 1)
+        self.assertEqual(config.projects[0].roots, ("/data/manual-root", "/data/discovered-root"))
+        self.assertEqual(config.projects[0].remotes, ("github.com/acme/widget",))
+
+    def test_alias_collision_manual_wins_with_warning(self):
+        legacy = self.write_projects_config(
+            """
+            version: 1
+            projects:
+              manual-proj:
+                aliases: [shared]
+            """
+        )
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="generated-proj", aliases=("shared",)),)
+        )
+        with self.assertLogs("paulsha_hippo.importer", level="WARNING") as captured:
+            config = load_union_projects_config(legacy, registry_path)
+        self.assertEqual(config.aliases["shared"], "manual-proj")
+        self.assertIn("shared", "\n".join(captured.output))
+
+    def test_missing_registry_keeps_legacy_behavior(self):
+        legacy = self.write_projects_config(
+            """
+            version: 1
+            projects:
+              paulshaclaw:
+                remotes:
+                  - github.com/hamanpaul/paulshaclaw
+            """
+        )
+        config = load_union_projects_config(legacy, self.root / "absent" / "project-hippo.yaml")
+        self.assertEqual([project.slug for project in config.projects], ["paulshaclaw"])
+
+    def test_resolve_project_reads_registry_remote_by_default_load(self):
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="widget", remotes=("github.com/acme/widget",)),)
+        )
+        project = resolve_project(
+            cwd="/unmatched/path",
+            git_toplevel="/another/unmatched/path",
+            remote_url="git@github.com:acme/widget.git",
+            config_path=str(self.root / "absent-projects.yaml"),
+            registry_path=str(registry_path),
+        )
+        self.assertEqual(project, "widget")
+
+    def test_resolve_project_reads_registry_roots_by_default_load(self):
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="widget", roots=("/data/widget",)),)
+        )
+        project = resolve_project(
+            cwd="/data/widget/src/module",
+            config_path=str(self.root / "absent-projects.yaml"),
+            registry_path=str(registry_path),
+        )
+        self.assertEqual(project, "widget")
 
 
 if __name__ == "__main__":

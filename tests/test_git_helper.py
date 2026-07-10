@@ -69,3 +69,39 @@ class GitHelperTests(unittest.TestCase):
             # sibling_repo_count for 'a' should only count actual sibling repos (none), so 1 (a itself?)
             # The function counts siblings in the same parent, so 'a' has one sibling 'plain' which is not a repo.
             self.assertEqual(_git.sibling_repo_count(str(a)), 1)
+
+    def test_git_main_toplevel_worktree_resolves_main_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            main = Path(tmp) / "mainrepo"
+            main.mkdir()
+            _init_repo(main)
+            subprocess.run(
+                ["git", "-C", str(main), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "--allow-empty", "-m", "init"],
+                check=True, capture_output=True,
+            )
+            worktree = Path(tmp) / "wt"
+            subprocess.run(
+                ["git", "-C", str(main), "worktree", "add", "-b", "wt-branch", str(worktree)],
+                check=True, capture_output=True,
+            )
+            wt_top = _git.git_toplevel(str(worktree))
+            self.assertEqual(Path(wt_top).resolve(), worktree.resolve())
+            main_top = _git.git_main_toplevel(wt_top)
+            self.assertEqual(Path(main_top).resolve(), main.resolve())
+
+    def test_git_main_toplevel_normal_checkout_returns_itself(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "solo"
+            repo.mkdir()
+            _init_repo(repo)
+            top = _git.git_toplevel(str(repo))
+            self.assertEqual(Path(_git.git_main_toplevel(top)).resolve(), repo.resolve())
+
+    def test_git_main_toplevel_falsy_returns_none(self) -> None:
+        self.assertIsNone(_git.git_main_toplevel(None))
+        self.assertIsNone(_git.git_main_toplevel(""))
+
+    def test_git_main_toplevel_non_repo_falls_back_to_input(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(_git.git_main_toplevel(tmp), str(tmp))
