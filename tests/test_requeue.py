@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -85,6 +85,8 @@ class RequeueCoreTests(unittest.TestCase):
             root = Path(tmp)
             _park(root, "claude:p1", category="transient")
             _park(root, "codex:p2", category="backend_unavailable")
+            _seed_fragment(root, "claude:p1")
+            _seed_fragment(root, "codex:p2")
             processing.append_state(
                 root, session_key="claude:live", state="split",
                 now="2026-07-10T00:00:00Z", config_hash="h",
@@ -100,19 +102,99 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "codex:p2"), "split")
             self.assertEqual(summary["skipped"], [])
 
+    def test_requeue_zero_fragment_parked_session_stays_parked(self):
+        # Codex 複驗 B2：zero-fragment 的 parked session 一旦送回 split，
+        # pipeline 永遠掃不到 fragment，session 永久卡非終態——gate 必須在
+        # append_state「之前」擋下，維持 parked。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+            )
+            # ledger 不得出現任何 split 事件（gate 在提交前）
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_requeue_ignores_fragments_of_other_sessions(self):
+        # 「屬於該 session」：別的 session 的 fragment 不得放行 gate
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            _seed_fragment(root, "claude:other")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+            )
+
+    def test_requeue_unreadable_fragment_counts_as_missing(self):
+        # 「可讀」：glob 命中但讀不了（以同名目錄模擬）不算有效 fragment
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            bogus = root / "inbox" / "_slices" / "proj" / "claude__s1__000.md"
+            bogus.mkdir(parents=True)
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+            )
+
+    def test_requeue_all_parked_gates_only_zero_fragment_sessions(self):
+        # 混合情境：有 fragment 的照常 requeue，zero-fragment 的維持 parked
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:p1", category="transient")
+            _seed_fragment(root, "claude:p1")
+            _park(root, "codex:p2", category="backend_unavailable")
+
+            summary = requeue.requeue(root, all_parked=True, now="2026-07-10T01:00:00Z")
+
+            self.assertEqual(
+                [entry["session_key"] for entry in summary["requeued"]],
+                ["claude:p1"],
+            )
+            self.assertEqual(processing.state_of(root, "claude:p1"), "split")
+            self.assertEqual(processing.state_of(root, "codex:p2"), "parked")
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "codex:p2", "reason": "no-fragments"}],
+            )
+
 
 class RequeueCliTests(unittest.TestCase):
-    def _run_cli(self, argv: list[str]) -> tuple[int, str]:
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+    def _run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
             rc = cli.main(argv)
-        return rc, buf.getvalue()
+        return rc, out.getvalue(), err.getvalue()
 
     def test_cli_requeue_single(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _park(root, "claude:s1")
-            rc, out = self._run_cli(
+            _seed_fragment(root, "claude:s1")
+            rc, out, _ = self._run_cli(
                 ["requeue", "claude:s1", "--memory-root", str(root),
                  "--now", "2026-07-10T01:00:00Z", "--reason", "backend fixed"]
             )
@@ -124,9 +206,9 @@ class RequeueCliTests(unittest.TestCase):
     def test_cli_requires_exactly_one_selector(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            rc, _ = self._run_cli(["requeue", "--memory-root", str(root)])
+            rc, _, _ = self._run_cli(["requeue", "--memory-root", str(root)])
             self.assertEqual(rc, 2)
-            rc2, _ = self._run_cli(
+            rc2, _, _ = self._run_cli(
                 ["requeue", "claude:s1", "--all-parked", "--memory-root", str(root)]
             )
             self.assertEqual(rc2, 2)
@@ -134,7 +216,7 @@ class RequeueCliTests(unittest.TestCase):
     def test_cli_exit_1_when_target_not_requeued(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            rc, out = self._run_cli(
+            rc, out, _ = self._run_cli(
                 ["requeue", "claude:ghost", "--memory-root", str(root)]
             )
             self.assertEqual(rc, 1)
@@ -143,11 +225,52 @@ class RequeueCliTests(unittest.TestCase):
     def test_cli_all_parked_with_zero_parked_is_ok(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            rc, out = self._run_cli(
+            rc, out, _ = self._run_cli(
                 ["requeue", "--all-parked", "--memory-root", str(root)]
             )
             self.assertEqual(rc, 0)
             self.assertEqual(json.loads(out), {"requeued": [], "skipped": []})
+
+    def test_cli_zero_fragment_requeue_exits_nonzero_and_explains(self):
+        # Codex 複驗 B2 回歸：零 fragment 的 parked session requeue →
+        # 仍 parked + 非零 exit + stderr 說明（早前回 exit 0 誤報成功）。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            rc, out, err = self._run_cli(
+                ["requeue", "claude:s1", "--memory-root", str(root),
+                 "--now", "2026-07-10T01:00:00Z"]
+            )
+            self.assertEqual(rc, 1)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            payload = json.loads(out)
+            self.assertEqual(payload["requeued"], [])
+            self.assertEqual(payload["skipped"][0]["reason"], "no-fragments")
+            self.assertIn("claude:s1", err)
+            self.assertIn("fragment", err)
+            self.assertIn("parked", err)
+
+    def test_cli_all_parked_partial_no_fragments_still_nonzero(self):
+        # --all-parked 下只要有 zero-fragment 項被擋，整體就必須非零 exit，
+        # 不得被其他成功項掩蓋。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:p1", category="transient")
+            _seed_fragment(root, "claude:p1")
+            _park(root, "codex:p2", category="backend_unavailable")
+            rc, out, err = self._run_cli(
+                ["requeue", "--all-parked", "--memory-root", str(root),
+                 "--now", "2026-07-10T01:00:00Z"]
+            )
+            self.assertEqual(rc, 1)
+            self.assertEqual(processing.state_of(root, "claude:p1"), "split")
+            self.assertEqual(processing.state_of(root, "codex:p2"), "parked")
+            payload = json.loads(out)
+            self.assertEqual(
+                [entry["session_key"] for entry in payload["requeued"]],
+                ["claude:p1"],
+            )
+            self.assertIn("codex:p2", err)
 
 
 if __name__ == "__main__":

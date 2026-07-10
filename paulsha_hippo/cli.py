@@ -845,6 +845,20 @@ def _requeue(args: argparse.Namespace) -> int:
         reason=args.reason,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    # Codex 複驗 B2：zero-fragment 的 parked session 被 gate 擋下（維持 parked）
+    # 時必須非零 exit＋stderr 說明——早前 exit 0 會把「沒東西可重走」誤報成功。
+    no_fragment_entries = [
+        entry for entry in summary["skipped"] if entry.get("reason") == "no-fragments"
+    ]
+    for entry in no_fragment_entries:
+        print(
+            f"error: {entry['session_key']} 無可讀 fragment（inbox 的 _slices 下"
+            "無屬於該 session 的 slice 檔）——維持 parked 未 requeue；"
+            "zero-fragment session 送回 split 會永久卡非終態",
+            file=sys.stderr,
+        )
+    if no_fragment_entries:
+        return 1
     if not summary["requeued"] and summary["skipped"]:
         return 1
     return 0
