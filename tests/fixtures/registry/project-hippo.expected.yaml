@@ -3,14 +3,14 @@
 # contract: docs/project-registry-contract.md
 schema_version: 1
 projects:
-  - slug: github.com/acme/widget
+  - slug: "github.com/acme/widget"
     roots:
-      - /data/projects/widget
+      - "/data/projects/widget"
     remotes:
-      - github.com/acme/widget
+      - "github.com/acme/widget"
     aliases: []
-  - slug: scratch-notes
+  - slug: "scratch-notes"
     roots:
-      - /data/scratch/notes
+      - "/data/scratch/notes"
     remotes: []
     aliases: []

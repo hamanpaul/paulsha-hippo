@@ -41,7 +41,8 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 
 - 編碼 UTF-8、換行 LF、檔尾恰一個換行。
 - `projects` 依 `slug` 字典序排序；`roots`/`remotes`/`aliases` 各自去重後字典序排序。
-- 縮排固定：list 項 `  - slug: ...`、欄位 4 空格、子項 `      - `；值不加引號。
+- 縮排固定：list 項 `  - slug: ...`、欄位 4 空格、子項 `      - `。
+- **Scalar quoting**：所有動態字串值（`slug`、`roots`/`remotes` 各項、`aliases` 各項）一律輸出 YAML **double-quoted scalar**，escape 規則僅兩條：`\` → `\\`、`"` → `\"`，其餘字元原樣。double-quoted 樣式對 `#`（註解起始）、`: `（巢狀 mapping）、`[` `]` `,`（flow 語法）、前導／尾隨空白等特殊字元全部安全——標準 YAML parser 讀回值必等於原值。靜態 token（key、`schema_version` 整數值、空 list `[]`）不加引號。值域為單行字串（slug／絕對路徑／正規化 remote；換行與控制字元不在 v1 值域）。
 
 ## 5. 寫入協定（producer 側）
 
@@ -60,8 +61,9 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 
 ## 7. 版本演進
 
-- 破壞性變更（欄位改名／語義改變／格式改變）→ `schema_version` +1，並同步更新本文件與 producer contract test fixture。
+- 破壞性變更（欄位改名／語義改變／**標準 YAML 解析結果改變**的格式變更）→ `schema_version` +1，並同步更新本文件與 producer contract test fixture。
 - 純新增欄位 → 不 bump（consumer 忽略未知欄位）。
+- **語義不變的表層格式調整 → 不 bump**：canonical bytes 改變、但標準 YAML 解析結果逐值相同者（如 scalar quoting 樣式），於本文件記載規則並同步 fixture 即可。前例（2026-07）：動態值由 plain scalar 改為一律 double-quoted（§4），修正 `#`／`: `／flow 字元被標準 parser 誤讀的缺陷——以標準 YAML parser 讀取的 consumer 不受影響；手寫 parser 的 consumer 需支援 double-quoted scalar（unquote + `\\`／`\"` unescape），並容忍歷史檔案的 plain 形（producer 下次寫入即 canonical 化為 quoted）。
 - **Producer 前向防護（不降級）**：`record_discovery` 讀到既有檔 `schema_version` **高於**自身支援版本時，拒絕寫入並記 warning（回「未變更」）——舊版 producer 不得把新版檔案 parse→render 降級重繪（會刪除未知欄位；混版部署下即永久資料遺失），除非日後提供顯式 migration。低版→現版的 canonical 化升級寫入不受此限。
 
 ## 8. Canonical example（producer contract test 錨點）
@@ -75,15 +77,15 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 # contract: docs/project-registry-contract.md
 schema_version: 1
 projects:
-  - slug: github.com/acme/widget
+  - slug: "github.com/acme/widget"
     roots:
-      - /data/projects/widget
+      - "/data/projects/widget"
     remotes:
-      - github.com/acme/widget
+      - "github.com/acme/widget"
     aliases: []
-  - slug: scratch-notes
+  - slug: "scratch-notes"
     roots:
-      - /data/scratch/notes
+      - "/data/scratch/notes"
     remotes: []
     aliases: []
 ```

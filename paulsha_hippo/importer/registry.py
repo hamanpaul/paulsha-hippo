@@ -17,7 +17,6 @@ from paulsha_hippo import paths
 from .config import (
     ProjectConfig,
     ProjectsConfig,
-    _inline_list,
     _trimmed_lines,
     load_projects_config,
 )
@@ -40,8 +39,88 @@ def default_registry_path(memory_root: str | Path | None = None) -> Path:
     return paths.project_registry_path(memory_root)
 
 
+def _quote_scalar(value: str) -> str:
+    """動態字串值一律輸出 YAML double-quoted scalar（契約 §4）。
+
+    只需 escape `\\` 與 `"`——double-quoted style 對 `#`（註解）、`: `（mapping）、
+    `[` `]` `,`（flow）、前導／尾隨空白等全部安全；不加引號的 plain scalar 會被
+    標準 YAML parser（獨立 consumer 如 cortex）誤讀（#14 blocking）。
+    """
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _unquote_scalar(value: str) -> str:
+    """讀回 scalar：double-quoted 解 escape（`\\\\`、`\\\"`）；single-quoted 解 `''`；
+    其餘視為 legacy plain 形（quoting 改版前落盤的 v1 檔），去頭尾空白原樣回傳。"""
+    text = value.strip()
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        body = text[1:-1]
+        chars: list[str] = []
+        index = 0
+        while index < len(body):
+            char = body[index]
+            if char == "\\" and index + 1 < len(body) and body[index + 1] in ('"', "\\"):
+                chars.append(body[index + 1])
+                index += 2
+                continue
+            chars.append(char)
+            index += 1
+        return "".join(chars)
+    if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
+        return text[1:-1].replace("''", "'")
+    return text
+
+
+def _parse_inline_list(value: str) -> tuple[str, ...]:
+    """Quote-aware inline list（`["a, b", "x"]`）：引號內的 `,` 不切分、escape 依 scalar 規則。
+
+    config._inline_list 只做裸 split(",")，對 quoted 值會切錯——registry 檔自
+    quoting 契約後必須用本函式；legacy 裸值（`[a1, a2]`）行為與舊版一致。
+    """
+    stripped = value.strip()
+    if not stripped.startswith("[") or not stripped.endswith("]"):
+        return ()
+    body = stripped[1:-1]
+    pieces: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in body:
+        if quote == '"':
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = None
+            continue
+        if quote == "'":
+            current.append(char)
+            if char == "'":
+                quote = None
+            continue
+        if char in ('"', "'"):
+            quote = char
+            current.append(char)
+            continue
+        if char == ",":
+            pieces.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    pieces.append("".join(current))
+    items = []
+    for piece in pieces:
+        chunk = piece.strip()
+        if chunk:
+            items.append(_unquote_scalar(chunk))
+    return tuple(items)
+
+
 def render_registry(projects: Iterable[ProjectConfig]) -> str:
-    """輸出 canonical bytes：slug 字典序、各清單去重排序、LF、檔尾恰一換行。"""
+    """輸出 canonical bytes：slug 字典序、各清單去重排序、LF、檔尾恰一換行；
+    所有動態字串值套 _quote_scalar（double-quoted，契約 §4 quoting 規則）。"""
     lines: list[str] = list(GENERATED_HEADER_LINES)
     lines.append(f"schema_version: {SCHEMA_VERSION}")
     ordered = sorted(projects, key=lambda project: project.slug)
@@ -50,17 +129,18 @@ def render_registry(projects: Iterable[ProjectConfig]) -> str:
         return "\n".join(lines) + "\n"
     lines.append("projects:")
     for project in ordered:
-        lines.append(f"  - slug: {project.slug}")
+        lines.append(f"  - slug: {_quote_scalar(project.slug)}")
         for key, values in (("roots", project.roots), ("remotes", project.remotes)):
             deduped = sorted(set(values))
             if deduped:
                 lines.append(f"    {key}:")
-                lines.extend(f"      - {item}" for item in deduped)
+                lines.extend(f"      - {_quote_scalar(item)}" for item in deduped)
             else:
                 lines.append(f"    {key}: []")
         alias_values = sorted(set(project.aliases))
         if alias_values:
-            lines.append(f"    aliases: [{', '.join(alias_values)}]")
+            rendered_aliases = ", ".join(_quote_scalar(alias) for alias in alias_values)
+            lines.append(f"    aliases: [{rendered_aliases}]")
         else:
             lines.append("    aliases: []")
     return "\n".join(lines) + "\n"
@@ -71,8 +151,10 @@ def _finalize_registry_item(
 ) -> None:
     if current is None:
         return
-    slug = str(current.get("slug") or "").strip()
-    if not slug:
+    # slug 已於 parse 階段 unquote（quoted 形精確界定值域，含前導／尾隨空白），
+    # 此處只做空值檢查、不再 strip 值本身。
+    slug = str(current.get("slug") or "")
+    if not slug.strip():
         return
     projects.append(
         ProjectConfig(
@@ -107,7 +189,7 @@ def parse_registry(text: str) -> tuple[ProjectConfig, ...]:
             if ":" in rest:
                 key, value = rest.split(":", 1)
                 if key.strip() == "slug":
-                    current["slug"] = value.strip().strip("\"'")
+                    current["slug"] = _unquote_scalar(value)
             continue
         if current is None:
             continue
@@ -117,21 +199,21 @@ def parse_registry(text: str) -> tuple[ProjectConfig, ...]:
             value = raw_value.strip()
             if key in {"roots", "remotes"}:
                 if value.startswith("["):
-                    current[key] = list(_inline_list(value))
+                    current[key] = list(_parse_inline_list(value))
                     current_list_key = None
                 else:
                     current[key] = []
                     current_list_key = key
                 continue
             if key == "aliases":
-                current["aliases"] = list(_inline_list(value))
+                current["aliases"] = list(_parse_inline_list(value))
                 current_list_key = None
                 continue
-            current[key] = value.strip("\"'")
+            current[key] = _unquote_scalar(value)
             current_list_key = None
             continue
         if indent >= 6 and stripped.startswith("- ") and current_list_key in {"roots", "remotes"}:
-            current.setdefault(current_list_key, []).append(stripped[2:].strip().strip("\"'"))
+            current.setdefault(current_list_key, []).append(_unquote_scalar(stripped[2:]))
     _finalize_registry_item(projects, current)
     return tuple(projects)
 

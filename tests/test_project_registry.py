@@ -9,6 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+try:
+    import yaml  # PyYAML：僅測試側的獨立 oracle（standard YAML parser）；產品 code 維持 stdlib-only
+except ImportError:  # pragma: no cover - 本 repo 測試環境有 PyYAML；缺件時跳過 interop 測試
+    yaml = None
+
 from paulsha_hippo import paths
 from paulsha_hippo.importer.config import ProjectConfig
 from paulsha_hippo.importer.registry import (
@@ -91,15 +96,15 @@ class RenderParseTests(_ScratchDirTestCase):
             "# contract: docs/project-registry-contract.md\n"
             "schema_version: 1\n"
             "projects:\n"
-            "  - slug: alpha\n"
+            '  - slug: "alpha"\n'
             "    roots: []\n"
             "    remotes:\n"
-            "      - github.com/acme/alpha\n"
-            "    aliases: [a1, a2]\n"
-            "  - slug: zeta\n"
+            '      - "github.com/acme/alpha"\n'
+            '    aliases: ["a1", "a2"]\n'
+            '  - slug: "zeta"\n'
             "    roots:\n"
-            "      - /data/z1\n"
-            "      - /data/z2\n"
+            '      - "/data/z1"\n'
+            '      - "/data/z2"\n'
             "    remotes: []\n"
             "    aliases: []\n"
         )
@@ -146,6 +151,108 @@ class RenderParseTests(_ScratchDirTestCase):
         path = self.root / "project-hippo.yaml"
         path.write_bytes(b"schema_version: 1\nprojects:\n  - slug: alpha\n\xff\xfe\xfa\n")
         self.assertEqual(load_registry(path), ())
+
+
+class YamlQuotingContractTests(_ScratchDirTestCase):
+    """Quoting 契約釘（#14 blocking 修復）：動態值必以 double-quoted scalar 落盤。
+
+    舊 renderer 不加引號直接插值，`/tmp/team #1/widget` 會被標準 YAML parser
+    讀成 `/tmp/team`（`#` 起註解）、`/tmp/a: b/widget` 變 nested mapping、
+    `[scratch]` 變 list——自家 parse_registry 讀 raw string，round-trip 測試假綠，
+    但獨立 consumer（cortex 用標準 YAML parser）會靜默掉專案／拿錯值。
+    本組測試以 PyYAML 當獨立 oracle（僅測試側依賴；產品 code stdlib-only）。
+    """
+
+    # 覆蓋契約列舉的特殊字元：#、`: `、[、]、,、"、\、前導／尾隨空白。
+    # 各清單值採已排序去重形（render canonical 序），使 round-trip 可整組比對。
+    SPECIAL_PROJECTS = (
+        ProjectConfig(slug="  padded slug  ", roots=(), remotes=(), aliases=()),
+        ProjectConfig(
+            slug='team #1: [prod, "v2"]\\beta',
+            roots=("  /data/padded  ", "/tmp/a: b/widget", "/tmp/team #1/widget"),
+            remotes=("back\\slash", 'git@host:acme/widget "beta"'),
+            aliases=("[scratch]", "a, b", 'quo"te'),
+        ),
+    )
+
+    @unittest.skipIf(yaml is None, "PyYAML unavailable：跳過 standard-YAML interop oracle")
+    def test_standard_yaml_parser_reads_back_exact_values(self):
+        data = yaml.safe_load(render_registry(self.SPECIAL_PROJECTS))
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(
+            data["projects"],
+            [
+                {"slug": "  padded slug  ", "roots": [], "remotes": [], "aliases": []},
+                {
+                    "slug": 'team #1: [prod, "v2"]\\beta',
+                    "roots": ["  /data/padded  ", "/tmp/a: b/widget", "/tmp/team #1/widget"],
+                    "remotes": ["back\\slash", 'git@host:acme/widget "beta"'],
+                    "aliases": ["[scratch]", "a, b", 'quo"te'],
+                },
+            ],
+        )
+
+    def test_own_parser_round_trips_special_values(self):
+        self.assertEqual(
+            parse_registry(render_registry(self.SPECIAL_PROJECTS)), self.SPECIAL_PROJECTS
+        )
+
+    @unittest.skipIf(yaml is None, "PyYAML unavailable：跳過 standard-YAML interop oracle")
+    def test_record_discovery_file_readable_by_standard_yaml_parser(self):
+        # 端到端：經真實 producer（record_discovery）落盤的檔案，標準 parser 讀回原值。
+        path = self.root / "project-hippo.yaml"
+        record_discovery(
+            slug="team #1",
+            roots=("/tmp/team #1/widget", "/tmp/a: b/widget"),
+            remotes=(),
+            aliases=("[scratch]",),
+            registry_path=path,
+        )
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        (item,) = data["projects"]
+        self.assertEqual(item["slug"], "team #1")
+        self.assertEqual(item["roots"], ["/tmp/a: b/widget", "/tmp/team #1/widget"])
+        self.assertEqual(item["aliases"], ["[scratch]"])
+
+    @unittest.skipIf(yaml is None, "PyYAML unavailable：跳過 standard-YAML interop oracle")
+    def test_fixture_parses_identically_with_standard_and_own_parser(self):
+        # 契約 fixture 是兩類 consumer 的共同錨點：standard parser 與手寫 parser 必須同義。
+        text = ProducerContractTests.FIXTURE.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+        own = [
+            {
+                "slug": project.slug,
+                "roots": list(project.roots),
+                "remotes": list(project.remotes),
+                "aliases": list(project.aliases),
+            }
+            for project in parse_registry(text)
+        ]
+        self.assertEqual(own, data["projects"])
+
+    def test_parse_registry_reads_legacy_unquoted_format(self):
+        # 向後相容：quoting 改版前已落盤的 v1 檔（plain scalar）仍要能讀，
+        # 下一次寫入才有機會 canonical 化為 quoted 形（契約 §7 低版→現版升級寫入）。
+        legacy = (
+            "schema_version: 1\n"
+            "projects:\n"
+            "  - slug: github.com/acme/widget\n"
+            "    roots:\n"
+            "      - /data/projects/widget\n"
+            "    remotes: []\n"
+            "    aliases: [a1, a2]\n"
+        )
+        self.assertEqual(
+            parse_registry(legacy),
+            (
+                ProjectConfig(
+                    slug="github.com/acme/widget",
+                    roots=("/data/projects/widget",),
+                    remotes=(),
+                    aliases=("a1", "a2"),
+                ),
+            ),
+        )
 
 
 class MergeDiscoveryTests(unittest.TestCase):

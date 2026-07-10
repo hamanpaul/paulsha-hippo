@@ -28,6 +28,7 @@
 - `build_index()` 對磁碟上重複 `slice_id`（naming dedup fail-soft 跳過後的殘留態）fail-soft：掃描迴圈先到先贏去重，後到者歸 `pool_excluded[duplicate-slice-id-on-disk]` 並記 warning——不再讓 `slice_meta` PK 的 `IntegrityError` 炸掉整批重建、連健康無關 slices 都退回舊索引；census 對賬鏡像同一規則（分佈對齊），`duplicate slice_id on disk` 仍由 `hippo index verify` 顯性回報。
 - census 三方對賬的 fate/eligible 身份改以自身 line-based 獨立解析（`CensusEntry.slice_id/memory_layer`）為基準，並逐檔與 `fio.read` 交叉比對、任何 identity divergence 記入 problems——與 build_index 共用的 parser 誤判磁碟 ID（合法 YAML tag/anchor 如 `!!str sl-x`、或 parser bug）時，eligible 端與 DB 端不再拿到同一個錯 ID 而 false green（spec §3.2 防同源自證）。
 - `build_index()` row 正規化嚴格驗證 `tags` 型別（必須為 list[str]；缺欄/null 視為空）＋逐檔分類全程包 per-slice 例外邊界：合法 YAML 的 `tags: [1]` 之類錯型歸 `invalid_frontmatter` 記路徑 warning、非預期分類例外亦只犧牲該檔——不再讓單一毒 slice 的 `TypeError` 炸掉整批重建、健康 slices 不發布或持續供應 stale index；census 雙寫同一 tags 型別規則（分佈對齊）。
+- Project registry（#14）YAML quoting：`render_registry` 原樣插值動態值（slug／roots／remotes／aliases），含 `#`、`: `、`[]` 等合法字元的值（如 `/tmp/team #1/widget`）會被標準 YAML parser 誤讀（截斷成註解、巢狀 mapping、flow list）——獨立 consumer（cortex）靜默掉專案或拿錯路徑。修正：動態值一律輸出 double-quoted scalar（僅 escape `\` 與 `"`；stdlib-only），`parse_registry` 同步支援 quoted 形（unquote＋unescape、quote-aware inline list）並容忍 legacy plain 形；fixture／契約文件同步（表層格式調整、標準 YAML 語義不變，依契約 §7 不 bump schema_version）；新增 PyYAML oracle contract tests（僅測試側依賴）錨定特殊字元讀回原值。
 
 ## [0.1.0] - 2026-07-07
 
