@@ -116,6 +116,44 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(report["eligible"], 1)
             self.assertEqual(report["indexed"], 1)
 
+    def test_build_index_survives_duplicate_slice_id_on_disk(self):
+        # #16 fail-soft 缺口（review blocking）：兩個同 slice_id 的 eligible 檔
+        # （naming dedup fail-soft 後的殘留態）曾讓 slice_meta PK 對 INSERT 丟
+        # IntegrityError 炸出 build_index，連健康無關檔都整批退回舊索引。
+        # 修正後先到先贏：首檔入索引、後到者歸 pool_excluded 記 warning。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-dup", "proj", "dup-alpha", "duplicate body one")
+            _slice(root, "sl-dup", "proj", "dup-beta", "duplicate body two")
+            _slice(root, "sl-ok", "proj", "healthy-note", "healthy unrelated body")
+
+            report = search.build_index(root, link_weights={})  # 不得 raise
+
+            self.assertEqual(report["scanned"], 3)
+            self.assertEqual(report["eligible"], 2)
+            self.assertEqual(report["indexed"], 2)
+            self.assertEqual(report["pool_excluded"],
+                             {"duplicate-slice-id-on-disk": 1})
+            self.assertTrue(any("duplicate slice_id on disk sl-dup" in w
+                                for w in report["warnings"]), report["warnings"])
+            # 健康無關檔本輪照常入索引可搜
+            hits = search.search(root, "healthy", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-ok"])
+            # 重複對先到先贏（sorted 掃描序）：sl-dup 兩表各恰一列，搜尋不重複回傳
+            dup_hits = search.search(root, "duplicate", project=None, limit=5,
+                                     include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in dup_hits], ["sl-dup"])
+            self.assertTrue(dup_hits[0]["path"].endswith("dup-alpha--sl-dup.md"))
+            conn = sqlite3.connect(search.index_path(root))
+            try:
+                for table in ("slice_meta", "slices_fts"):
+                    self.assertEqual(conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE slice_id = 'sl-dup'"
+                    ).fetchone()[0], 1, table)
+            finally:
+                conn.close()
+
     def test_build_index_persists_coverage_json_atomically(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

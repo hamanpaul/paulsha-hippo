@@ -176,7 +176,11 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     → invalid_frontmatter；memory_layer != knowledge →
     pool_excluded[non-knowledge-layer:<layer>]；缺 slice_id →
     invalid_frontmatter；pool_exclude_reason → pool_excluded[<reason>]；
-    classify_noise → noise_excluded[<reason>]；其餘 eligible（=實際入索引）。
+    classify_noise → noise_excluded[<reason>]；slice_id 已被本輪較早的
+    eligible 檔佔用（naming dedup fail-soft 後磁碟殘留重複）→
+    pool_excluded[duplicate-slice-id-on-disk]（先到先贏，fail-soft 記
+    warning，不中止整批；census 的鏡像規則在 reconcile_index 迴圈）；
+    其餘 eligible（=實際入索引）。
 
     並發安全：全程持 ``index_lock_path()`` 阻塞式 flock 序列化所有 writer
     （dream／rekey／retitle 任意呼叫路徑），temp DB 與 coverage 皆用
@@ -260,6 +264,7 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
             return corpus
 
         rows: list[tuple[str, str, str, str, str, str, str]] = []
+        seen_slice_ids: set[str] = set()
         if knowledge.exists():
             for fpath in sorted(knowledge.rglob("*.md")):
                 coverage["scanned"] += 1
@@ -292,9 +297,22 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
                     noise_excluded[verdict.reason] = noise_excluded.get(verdict.reason, 0) + 1
                     project_stats.excluded += 1
                     continue
+                sid_str = str(sid)
+                if sid_str in seen_slice_ids:
+                    # 磁碟上同 slice_id 多檔（naming.reconcile dedup fail-soft
+                    # 後的合法殘留狀態）：slice_meta 的 PK 會讓 INSERT 丟
+                    # IntegrityError 炸掉整批、連健康 slices 都退回舊索引。
+                    # 先到先贏：後到者歸 pool_excluded 記 warning，整批續行。
+                    reason = "duplicate-slice-id-on-disk"
+                    pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
+                    warnings.append(
+                        f"index: duplicate slice_id on disk {sid_str}; "
+                        f"excluded {fpath.name} (kept first occurrence)")
+                    continue
+                seen_slice_ids.add(sid_str)
                 coverage["eligible"] += 1
                 project_stats.indexed += 1
-                rows.append((str(sid), project, str(fm.get("title", "")),
+                rows.append((sid_str, project, str(fm.get("title", "")),
                              " ".join(fm.get("tags", []) if isinstance(fm.get("tags"), list) else []),
                              body, str(fm.get("captured_at", "")), str(fpath)))
                 if len(rows) >= INDEX_WRITE_BATCH_SIZE:

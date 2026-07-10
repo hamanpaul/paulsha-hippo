@@ -336,6 +336,8 @@ def _fate(fpath: Path, corpus_for: "Callable[[str], object]") -> "tuple[str, str
     分支順序與 reason 字串必須和 build_index 的掃描分支一字不差（見
     search.build_index docstring）；但規則本體是本模組的雙寫實作
     （_census_pool_reason / _census_noise_reason），不呼叫生產 classifier。
+    唯一不在本函式的分支：pool[duplicate-slice-id-on-disk]（先到先贏 dedup）
+    是跨檔案狀態，逐檔的 _fate 放不下，鏡像規則落在 reconcile_index 迴圈。
     三方對賬靠「兩條獨立迴圈＋兩份獨立規則算出同一分佈」保證——不共用
     同一次掃描，也不共用分類邏輯；共用面只剩 fio.read 低階解析原語。
     """
@@ -407,10 +409,16 @@ def reconcile_index(memory_root: Path, coverage: "Mapping[str, Any]",
         elif fate.startswith("noise:"):
             reason = fate[len("noise:"):]
             noise[reason] = noise.get(reason, 0) + 1
+        elif sid in eligible_ids:
+            # build_index 先到先贏 dedup 的鏡像規則（跨檔案狀態放不進逐檔的
+            # _fate）：同 slice_id 的後到 eligible 檔歸 pool[duplicate-slice-
+            # id-on-disk]，分佈與 coverage 對齊；磁碟真相異常本身仍顯性回報
+            # （naming dedup fail-soft 後可能殘留，operator 應被提醒）。
+            pool["duplicate-slice-id-on-disk"] = (
+                pool.get("duplicate-slice-id-on-disk", 0) + 1)
+            problems.append(f"duplicate slice_id on disk: {sid}")
         else:
             eligible_count += 1
-            if sid in eligible_ids:
-                problems.append(f"duplicate slice_id on disk: {sid}")
             eligible_ids.add(str(sid))
 
     # 對賬一：census（磁碟真相）↔ coverage（build_index 的宣稱）

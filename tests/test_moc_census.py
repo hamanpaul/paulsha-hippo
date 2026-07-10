@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from paulsha_hippo import cli
-from paulsha_hippo.moc import census, runner, search
+from paulsha_hippo.moc import census, naming, runner, search
 from paulsha_hippo.noise import NoiseVerdict  # 僅供測試注入假 verdict；census 本體不得 import
 
 
@@ -334,6 +334,53 @@ class IndexRebuildE2ETests(unittest.TestCase):
                 rc = cli.main(["index", "verify", "--memory-root", str(root)])
             self.assertEqual(rc, 0)
             self.assertTrue(json.loads(buf.getvalue())["ok"])
+
+    def test_duplicate_slice_id_residue_fail_soft_full_chain(self):
+        """#16 fail-soft 缺口（review blocking）：naming dedup 中途失敗（如
+        ENOSPC）fail-soft 跳過後，磁碟殘留兩個同 slice_id 檔——build_index
+        曾被 slice_meta PK 的 IntegrityError 整批炸掉（run_moc 回報
+        indexed=False），連健康無關檔都不被索引。修正後：整輪照常完成、
+        健康檔可搜、重複對先到先贏，reconcile 分佈對齊且顯性回報磁碟異常。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            k = root / "knowledge" / "proj"
+            _write(k / "dup-alpha--sl-dup.md",
+                   "---\nslice_id: sl-dup\nmemory_layer: knowledge\nproject: proj\n"
+                   "title: dup-alpha\ncaptured_at: 2026-07-10T00:00:00Z\n---\n重複 內容 一\n")
+            _write(k / "dup-beta--sl-dup.md",
+                   "---\nslice_id: sl-dup\nmemory_layer: knowledge\nproject: proj\n"
+                   "title: dup-beta\ncaptured_at: 2026-07-10T00:00:00Z\n---\n重複 內容 二\n")
+            _write(k / "healthy--sl-ok.md",
+                   "---\nslice_id: sl-ok\nmemory_layer: knowledge\nproject: proj\n"
+                   "title: healthy\ncaptured_at: 2026-07-10T00:00:00Z\n---\n健康 無關 內容\n")
+
+            # dedup 步驟注入一次性磁碟故障：naming.reconcile fail-soft（記
+            # warning 跳過該檔），同 slice_id 的兩檔原樣留在磁碟上進入重建。
+            with mock.patch.object(
+                naming, "_append_superseded_event",
+                side_effect=OSError(28, "No space left on device"),
+            ):
+                result = runner.run_moc(root, now="2026-07-10T00:00:00Z")
+
+            # 整輪未中止：索引照建（不再 indexed=False / index_coverage={}）
+            self.assertTrue(result["indexed"])
+            self.assertTrue(any("reconcile skipped" in w for w in result["warnings"]))
+            self.assertTrue(any("duplicate slice_id on disk sl-dup" in w
+                                for w in result["warnings"]), result["warnings"])
+            cov = result["index_coverage"]
+            self.assertEqual(cov["eligible"], 2)
+            self.assertEqual(cov["indexed"], 2)
+            self.assertEqual(cov["pool_excluded"]["duplicate-slice-id-on-disk"], 1)
+            # 健康無關檔本輪照常入索引可搜
+            hits = search.search(root, "健康", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-ok"])
+            # 三方對賬：分佈與 ID 集全對齊，唯一 problem 是磁碟重複異常的顯性回報
+            verdict = census.reconcile_index(root, cov)
+            self.assertEqual(verdict.problems, ["duplicate slice_id on disk: sl-dup"])
+            self.assertFalse(verdict.ok)
+            self.assertEqual(verdict.eligible_ids, {"sl-dup", "sl-ok"})
+            self.assertEqual(verdict.indexed_ids, {"sl-dup", "sl-ok"})
 
 
 if __name__ == "__main__":
