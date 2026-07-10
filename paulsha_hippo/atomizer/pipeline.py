@@ -125,29 +125,113 @@ def _clear_retry_counter(memory_root: Path, cache_key: str | None) -> None:
         return
 
 
-def _record_promote_failure(memory_root: Path, promoter: Promoter, fragments: list[Fragment]) -> str:
-    if not isinstance(promoter, LLMPromoter) or not fragments:
-        return ""
-    cache_key = promoter.cache_key_for_fragments(fragments)
+_FAILED_EVIDENCE_DIRNAME = "_failed"
+_EVIDENCE_EXCERPT_MAX_CHARS = 2000
+
+
+def _failed_evidence_path(memory_root: Path, session_key: str) -> Path:
+    agent, _, session = session_key.partition(":")
+    return (memory_root / "runtime" / "queue" / _FAILED_EVIDENCE_DIRNAME
+            / f"{agent}__{session}.json")
+
+
+def _read_attempts(counter: Path) -> int:
+    try:
+        return int(counter.read_text(encoding="utf-8").strip() or "0")
+    except (FileNotFoundError, OSError, ValueError):
+        return 0
+
+
+def _park_session(memory_root: Path, *, session_key: str, category: str, attempts: int,
+                  cache_key: str, error_text: str, now: str, config_hash: str) -> None:
+    """parked 終態：證據落盤 → 淘汰毒快取＋sidecar（保留 split fragments）→ 記 ledger。
+
+    ledger append 放最後當 commit point：中途 crash 只會多一次 bounded 重試（fail-open），
+    不會留下「已 parked 但毒快取還在」的半套狀態。
+    """
     cache_path = _cache_path(memory_root, cache_key)
-    if cache_path is None:
-        return ""
-    if not cache_path.exists():
-        return " (transport failure; no cache written; retry budget unchanged)"
+    excerpt = ""
+    if cache_path is not None and cache_path.exists():
+        try:
+            excerpt = cache_path.read_text(encoding="utf-8")[:_EVIDENCE_EXCERPT_MAX_CHARS]
+        except (OSError, UnicodeError):
+            excerpt = ""
+    evidence = {
+        "session_key": session_key,
+        "failure_category": category,
+        "attempts": attempts,
+        "cache_key": cache_key,
+        "error": error_text,
+        "ts": now,
+        "last_output_excerpt": excerpt,
+    }
+    _atomic_write(
+        _failed_evidence_path(memory_root, session_key),
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True) + "\n",
+    )
+    _clear_cache_key(memory_root, cache_key)
+    _clear_retry_counter(memory_root, cache_key)
+    processing.append_state(
+        memory_root,
+        session_key=session_key,
+        state="parked",
+        now=now,
+        config_hash=config_hash,
+        failure_category=category,
+        attempts=attempts,
+        cache_key=cache_key,
+        error=error_text,
+    )
+
+
+def _handle_promote_failure(
+    memory_root: Path,
+    promoter: Promoter,
+    fragments: list[Fragment],
+    exc: "PromoteError",
+    *,
+    session_key: str,
+    now: str,
+    config_hash: str,
+) -> tuple[str, bool]:
+    """#15 失敗分類：backend_unavailable 立即 park；transient/invalid_output 記入單一
+    attempts 預算（沿用 _LLM_PROMOTE_MAX_RETRIES），invalid_output 每次先淘汰毒快取，
+    超限 park。回傳 (警告註記, 是否已 park)。非 LLM promoter 沿用既有 left-in-split。"""
+    if not isinstance(promoter, LLMPromoter) or not fragments:
+        return "", False
+    category = getattr(exc, "category", "invalid_output")
+    if category not in processing.PARKED_FAILURE_CATEGORIES:
+        category = "invalid_output"
+    error_text = processing.sanitize_error_text(str(exc))
+    cache_key = promoter.cache_key_for_fragments(fragments)
     counter = _retry_counter_path(memory_root, cache_key)
     if counter is None:
-        return ""
-    try:
-        attempts = int(counter.read_text(encoding="utf-8").strip() or "0")
-    except (FileNotFoundError, OSError, ValueError):
-        attempts = 0
+        return "", False
+    attempts = _read_attempts(counter)
+
+    if category == "backend_unavailable":
+        _park_session(
+            memory_root, session_key=session_key, category=category,
+            attempts=attempts, cache_key=cache_key, error_text=error_text,
+            now=now, config_hash=config_hash,
+        )
+        return " (parked: backend_unavailable; 不重試，修復後 hippo requeue)", True
+
     attempts += 1
+    if attempts > _LLM_PROMOTE_MAX_RETRIES:
+        _park_session(
+            memory_root, session_key=session_key, category=category,
+            attempts=attempts, cache_key=cache_key, error_text=error_text,
+            now=now, config_hash=config_hash,
+        )
+        return f" (parked: {category} after {attempts} attempts; cache evicted)", True
+
     counter.parent.mkdir(parents=True, exist_ok=True)
     counter.write_text(str(attempts), encoding="utf-8")
-    if attempts <= _LLM_PROMOTE_MAX_RETRIES:
+    if category == "invalid_output":
         promoter.clear_cache_for_fragments(fragments)
-        return f" (cache cleared; retry {attempts}/{_LLM_PROMOTE_MAX_RETRIES})"
-    return f" (retry budget exhausted after {attempts} failures; poisoned cache retained)"
+        return f" (cache cleared; retry {attempts}/{_LLM_PROMOTE_MAX_RETRIES})", False
+    return f" (transient failure; retry {attempts}/{_LLM_PROMOTE_MAX_RETRIES})", False
 
 
 def _promoter_metadata(promoter: Promoter) -> dict[str, str]:
@@ -271,7 +355,7 @@ def _promote_fragments(
     except PromoteError:
         raise
     except Exception as exc:
-        raise PromoteError(f"unexpected promoter failure: {exc}") from exc
+        raise PromoteError(f"unexpected promoter failure: {exc}", category="transient") from exc
 
 
 def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now: str,
@@ -319,7 +403,7 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
             continue
         project_path = sanitize_project_component(project)
         session_key = f"{agent}:{session}"
-        if processing.state_of(memory_root, session_key) in {"split", "promoted"}:
+        if processing.state_of(memory_root, session_key) in {"split", "promoted", "parked"}:
             continue
         captured_at = str(data.get("captured_at", now))
         provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
@@ -462,12 +546,17 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
         try:
             promoted = _promote_fragments(promoter, [fragment for _, fragment in fragments], config)
         except PromoteError as exc:
-            note = _record_promote_failure(
+            note, parked = _handle_promote_failure(
                 memory_root,
                 promoter,
                 [fragment for _, fragment in fragments],
+                exc,
+                session_key=session_key,
+                now=now,
+                config_hash=config_hash,
             )
-            warnings.append(f"{session_key}: {exc}; session {session_key} left in split{note}")
+            outcome = "parked" if parked else "left in split"
+            warnings.append(f"{session_key}: {exc}; session {session_key} {outcome}{note}")
             continue
 
         # Phase 2: Validate all slices before any writes

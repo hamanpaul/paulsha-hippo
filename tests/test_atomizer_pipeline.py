@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1169,14 +1170,14 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertTrue(sentinel.exists())
             self.assertEqual(sorted(path.name for path in cache_dir.iterdir()), ["keep.json"])
 
-    def test_transport_failures_do_not_consume_retry_budget(self):
+    def test_transient_failures_consume_budget_and_park_after_limit(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
             cfg, h = atomizer_config.load_config(override_path=None)
             inner, promoter = self._cached_llm_promoter(
                 root,
-                [agent_exec.AgentExecError("agent timed out after 600s")] * 6,
+                [agent_exec.AgentTransientError("agent timed out after 600s")] * 7,
             )
 
             result = None
@@ -1185,67 +1186,74 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                     root,
                     config=cfg,
                     config_hash=h,
-                    now=f"2026-07-02T0{hour}:00:00Z",
+                    now=f"2026-07-10T0{hour}:00:00Z",
                     promoter=promoter,
                 )
 
             cache_dir = root / "runtime" / "cache" / "atomize"
             self.assertIsNotNone(result)
+            # 第 6 次失敗（attempts=6 > 5）→ park；前 5 次留 split 續重試
             self.assertEqual(inner.calls, 6)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list(cache_dir.glob("*.retries")), [])
             self.assertEqual(list(cache_dir.glob("*.json")), [])
-            self.assertTrue(any("transport failure" in warning for warning in result["warnings"]))
-            self.assertFalse(any("poisoned cache retained" in warning for warning in result["warnings"]))
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
+            evidence = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            self.assertTrue(evidence.exists())
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_category"], "transient")
+            self.assertEqual(payload["attempts"], 6)
+            # split fragments 保留（requeue 重試素材）
+            self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
 
-    def test_transport_recovery_chatter_starts_content_retry_budget_at_one(self):
+            # parked 不再佔下一輪預算：不重呼叫 LLM、無新警告
+            result2 = pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T06:00:00Z", promoter=promoter,
+            )
+            self.assertEqual(inner.calls, 6)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertFalse(any("claude:s1" in w for w in result2["warnings"]))
+
+    def test_transient_then_invalid_then_valid_recovers_within_budget(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
             cfg, h = atomizer_config.load_config(override_path=None)
             inner, promoter = self._cached_llm_promoter(
                 root,
-                [agent_exec.AgentExecError("agent timed out after 600s")] * 6
+                [agent_exec.AgentTransientError("agent timed out after 600s")] * 2
                 + ["chatter, not json", _VALID_ONE_SLICE],
             )
 
-            for hour in range(6):
+            for hour in range(2):
                 pipeline.run(
-                    root,
-                    config=cfg,
-                    config_hash=h,
-                    now=f"2026-07-02T0{hour}:00:00Z",
-                    promoter=promoter,
+                    root, config=cfg, config_hash=h,
+                    now=f"2026-07-10T0{hour}:00:00Z", promoter=promoter,
                 )
 
             cache_dir = root / "runtime" / "cache" / "atomize"
-            result = pipeline.run(
-                root,
-                config=cfg,
-                config_hash=h,
-                now="2026-07-02T06:00:00Z",
-                promoter=promoter,
+            result3 = pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T02:00:00Z", promoter=promoter,
             )
-
+            # transient×2 + invalid_output×1 = attempts 3（單一預算），毒快取已淘汰
             retries = list(cache_dir.glob("*.retries"))
-            self.assertEqual(inner.calls, 7)
+            self.assertEqual(inner.calls, 3)
             self.assertEqual(processing.state_of(root, "claude:s1"), "split")
             self.assertEqual(len(retries), 1)
-            self.assertEqual(retries[0].read_text(encoding="utf-8").strip(), "1")
+            self.assertEqual(retries[0].read_text(encoding="utf-8").strip(), "3")
             self.assertEqual(list(cache_dir.glob("*.json")), [])
-            self.assertTrue(any("retry 1/5" in warning for warning in result["warnings"]))
+            self.assertTrue(any("retry 3/5" in warning for warning in result3["warnings"]))
 
-            result2 = pipeline.run(
-                root,
-                config=cfg,
-                config_hash=h,
-                now="2026-07-02T07:00:00Z",
-                promoter=promoter,
+            result4 = pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T03:00:00Z", promoter=promoter,
             )
-
-            self.assertEqual(inner.calls, 8)
+            self.assertEqual(inner.calls, 4)
             self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
-            self.assertEqual(result2["summary"]["slices"], 1)
+            self.assertEqual(result4["summary"]["slices"], 1)
+            self.assertEqual(list(cache_dir.glob("*.retries")), [])
 
     def test_retry_counter_increments_and_cache_cleared_within_budget(self):
         with TemporaryDirectory() as tmp:
@@ -1269,7 +1277,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertEqual(retries[0].read_text(encoding="utf-8").strip(), "1")
             self.assertEqual(list(cache_dir.glob("*.json")), [])
 
-    def test_exhausted_budget_retains_poisoned_cache_and_stops_llm_calls(self):
+    def test_exhausted_budget_evicts_cache_and_parks_session(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
@@ -1281,32 +1289,32 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             inner, promoter = self._cached_llm_promoter(root, ["chatter, not json"])
 
             result = pipeline.run(
-                root,
-                config=cfg,
-                config_hash=h,
-                now="2026-07-02T04:00:00Z",
-                promoter=promoter,
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T04:00:00Z", promoter=promoter,
             )
 
+            # 第 6 次 invalid_output → park：毒快取與 sidecar 一併淘汰
             self.assertEqual(inner.calls, 1)
-            self.assertEqual(
-                (cache_dir / f"{cache_key}.retries").read_text(encoding="utf-8").strip(),
-                "6",
-            )
-            self.assertEqual(len(list(cache_dir.glob("*.json"))), 1)
-            self.assertTrue(any("retry budget exhausted" in warning for warning in result["warnings"]))
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(list(cache_dir.glob("*.json")), [])
+            self.assertEqual(list(cache_dir.glob("*.retries")), [])
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
+            evidence = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_category"], "invalid_output")
+            self.assertEqual(payload["attempts"], 6)
+            self.assertEqual(payload["cache_key"], cache_key)
+            # 證據保存最後一次原始輸出摘要
+            self.assertIn("chatter, not json", payload["last_output_excerpt"])
+            # split fragments 保留
+            self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
 
             result2 = pipeline.run(
-                root,
-                config=cfg,
-                config_hash=h,
-                now="2026-07-02T05:00:00Z",
-                promoter=promoter,
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T05:00:00Z", promoter=promoter,
             )
-
             self.assertEqual(inner.calls, 1)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
-            self.assertTrue(any("left in split" in warning for warning in result2["warnings"]))
+            self.assertFalse(any("claude:s1" in w for w in result2["warnings"]))
 
     def test_successful_promotion_removes_retry_sidecar(self):
         with TemporaryDirectory() as tmp:
@@ -1361,6 +1369,61 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertTrue(cache_path.exists())
             self.assertEqual(sidecar.read_text(encoding="utf-8").strip(), "1")
             self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+
+    def test_backend_unavailable_parks_immediately_without_retry(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            inner, promoter = self._cached_llm_promoter(
+                root,
+                [agent_exec.AgentUnavailableError("agent command not found: claude")] * 2,
+            )
+
+            result = pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T00:00:00Z", promoter=promoter,
+            )
+
+            self.assertEqual(inner.calls, 1)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
+            event = processing.read_events(root)[-1]
+            self.assertEqual(event["failure_category"], "backend_unavailable")
+            evidence = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            self.assertEqual(payload["failure_category"], "backend_unavailable")
+            self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
+
+            pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T01:00:00Z", promoter=promoter,
+            )
+            self.assertEqual(inner.calls, 1)  # parked 不佔下一輪預算
+
+    def test_parked_session_raw_reappearance_is_not_resplit(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            inner, promoter = self._cached_llm_promoter(
+                root,
+                [agent_exec.AgentUnavailableError("agent command not found: claude")],
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T00:00:00Z", promoter=promoter,
+            )
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+
+            raw = _seed_raw(root)  # 模擬同 session 重複 import
+            result = pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-10T01:00:00Z", promoter=promoter,
+            )
+            self.assertTrue(raw.exists())  # 未被 re-split／archive
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(result["summary"]["split_sessions"], 0)
 
 
 if __name__ == "__main__":
