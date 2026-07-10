@@ -10,6 +10,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from paulsha_hippo import cli
+from paulsha_hippo.dream import lock as dream_lock
 from paulsha_hippo.ledger import dream
 
 _RAW = """---
@@ -146,6 +147,50 @@ class DreamCliTests(unittest.TestCase):
                 },
             )
             self.assertIsNone(dream.last_run(root))
+
+    def test_dream_run_skips_when_lock_held(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed(root)
+            holder = dream_lock.acquire_dream_lock(root)
+            self.assertIsNotNone(holder)
+            buf = io.StringIO()
+            try:
+                with redirect_stdout(buf):
+                    rc = cli.main(["dream", "run", "--memory-root", str(root),
+                                   "--now", "2026-07-10T00:00:00Z"])
+            finally:
+                holder.close()
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload.get("skipped"), "dream lock held by another process")
+            self.assertIsNone(dream.last_run(root))
+
+    def test_dream_run_releases_lock_after_run(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed(root)
+            patches = dict(
+                atomizer=patch(
+                    "paulsha_hippo.dream.cli.atomizer_config.load_config",
+                    return_value=(SimpleNamespace(default_promoter="identity"),
+                                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                ),
+                janitor=patch(
+                    "paulsha_hippo.dream.cli.janitor_config.load_config",
+                    return_value=(SimpleNamespace(),
+                                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                ),
+            )
+            for round_now in ("2026-07-10T00:00:00Z", "2026-07-10T01:00:00Z"):
+                buf = io.StringIO()
+                with patches["atomizer"], patches["janitor"], redirect_stdout(buf):
+                    rc = cli.main(["dream", "run", "--memory-root", str(root),
+                                   "--now", round_now, "--dry-run"])
+                self.assertEqual(rc, 0)
+                payload = json.loads(buf.getvalue())
+                self.assertNotIn("skipped", payload)  # 第二輪未被殘留鎖擋住
+                self.assertIn("passes", payload)
 
     def test_status_reports_backlog(self):
         with TemporaryDirectory() as tmp:
