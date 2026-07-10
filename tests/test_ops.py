@@ -114,7 +114,14 @@ class DoctorTests(unittest.TestCase):
 
 
 class DoctorBackendProbeTests(unittest.TestCase):
-    _ENV = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a"}
+    """live probe（smoke exec／HTTP）語意——一律經 opt-in gate（live_probe=True）驅動。
+
+    裸 `hippo doctor` 預設不進本 class 驗的 exec 分支（見 DoctorLiveProbeGateTests）；
+    唯一例外是解析級 gate 本身（bare command 解析不到照樣 FAIL）。"""
+
+    # HIPPO_DOCTOR_LIVE_PROBE 置空：中和開發機環境殘留，維持測試決定性
+    _ENV = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a",
+            "HIPPO_DOCTOR_LIVE_PROBE": ""}
 
     def _fake_cfg(self, **overrides):
         base = dict(
@@ -129,6 +136,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
         return SimpleNamespace(**base)
 
     def test_probe_fails_when_bare_command_unresolvable_in_service_path(self):
+        # 刻意用裸 run_doctor()：解析級 gate（shutil.which）不需 live opt-in 也要 FAIL
         with mock.patch.dict("os.environ", self._ENV), \
              mock.patch("paulsha_hippo.atomizer.config.load_config",
                         return_value=(self._fake_cfg(), "h")), \
@@ -153,7 +161,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                             side_effect=lambda command: tuple(command)), \
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}):
-                self.assertEqual(ops.run_doctor(), 0)
+                self.assertEqual(ops.run_doctor(live_probe=True), 0)
 
     def test_probe_openai_compatible_success_with_live_endpoint(self):
         # openai-compatible 不再「PR-D 接手」綠燈——實際打 /v1/chat/completions
@@ -170,7 +178,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                             return_value=(cfg, "h")), \
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}):
-                self.assertEqual(ops.run_doctor(), 0)
+                self.assertEqual(ops.run_doctor(live_probe=True), 0)
         finally:
             server.shutdown()
 
@@ -185,13 +193,13 @@ class DoctorBackendProbeTests(unittest.TestCase):
                         return_value=(cfg, "h")), \
              mock.patch.object(ops, "_service_manager_environment",
                                return_value={"PATH": "/usr/bin:/bin"}):
-            self.assertEqual(ops.run_doctor(), 1)
+            self.assertEqual(ops.run_doctor(live_probe=True), 1)
 
     def test_service_effective_path_falls_back_without_systemd(self):
         with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
             self.assertEqual(ops._service_effective_path_env(), "/usr/local/bin:/usr/bin:/bin")
 
-    def _doctor_with_command(self, command: tuple[str, ...]) -> int:
+    def _doctor_with_command(self, command: tuple[str, ...], *, live: bool = True) -> int:
         cfg = self._fake_cfg(agent_exec_command=command)
         with mock.patch.dict("os.environ", self._ENV), \
              mock.patch("paulsha_hippo.atomizer.config.load_config",
@@ -200,7 +208,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                         side_effect=lambda command: tuple(command)), \
              mock.patch.object(ops, "_service_manager_environment",
                                return_value={"PATH": "/usr/bin:/bin"}):
-            return ops.run_doctor()
+            return ops.run_doctor(live_probe=live)
 
     def test_probe_fails_when_env_child_runtime_missing(self):
         # review F3 反例：argv[0]（/usr/bin/env）is_file()+X_OK 全過，但實跑 exit 127。
@@ -275,7 +283,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                         side_effect=lambda command: tuple(command)), \
              mock.patch.object(ops, "_service_manager_environment",
                                return_value=manager_env):
-            return ops.run_doctor()
+            return ops.run_doctor(live_probe=True)
 
     def test_probe_fails_when_api_key_only_in_interactive_shell(self):
         # Codex 複驗 B1 主方向：API key 只 export 在互動 shell、manager env 沒有
@@ -339,7 +347,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                             return_value=(cfg, "h")), \
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value=manager_env):
-                return ops.run_doctor()
+                return ops.run_doctor(live_probe=True)
         finally:
             server.shutdown()
 
@@ -364,6 +372,112 @@ class DoctorBackendProbeTests(unittest.TestCase):
             ),
             0,
         )
+
+
+class DoctorLiveProbeGateTests(unittest.TestCase):
+    """blocking review 修正：裸 `hippo doctor` 必須是快速、免費、無副作用的解析級健檢。
+
+    live smoke probe（真實喚起 backend／真 HTTP）僅在 opt-in gate 開啟時執行：
+    `--fix-backend`／`--probe-live`（`run_doctor(live_probe=True)`）／
+    `HIPPO_DOCTOR_LIVE_PROBE=1`。跨批次（PR-C/PR-D）直呼 run_doctor 的測試
+    在預設 gate 關閉下不會打 LLM。"""
+
+    _ENV = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a",
+            "HIPPO_DOCTOR_LIVE_PROBE": ""}
+    # /usr/bin/env 解析檢查全過（存在＋X_OK），但實跑 exit 127——
+    # 專門用來區分「解析級（過）」與「live smoke exec（fail-closed 不過）」兩檔。
+    _RESOLVES_BUT_FAILS_LIVE = ("/usr/bin/env", "definitely-no-such-runtime")
+
+    def _fake_cfg(self, **overrides):
+        base = dict(
+            agent_exec_backend="custom-argv",
+            agent_exec_command=self._RESOLVES_BUT_FAILS_LIVE,
+            agent_exec_base_url="",
+            agent_exec_model="test-model",
+            agent_exec_api_key_env="",
+            default_promoter="llm",
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def _doctor(self, cfg, *, extra_env: dict[str, str] | None = None,
+                **doctor_kwargs) -> int:
+        with mock.patch.dict("os.environ", {**self._ENV, **(extra_env or {})}), \
+             mock.patch("paulsha_hippo.atomizer.config.load_config",
+                        return_value=(cfg, "h")), \
+             mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
+                        side_effect=lambda command: tuple(command)), \
+             mock.patch.object(ops, "_service_manager_environment",
+                               return_value={"PATH": "/usr/bin:/bin"}):
+            return ops.run_doctor(**doctor_kwargs)
+
+    def test_bare_doctor_resolution_only_never_execs_backend(self):
+        # 裸 doctor：解析檢查過即 PASS，且完全不 exec backend（無 LLM 成本／延遲）
+        with mock.patch.object(
+                ops, "_exec_probe_service_effective",
+                side_effect=AssertionError("裸 doctor 不得真實 exec backend")) as spy:
+            self.assertEqual(self._doctor(self._fake_cfg()), 0)
+        spy.assert_not_called()
+
+    def test_live_probe_flag_upgrades_to_smoke_exec(self):
+        # 同一 config：gate 開啟才走 fail-closed smoke exec（exit 127 → FAIL）
+        self.assertEqual(self._doctor(self._fake_cfg(), live_probe=True), 1)
+
+    def test_env_var_upgrades_bare_doctor_to_live(self):
+        self.assertEqual(
+            self._doctor(self._fake_cfg(),
+                         extra_env={"HIPPO_DOCTOR_LIVE_PROBE": "1"}),
+            1,
+        )
+
+    def test_fix_backend_implies_live_probe(self):
+        # spec §4.1 恢復序列 gate：--fix-backend 明確要求「實際喚起 backend 一次」。
+        # config roots 指向空 tmp → migration 無 override 可遷移（noop），
+        # 隨後的 doctor 檢查必須以 live 檔執行 → exit 127 FAIL。
+        with TemporaryDirectory() as tmp:
+            rc = self._doctor(
+                self._fake_cfg(),
+                extra_env={"HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                           "PSC_CONFIG_ROOT": f"{tmp}/legacy-cfg"},
+                fix_backend=True,
+            )
+        self.assertEqual(rc, 1)
+
+    def test_bare_doctor_fails_when_absolute_backend_not_executable(self):
+        # 解析級 gate 仍要抓得住壞 backend：is_file+X_OK 不過 → FAIL
+        with TemporaryDirectory() as tmp:
+            not_exec = Path(tmp) / "claude"
+            not_exec.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+            not_exec.chmod(0o644)  # 無執行權限
+            cfg = self._fake_cfg(agent_exec_command=(str(not_exec), "-p"))
+            self.assertEqual(self._doctor(cfg), 1)
+
+    def test_bare_doctor_openai_compatible_skips_http_probe(self):
+        # 端點不可達（live 檔必 FAIL，見 DoctorBackendProbeTests），裸 doctor
+        # 不打 HTTP → config 可載入即 PASS
+        cfg = self._fake_cfg(
+            agent_exec_backend="openai-compatible",
+            agent_exec_base_url="http://127.0.0.1:1",
+        )
+        with mock.patch.object(
+                ops, "_probe_openai_compatible",
+                side_effect=AssertionError("裸 doctor 不得真打 HTTP 端點")) as spy:
+            self.assertEqual(self._doctor(cfg), 0)
+        spy.assert_not_called()
+
+    def test_gate_wiring_passes_live_kwarg_to_probe(self):
+        # 跨批次契約（PR-C/PR-D mock 面）：run_doctor 以 live= kwarg 驅動 probe
+        for doctor_kwargs, expected_live in (
+            ({}, False),
+            ({"live_probe": True}, True),
+        ):
+            with self.subTest(doctor_kwargs=doctor_kwargs):
+                with mock.patch.dict("os.environ", self._ENV), \
+                     mock.patch.object(
+                         ops, "_probe_backend_service_effective",
+                         return_value=("- distiller backend：✓ mocked", False)) as probe:
+                    self.assertEqual(ops.run_doctor(**doctor_kwargs), 0)
+                probe.assert_called_once_with(live=expected_live)
 
 
 class ServiceManagerEnvironmentTests(unittest.TestCase):

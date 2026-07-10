@@ -117,7 +117,12 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
 
 # ---------------------------------------------------------------- doctor
 
-def run_doctor(*, fix_backend: bool = False) -> int:
+def run_doctor(*, fix_backend: bool = False, live_probe: bool = False) -> int:
+    """健檢。backend 檢查預設為解析級（快速、免費、無副作用——shutil.which／
+    is_file+X_OK，不喚起 backend）；live smoke probe（實際喚起 backend 一次，
+    spec §4.1 恢復序列 gate 語意）僅在 `fix_backend=True`／`live_probe=True`／
+    `HIPPO_DOCTOR_LIVE_PROBE=1` 時執行。跨批次呼叫端（PR-C/PR-D）見
+    `_probe_backend_service_effective` 的契約說明。"""
     if fix_backend:
         code, message = _fix_backend_override()
         print(message, file=sys.stderr if code else sys.stdout)
@@ -150,7 +155,8 @@ def run_doctor(*, fix_backend: bool = False) -> int:
     agent = shutil.which("claude")
     print(f"- claude CLI：{'✓ ' + agent if agent else '未找到（claude-headless 檔位需要）'}")
 
-    probe_line, probe_failed = _probe_backend_service_effective()
+    live = fix_backend or live_probe or _live_probe_env_enabled()
+    probe_line, probe_failed = _probe_backend_service_effective(live=live)
     if probe_failed:
         print(probe_line, file=sys.stderr)
         failed = True
@@ -238,6 +244,15 @@ _PROBE_SMOKE_PROMPT = (
     "hippo doctor smoke probe: reply with the single word ok and nothing else."
 )
 _PROBE_MAX_TOKENS = 32
+
+_LIVE_PROBE_ENV_VAR = "HIPPO_DOCTOR_LIVE_PROBE"
+
+
+def _live_probe_env_enabled() -> bool:
+    """`HIPPO_DOCTOR_LIVE_PROBE=1`（或 true/yes/on）→ 裸 doctor 也升級 live probe。"""
+    return os.environ.get(_LIVE_PROBE_ENV_VAR, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
@@ -328,14 +343,24 @@ def _probe_openai_compatible(cfg, probe_env: dict[str, str],
     )
 
 
-def _probe_backend_service_effective() -> tuple[str, bool]:
-    """以 service-effective 環境對 atomizer backend 做 smoke probe。回傳 (報告行, is_failure)。
+def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
+    """以 service-effective 環境檢查 atomizer backend。回傳 (報告行, is_failure)。
 
-    dream service template 固定 --promoter llm，故 backend probe 不過一律 FAIL，
-    不因 config 的 default promoter 軟化。openai-compatible 非 argv backend，
-    以 HttpAgentClient 直打端點做等價 smoke probe。probe 環境經
-    `_probe_environment()` 顯式構造（B1）；無 systemd user bus 時 fallback 近似
-    並在報告行標示，避免把近似判定當成 service-effective 真相。"""
+    兩檔行為（跨批次共享契約 6——PR-C/PR-D 對 `run_doctor` 的呼叫端必讀）：
+    - `live=False`（裸 `hippo doctor` 預設）：純解析檢查——argv backend 以
+      service-effective PATH `shutil.which`（絕對路徑則 is_file+X_OK）；
+      openai-compatible 只驗 config 可載入、不打端點。快速、免費、無副作用，
+      不喚起 backend、不產生 API 成本。
+    - `live=True`（`--fix-backend`／`--probe-live`／`HIPPO_DOCTOR_LIVE_PROBE=1`）：
+      對 configured backend 真送 bounded smoke prompt——argv 走真實 exec
+      （`_exec_probe_service_effective`，60s timeout），openai-compatible 以
+      HttpAgentClient 直打 `/v1/chat/completions`；fail-closed（spec §4.1
+      恢復序列 gate「實際喚起 backend 一次」語意）。
+
+    dream service template 固定 --promoter llm，故 backend 檢查不過一律 FAIL，
+    不因 config 的 default promoter 軟化。probe 環境經 `_probe_environment()`
+    顯式構造（B1）；無 systemd user bus 時 fallback 近似並在報告行標示，
+    避免把近似判定當成 service-effective 真相。"""
     from paulsha_hippo.atomizer import config as atomizer_config
 
     try:
@@ -346,6 +371,12 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
     env_label = ("service-effective" if service_effective
                  else "近似，非 service-effective（無 systemd user bus）")
     if cfg.agent_exec_backend == "openai-compatible":
+        if not live:
+            return (
+                f"- distiller backend：openai-compatible（{cfg.agent_exec_base_url}；"
+                "config 可載入；即時 smoke probe 需 --probe-live／--fix-backend）",
+                False,
+            )
         return _probe_openai_compatible(cfg, probe_env, env_label=env_label)
     command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
@@ -358,6 +389,18 @@ def _probe_backend_service_effective() -> tuple[str, bool]:
                 True,
             )
         command[0] = resolved
+    if not live:
+        if Path(command[0]).is_file() and os.access(command[0], os.X_OK):
+            return (
+                f"- distiller backend：✓ {command[0]}（{env_label} 解析檢查；"
+                "即時 smoke probe 需 --probe-live／--fix-backend）",
+                False,
+            )
+        return (
+            f"FAIL distiller backend：{command[0]} 在 {env_label} 環境不可執行"
+            "（hippo doctor --fix-backend 可嘗試自動遷移）",
+            True,
+        )
     ok, detail = _exec_probe_service_effective(command, probe_env)
     if ok:
         return (

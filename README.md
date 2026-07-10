@@ -12,7 +12,7 @@
     pipx install git+https://github.com/hamanpaul/paulsha-hippo
     hippo init                          # 預設：~/.agents/memory + claude-headless（零 key 設定）
     hippo install hooks && hippo install service --enable
-    hippo doctor                        # 健檢：路徑契約/hooks/服務/backend（--fix-backend 冪等遷移裸命令為絕對路徑）
+    hippo doctor                        # 健檢：路徑契約/hooks/服務/backend（--fix-backend 冪等遷移裸命令為絕對路徑；預設解析級檢查，--probe-live 才真實喚起 backend smoke probe）
     hippo dream run --dry-run --memory-root ~/.agents/memory
     hippo wakeup --project <slug>
 
