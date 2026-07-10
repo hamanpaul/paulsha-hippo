@@ -191,8 +191,13 @@ def _exec_probe_service_effective(command: list[str], service_path: str,
     exec 失敗（ENOENT／EACCES 等）與 exit 126/127（not executable／command
     not found，含 env 的子命令缺失）→ FAIL；timeout 或其他 exit code 代表
     exec 鏈已啟動 → PASS。stdin 關閉、受限 timeout，probe 不做實際工作。
+
+    #7：probe 實跑的是 configured backend argv（預設 `claude -p`），必須比照
+    agent_exec.AgentExecClient.run 注入 HIPPO_SELF_SESSION=1——使用者已安裝的
+    SessionEnd/PreCompact hooks 讀到此標記即早退，否則 doctor 探測會被當成
+    真實 session 寫回 queue，重新引入遞迴自捕捉／queue 污染。
     """
-    env = {**os.environ, "PATH": service_path}
+    env = {**os.environ, "PATH": service_path, "HIPPO_SELF_SESSION": "1"}
     try:
         completed = runner(
             command,

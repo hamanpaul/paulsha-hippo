@@ -196,6 +196,23 @@ class DoctorBackendProbeTests(unittest.TestCase):
         with mock.patch.object(ops, "_PROBE_TIMEOUT_SECS", 0.2):
             self.assertEqual(self._doctor_with_command(("/bin/sleep", "5")), 0)
 
+    def test_probe_env_carries_self_session_marker(self):
+        # #7 回歸：probe 實跑 backend argv，需比照 agent_exec.AgentExecClient.run
+        # 注入 HIPPO_SELF_SESSION=1——否則使用者已裝的 SessionEnd/PreCompact hooks
+        # 會把 doctor/--fix-backend 的探測當真實 session 寫入 queue（遞迴自捕捉）。
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "env.txt"
+            fake_backend = Path(tmp) / "claude"
+            fake_backend.write_text(
+                f'#!/bin/sh\nprintf "%s" "${{HIPPO_SELF_SESSION:-MISSING}}" > "{out}"\n',
+                encoding="utf-8",
+            )
+            fake_backend.chmod(0o755)
+            ok, _ = ops._exec_probe_service_effective(
+                [str(fake_backend), "-p"], "/usr/bin:/bin")
+            self.assertTrue(ok)
+            self.assertEqual(out.read_text(encoding="utf-8"), "1")
+
 
 class InstallServiceTests(unittest.TestCase):
     def test_installs_renamed_units_when_systemd_available(self):
