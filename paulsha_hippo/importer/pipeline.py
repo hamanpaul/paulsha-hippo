@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import re
 import shutil
 import threading
@@ -16,6 +17,7 @@ from typing import Any
 from .adapters import claude, codex, copilot
 from .adapters.base import AdapterResult, NormalizedSession
 from . import _git
+from . import registry
 from . import title
 from .classifier import classify_session
 from .frontmatter import render_markdown
@@ -26,6 +28,8 @@ _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "wa
 _TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip"}
 _LEDGER_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _LEDGER_THREAD_LOCKS_GUARD = threading.Lock()
+
+LOGGER = logging.getLogger("paulsha_hippo.importer")
 
 
 class PipelineError(Exception):
@@ -266,6 +270,34 @@ def _persisted_session(session: NormalizedSession, *, raw_payload_pointer: str) 
     return persisted
 
 
+def _record_registry_discovery(memory_root: Path, discovery: dict[str, Any] | None) -> None:
+    """Opt-in（project_registry.auto_write）時把已解析的 project mapping 寫回 registry（#14）。
+
+    Fail-open：registry 寫入失敗不得影響 ingest 主流程，僅記 warning。
+    slug 為 _unknown 或 roots+remotes 全空（非 repo、無 remote 的雜訊 session）不寫。
+    """
+    if not discovery:
+        return
+    slug = discovery.get("slug")
+    roots = [item for item in discovery.get("roots", []) if item]
+    remotes = [item for item in discovery.get("remotes", []) if item]
+    if not slug or slug == "_unknown":
+        return
+    if not roots and not remotes:
+        return
+    if not registry.auto_write_enabled():
+        return
+    try:
+        registry.record_discovery(
+            slug=slug,
+            roots=roots,
+            remotes=remotes,
+            registry_path=registry.default_registry_path(memory_root),
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("project registry auto-write failed (fail-open): %s", exc)
+
+
 def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | Path) -> dict[str, Any]:
     queue_path = Path(queue_item)
     root = Path(memory_root)
@@ -324,7 +356,11 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         status = "stale-skip"
     archive_path = _archive_path(root, month, key, status, incoming_hash)
     rendered_session = _persisted_session(session, raw_payload_pointer=str(archive_path))
-    provenance_repo = normalize_remote(_git.git_remote(_git.git_toplevel(session.get("cwd")))) or "_unknown"
+    discovered_toplevel = _git.git_toplevel(session.get("cwd"))
+    discovered_remote = normalize_remote(_git.git_remote(discovered_toplevel))
+    provenance_repo = discovered_remote or "_unknown"
+    main_root = _git.git_main_toplevel(discovered_toplevel)
+    payload_remote = normalize_remote(remote_url)
     decision = _decision_entry(
         status=status,
         key=key,
@@ -337,6 +373,11 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     )
     decision["classifier_bucket"] = bucket
     decision["project"] = project
+    decision["discovery"] = {
+        "slug": project,
+        "roots": [main_root] if main_root else [],
+        "remotes": sorted({value for value in (payload_remote, discovered_remote) if value}),
+    }
     decision["rendered"] = render_markdown(
         rendered_session,
         project=project,
@@ -373,6 +414,7 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
             with _locked_ledger(root):
                 decision = _preview_queue_item_unlocked(queue_path, memory_root=root)
                 rendered = decision.pop("rendered")
+                discovery = decision.pop("discovery", None)
                 inbox_path = Path(decision["inbox_path"])
                 archive_path = Path(decision["archive_path"])
                 if decision["status"] in {"written", "updated"}:
@@ -385,6 +427,9 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
                     _archive_queue(queue_path, archive_path)
                     _append_ledger(root, decision)
                     _remove_queue(queue_path)
+            _record_registry_discovery(root, discovery)
+            if discovery is not None:
+                decision["discovery"] = discovery
             return decision
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
