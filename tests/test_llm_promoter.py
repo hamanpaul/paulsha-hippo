@@ -178,6 +178,35 @@ class LLMPromoterTests(unittest.TestCase):
         with self.assertRaises(llm_promoter.PromoteError):
             _promoter(_TWO).promote(_frag(0), CFG)
 
+    def test_agent_unavailable_maps_to_backend_unavailable_category(self):
+        class Unavailable(agent_exec.AgentClient):
+            def run(self, prompt: str) -> str:
+                raise agent_exec.AgentUnavailableError("agent command not found: claude")
+
+        promoter = llm_promoter.LLMPromoter(
+            Unavailable(), skill_text="SKILL", known_projects=["paulshaclaw"]
+        )
+        with self.assertRaises(llm_promoter.PromoteError) as ctx:
+            promoter.promote([_frag(0)], CFG)
+        self.assertEqual(ctx.exception.category, "backend_unavailable")
+
+    def test_agent_timeout_maps_to_transient_category(self):
+        class Timeout(agent_exec.AgentClient):
+            def run(self, prompt: str) -> str:
+                raise agent_exec.AgentTransientError("agent timed out after 600s")
+
+        promoter = llm_promoter.LLMPromoter(
+            Timeout(), skill_text="SKILL", known_projects=["paulshaclaw"]
+        )
+        with self.assertRaises(llm_promoter.PromoteError) as ctx:
+            promoter.promote([_frag(0)], CFG)
+        self.assertEqual(ctx.exception.category, "transient")
+
+    def test_invalid_output_maps_to_invalid_output_category(self):
+        with self.assertRaises(llm_promoter.PromoteError) as ctx:
+            _promoter("garbage not json").promote([_frag(0)], CFG)
+        self.assertEqual(ctx.exception.category, "invalid_output")
+
 
 if __name__ == "__main__":
     unittest.main()
