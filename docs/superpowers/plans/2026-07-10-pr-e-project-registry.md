@@ -18,7 +18,7 @@
 - spec §3.3.5：「寫入：temp file + atomic replace + 固定名 lock；**stdlib-only、零新依賴**。」
 - spec §7：「分支一律 `feature/<issue>-<slug>`；禁 commit main。」
 - spec §7：「每 code PR：changelog.d 碎片（repo 現行慣例）、PR checklist 全勾、`Closes #N`（R-17）、zh-tw（語言規範）、`policy_check` 零 failure。」
-- spec §7：「`tier: shareable`（R-21）：所有新增文件（含本 spec、capability matrix、快照留言）不得含個人絕對路徑、機敏標記。」→ 本 plan 所有 fixture／docs／測試常數一律用 `/home/user`、`/data` 等中性路徑。
+- spec §7：「`tier: shareable`（R-21）：所有新增文件（含本 spec、capability matrix、快照留言）不得含個人絕對路徑、機敏標記。」→ 本 plan 所有 fixture／docs／測試常數一律用 `/data` 等中性路徑（`/home/*` 會觸發 R-21）。
 - spec §7：「R-18/R-22：behavior 變更同步 README／docs 引用」。
 - spec §7：「測試新增全部進 CI 覆蓋（R-19；`tests.yml` 已自動跑 pytest）。」
 - spec §2 非目標：「不 bump `VERSION`」。
@@ -1864,13 +1864,13 @@ class ProducerContractTests(_ScratchDirTestCase):
         path = self.root / "paulsha" / "project-hippo.yaml"
         record_discovery(
             slug="github.com/acme/widget",
-            roots=("/home/user/projects/widget",),
+            roots=("/data/projects/widget",),
             remotes=("github.com/acme/widget",),
             registry_path=path,
         )
         record_discovery(
             slug="scratch-notes",
-            roots=("/home/user/scratch/notes",),
+            roots=("/data/scratch/notes",),
             remotes=(),
             registry_path=path,
         )
@@ -1902,13 +1902,13 @@ schema_version: 1
 projects:
   - slug: github.com/acme/widget
     roots:
-      - /home/user/projects/widget
+      - /data/projects/widget
     remotes:
       - github.com/acme/widget
     aliases: []
   - slug: scratch-notes
     roots:
-      - /home/user/scratch/notes
+      - /data/scratch/notes
     remotes: []
     aliases: []
 ```
@@ -1995,13 +1995,13 @@ schema_version: 1
 projects:
   - slug: github.com/acme/widget
     roots:
-      - /home/user/projects/widget
+      - /data/projects/widget
     remotes:
       - github.com/acme/widget
     aliases: []
   - slug: scratch-notes
     roots:
-      - /home/user/scratch/notes
+      - /data/scratch/notes
     remotes: []
     aliases: []
 ```
