@@ -24,7 +24,7 @@
 
 ## Usage
 
-日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo search`／`hippo replay`／`hippo bundle`。
+日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo search`／`hippo index verify`／`hippo replay`／`hippo bundle`。
 
 設定：單一檔 `~/.config/paulsha-hippo/config.yaml` + `HIPPO_*` env 覆寫；密鑰一律 `secret.env`（0600）。
 蒸餾 LLM 三檔位：`claude-headless`（預設，零 key 管理）／`openai-compatible`（ollama、vLLM、內網端點）／`custom-argv`。
