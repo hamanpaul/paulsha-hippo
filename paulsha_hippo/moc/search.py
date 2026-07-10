@@ -1,12 +1,16 @@
 # paulshaclaw/memory/moc/search.py
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
+import secrets
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from .. import instruction_corpus
 from ..importer.config import default_projects_path, load_projects_config
@@ -49,14 +53,50 @@ def coverage_path(memory_root: Path) -> Path:
     return memory_root / "runtime" / "indexes" / "retrieval.coverage.json"
 
 
+def index_lock_path(memory_root: Path) -> Path:
+    """所有 index writer 共用的互斥鎖檔（build_index 全程持有）。"""
+    return memory_root / "runtime" / "locks" / "index-rebuild.lock"
+
+
 def _project_roots(memory_root: Path) -> dict[str, tuple[str, ...]]:
     config = load_projects_config(default_projects_path(memory_root))
     return {project.slug: project.roots for project in config.projects}
 
 
+@contextmanager
+def _index_write_lock(memory_root: Path) -> "Iterator[None]":
+    """阻塞式 flock：序列化所有 build_index writer。
+
+    global dream lock（PR-A 契約 #3，dream run 入口）擋不住 rekey / retitle
+    在 dream 入口外直接呼叫 run_moc 的重建路徑；互斥必須落在所有 writer
+    共用的最低層——本函式由 build_index 全程持有（掃描→temp DB→atomic
+    replace→coverage 落盤為單一 critical section，DB 與 coverage 永遠成對）。
+    持鎖進程死亡時 kernel 自動釋放 flock，不會殘留死鎖。
+    """
+    lock_path = index_lock_path(memory_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        try:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+
+def _unique_tmp(target: Path) -> Path:
+    """per-invocation 唯一暫存路徑（與 target 同目錄，供 atomic os.replace）。
+
+    固定暫存名（如 ``retrieval.db.tmp``）會讓交錯的兩個 writer 互相
+    unlink 對方仍開啟的 inode，隨後的 os.replace 把對方未完成的半成品
+    發布成正式檔——唯一路徑讓每個 writer 只可能發布自己寫完的完整檔，
+    也是鎖被外力破壞（鎖檔遭刪）時的第二層防線。
+    """
+    return target.with_name(f"{target.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+
+
 def _write_coverage(memory_root: Path, coverage: dict[str, object]) -> None:
     cov_path = coverage_path(memory_root)
-    tmp = cov_path.with_name(cov_path.name + ".tmp")
+    tmp = _unique_tmp(cov_path)
     tmp.write_text(
         json.dumps(coverage, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -81,12 +121,28 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     pool_excluded[non-knowledge-layer:<layer>]；缺 slice_id →
     invalid_frontmatter；pool_exclude_reason → pool_excluded[<reason>]；
     classify_noise → noise_excluded[<reason>]；其餘 eligible（=實際入索引）。
+
+    並發安全：全程持 ``index_lock_path()`` 阻塞式 flock 序列化所有 writer
+    （dream／rekey／retitle 任意呼叫路徑），temp DB 與 coverage 皆用
+    per-invocation 唯一暫存路徑 + atomic replace——讀者（search()）永遠
+    只看到完整舊版或完整新版索引。
     """
+    with _index_write_lock(memory_root):
+        return _build_index_locked(memory_root, link_weights, doc_corpus)
+
+
+def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
+                        doc_corpus: "object | None") -> dict[str, object]:
     path = index_path(memory_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    if tmp_path.exists():  # 上一次 crash 殘留的半成品
-        tmp_path.unlink()
+    # 持鎖中無其他活 writer：目錄裡任何 *.tmp 都是 crash 殘留的半成品
+    # （含舊版固定名 retrieval.db.tmp），可安全清掉。
+    for stale in path.parent.glob("*.tmp"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    tmp_path = _unique_tmp(path)
     # 先讀 projects.yaml/建語料，全部成功後才開 sqlite 連線——否則 scoping-config
     # 壞掉會洩漏連線（reviewer Important）。
     project_roots = _project_roots(memory_root)

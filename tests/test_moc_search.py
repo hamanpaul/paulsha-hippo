@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -67,6 +69,21 @@ class SearchTests(unittest.TestCase):
             hits = search.search(root, "beta", project=None, limit=5, include_decayed=True)
             self.assertEqual([h["slice_id"] for h in hits], ["sl-2"])
             self.assertFalse((search.index_path(root).parent / "retrieval.db.tmp").exists())
+
+    def test_build_index_cleans_stale_tmp_leftovers(self):
+        # crash 殘留的半成品（舊固定名與新唯一名皆有可能）：持鎖重建時清掉
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            indexes = search.index_path(root).parent
+            indexes.mkdir(parents=True)
+            (indexes / "retrieval.db.tmp").write_text("stale legacy", encoding="utf-8")
+            (indexes / "retrieval.db.999-dead0000.tmp").write_text("stale crash", encoding="utf-8")
+            (indexes / "retrieval.coverage.json.999-dead0000.tmp").write_text("{}", encoding="utf-8")
+            search.build_index(root, link_weights={})
+            self.assertEqual(list(indexes.glob("*.tmp")), [])
+            hits = search.search(root, "alpha", project=None, limit=5, include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
 
     def test_build_index_returns_six_column_coverage(self):
         with TemporaryDirectory() as tmp:
@@ -213,6 +230,72 @@ class SearchTests(unittest.TestCase):
                 )
             )
         return rows
+
+
+class ConcurrentRebuildTests(unittest.TestCase):
+    """並發重建不得發布半成品（Codex review blocking）。
+
+    舊實作共用固定 temp 路徑：交錯的兩個 writer 可互相 unlink 對方仍開啟
+    的 inode，隨後 os.replace 把對方未完成的 DB 發布成正式索引。修正為
+    build_index 全程持 index-rebuild.lock（阻塞 flock）互斥 + per-invocation
+    唯一 temp 路徑；讀者永遠只看到完整舊版或完整新版。
+    """
+
+    def test_concurrent_rebuilds_serialize_and_readers_see_complete_db(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})  # 完整舊版基準
+            _slice(root, "sl-2", "proj", "beta", "beta body")
+
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            calls: list[int] = []
+            real_active = search.retrieval_set.active_records
+
+            def gate(memory_root, record_ids, *, events=None):
+                calls.append(len(record_ids))
+                if len(calls) == 1:  # writer A 卡在 build 主體中段
+                    first_entered.set()
+                    if not release_first.wait(timeout=10):
+                        raise AssertionError("release_first never signalled")
+                return real_active(memory_root, record_ids, events=events)
+
+            errors: list[BaseException] = []
+
+            def build():
+                try:
+                    search.build_index(root, link_weights={})
+                except BaseException as exc:  # pragma: no cover - 失敗即測試失敗
+                    errors.append(exc)
+
+            with mock.patch("paulsha_hippo.moc.search.retrieval_set.active_records",
+                            side_effect=gate):
+                writer_a = threading.Thread(target=build)
+                writer_a.start()
+                self.assertTrue(first_entered.wait(timeout=10))
+                writer_b = threading.Thread(target=build)  # 與 A 交錯進場
+                writer_b.start()
+                time.sleep(0.3)  # 若無鎖，B 在此窗口內早已跑完 build 主體
+                # A 持鎖未完成期間：B 不得進入 build 主體，索引仍是完整舊版
+                self.assertEqual(len(calls), 1)
+                hits = search.search(root, "alpha", project=None, limit=5,
+                                     include_decayed=True)
+                self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
+                release_first.set()
+                writer_a.join(timeout=10)
+                writer_b.join(timeout=10)
+                self.assertFalse(writer_a.is_alive())
+                self.assertFalse(writer_b.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(calls), 2)  # 兩輪 build 序列化各跑一次
+            # 兩輪都完成後：完整新版（兩筆皆可搜）、coverage 成對、無 tmp 殘留
+            ids = {h["slice_id"] for h in search.search(
+                root, "alpha OR beta", project=None, limit=10, include_decayed=True)}
+            self.assertEqual(ids, {"sl-1", "sl-2"})
+            coverage = json.loads(search.coverage_path(root).read_text(encoding="utf-8"))
+            self.assertEqual(coverage["indexed"], 2)
+            self.assertEqual(list(search.index_path(root).parent.glob("*.tmp")), [])
 
 
 def test_build_index_and_search_return_path(tmp_path):

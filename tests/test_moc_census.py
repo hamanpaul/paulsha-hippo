@@ -104,6 +104,75 @@ class CensusTests(unittest.TestCase):
             self.assertTrue(any("index unreadable" in p for p in result.problems))
 
 
+class FtsCorruptionTests(unittest.TestCase):
+    """FTS-only corruption 不得 false green（Codex review blocking）。
+
+    實際搜尋走 slices_fts INNER JOIN slice_meta（search.search()）——
+    FTS row 遺失／重複而 slice_meta 完整時，舊實作（只反查 slice_meta）
+    的 `hippo index verify` 照樣回綠，但使用者搜尋漏資料或重複。以下
+    每一測都是「metadata 面完好、只有 FTS 面壞」的注入。
+    """
+
+    def _built_root(self, tmp: str) -> "tuple[Path, dict]":
+        root = Path(tmp)
+        _seed_mixed_tree(root)
+        coverage = search.build_index(root, link_weights={})
+        return root, coverage
+
+    def test_reconcile_detects_fts_missing_row(self):
+        # FTS 掉行、slice_meta 完整：實際搜尋漏資料
+        with TemporaryDirectory() as tmp:
+            root, coverage = self._built_root(tmp)
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("DELETE FROM slices_fts WHERE slice_id = 'sl-good'")
+            conn.commit()
+            conn.close()
+            result = census.reconcile_index(root, coverage)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("missing from slices_fts" in p for p in result.problems))
+            self.assertTrue(any("eligible but not indexed" in p for p in result.problems))
+            self.assertNotIn("sl-good", result.indexed_ids)  # 不可搜尋 → 不算 indexed
+
+    def test_reconcile_detects_fts_duplicate_row(self):
+        # FTS 重複行（FTS5 無唯一約束）：實際搜尋重複回傳同一 slice
+        with TemporaryDirectory() as tmp:
+            root, coverage = self._built_root(tmp)
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("INSERT INTO slices_fts VALUES "
+                         "('sl-good','proj','索引良品','t','真實 知識 內容')")
+            conn.commit()
+            conn.close()
+            result = census.reconcile_index(root, coverage)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("duplicate slices_fts rows" in p for p in result.problems))
+
+    def test_reconcile_detects_fts_phantom_row(self):
+        # 幽靈 FTS 行（無對應 slice_meta）：inner join 靜默丟棄，兩表失衡必須顯性
+        with TemporaryDirectory() as tmp:
+            root, coverage = self._built_root(tmp)
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("INSERT INTO slices_fts VALUES "
+                         "('sl-ghost','proj','幽靈','t','ghost body')")
+            conn.commit()
+            conn.close()
+            result = census.reconcile_index(root, coverage)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("missing from slice_meta" in p for p in result.problems))
+            self.assertNotIn("sl-ghost", result.indexed_ids)
+
+    def test_reconcile_detects_fts_index_corruption(self):
+        # 倒排索引 shadow table 掏空：FTS integrity-check 必須顯性回報
+        with TemporaryDirectory() as tmp:
+            root, coverage = self._built_root(tmp)
+            conn = sqlite3.connect(search.index_path(root))
+            conn.execute("DELETE FROM slices_fts_data")
+            conn.commit()
+            conn.close()
+            result = census.reconcile_index(root, coverage)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("integrity-check failed" in p for p in result.problems))
+
+
 class ClassifierDivergenceTests(unittest.TestCase):
     """防同源自證（spec §3.2）：census 分類規則必須是獨立雙寫實作。
 

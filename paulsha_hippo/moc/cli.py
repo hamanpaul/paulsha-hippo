@@ -22,8 +22,10 @@ def run(args: argparse.Namespace) -> int:
 def run_index_verify(args: argparse.Namespace) -> int:
     """`hippo index verify`：三方對賬（census × coverage 落盤報表 × DB 反查）。
 
-    exit 0 = 三方一致（indexed IDs == eligible IDs）；exit 1 = 不一致或
-    coverage 報表缺失（尚未跑過 dream/moc pass）。
+    DB 反查驗搜尋面真相（slice_meta ↔ slices_fts 兩表 multiset 一對一 +
+    FTS integrity-check；census.audit_indexed_ids）。exit 0 = 三方一致
+    （indexed IDs == eligible IDs）；exit 1 = 不一致或 coverage 報表缺失
+    （尚未跑過 dream/moc pass）。
     """
     memory_root = Path(args.memory_root)
     cov_path = search.coverage_path(memory_root)
