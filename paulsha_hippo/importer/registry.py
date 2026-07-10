@@ -291,8 +291,11 @@ def record_discovery(
     前向防護：既有檔 schema_version 高於 SCHEMA_VERSION 時拒寫並記 warning
     （回 False），避免舊 producer 把新版檔案降級重繪、刪除未知欄位。
     """
-    if not slug:
-        raise ValueError("slug must be non-empty")
+    if not slug.strip():
+        # 寫入端邊界與 reader（_finalize_registry_item）對齊：全空白 slug 在 parse
+        # 端會被靜默丟棄——若放行落盤，下一筆任意 discovery 的 parse→merge→render
+        # 重繪就把該 entry 無聲永久抹除。writer 不得接受 reader 不承認的輸入。
+        raise ValueError("slug must not be empty or whitespace-only")
     path = Path(registry_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(LOCK_FILENAME)

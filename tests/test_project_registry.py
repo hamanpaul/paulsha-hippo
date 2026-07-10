@@ -311,6 +311,15 @@ class RecordDiscoveryTests(_ScratchDirTestCase):
         with self.assertRaises(ValueError):
             record_discovery(slug="", roots=("/data/a",), registry_path=self.registry_path())
 
+    def test_whitespace_only_slug_raises_value_error(self):
+        # 寫入端與 reader 丟棄邊界對齊（回歸釘）：全空白 slug 若放行落盤，
+        # parse_registry 讀回即被 _finalize_registry_item 靜默丟棄，之後任一筆
+        # discovery 的 parse→merge→render 重繪會把該 entry 無聲永久抹除。
+        path = self.registry_path()
+        with self.assertRaises(ValueError):
+            record_discovery(slug="   ", roots=("/data/weird",), registry_path=path)
+        self.assertFalse(path.exists())
+
     def test_corrupt_registry_treated_as_absent_and_rewritten(self):
         # 壞 bytes 視同缺檔：寫入端不炸、下一筆 discovery 重寫 canonical bytes（自癒）。
         path = self.registry_path()
