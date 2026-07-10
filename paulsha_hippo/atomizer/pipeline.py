@@ -191,6 +191,31 @@ def _park_session(memory_root: Path, *, session_key: str, category: str, attempt
     )
 
 
+def _residual_cache_keys(memory_root: Path, session_key: str) -> list[str]:
+    """列出 session 遺留在 cache 目錄的所有 cache_key 變體（`.json`／`.retries`）。
+
+    初始化失敗路徑（park_split_sessions）拿不到 promoter、無法重算 cache_key，
+    只能從磁碟殘留反推。glob 安全：caller 已驗證 agent／session 為 safe path
+    component（`*?[]` 皆被拒），session_key 可直接當字面 pattern。session 名
+    本身含 `__` 時 prefix glob 可能撈到別的 session（`claude:a` 的 pattern 會
+    命中 `claude:a__b` 的 sidecar）——以 rpartition 還原 session_key 精確比對。
+    """
+    cache_root = memory_root / "runtime" / "cache" / "atomize"
+    if not cache_root.is_dir():
+        return []
+    keys: set[str] = set()
+    for path in cache_root.glob(f"{session_key}__*"):
+        if path.suffix not in {".json", ".retries"}:
+            continue
+        cache_key = path.stem
+        if cache_key.rpartition("__")[0] != session_key:
+            continue
+        if not LLMPromoter.is_valid_cache_key(cache_key):
+            continue
+        keys.add(cache_key)
+    return sorted(keys)
+
+
 def park_split_sessions(memory_root: Path, *, error_text: str, now: str,
                         config_hash: str,
                         category: str = "backend_unavailable") -> list[str]:
@@ -200,6 +225,12 @@ def park_split_sessions(memory_root: Path, *, error_text: str, now: str,
     spec 契約「config 無效立即 parked」——否則 pending session 卡在 split、
     無 failure category／evidence，timer 每輪重複整輪失敗。回傳被 park 的
     session keys（排序後，決定性）。
+
+    spec §3.1「進 parked 即淘汰 LLM output cache＋retry sidecar」對任何進入
+    路徑無條件成立：本路徑從磁碟殘留反推真實 cache_key／attempts 落證據
+    （取 attempts 最大的變體為主），並清除該 session 的「所有」sidecar 變體
+    ——否則 requeue 後會繼承過期 retry 計數（殘留 attempts=5 時再 1 次失敗
+    即重新 park），且 parked 證據的 cache_key／attempts 欄位失真。
     """
     parked: list[str] = []
     for session_key, state in sorted(processing.fold_states(memory_root).items()):
@@ -208,9 +239,22 @@ def park_split_sessions(memory_root: Path, *, error_text: str, now: str,
         agent, _, session = session_key.partition(":")
         if not all(is_safe_path_component(value) for value in (agent, session)):
             continue
+        residual = _residual_cache_keys(memory_root, session_key)
+        cache_key = ""
+        attempts = 0
+        for candidate in residual:
+            counter = _retry_counter_path(memory_root, candidate)
+            candidate_attempts = _read_attempts(counter) if counter is not None else 0
+            if not cache_key or candidate_attempts > attempts:
+                cache_key, attempts = candidate, candidate_attempts
+        for candidate in residual:
+            if candidate == cache_key:
+                continue  # 主變體交給 _park_session（先讀 excerpt 證據再清）
+            _clear_cache_key(memory_root, candidate)
+            _clear_retry_counter(memory_root, candidate)
         _park_session(
             memory_root, session_key=session_key, category=category,
-            attempts=0, cache_key="", error_text=error_text,
+            attempts=attempts, cache_key=cache_key, error_text=error_text,
             now=now, config_hash=config_hash,
         )
         parked.append(session_key)

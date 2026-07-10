@@ -1580,6 +1580,112 @@ class ParkSplitSessionsTests(unittest.TestCase):
                     (root / "runtime" / "queue" / "_failed" / name).exists()
                 )
 
+    def test_park_clears_residual_cache_and_retry_sidecar_with_real_attempts(self):
+        """#15 review blocking：init 失敗 park 路徑必須清除 session 殘留的
+        LLM cache／retry sidecar，且證據記真實 cache_key／attempts（spec §3.1
+        「進 parked 即淘汰」無條件成立）——否則 requeue 後繼承過期 retry 計數，
+        殘留 attempts=5 時再 1 次失敗即重新 park。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            processing.append_state(root, session_key="claude:a", state="split",
+                                    now="2026-07-10T00:00:00Z", config_hash="h")
+            cache_key = "claude:a__" + "a" * 64
+            cache_dir = root / "runtime" / "cache" / "atomize"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / f"{cache_key}.json").write_text("poison output", encoding="utf-8")
+            (cache_dir / f"{cache_key}.retries").write_text("5", encoding="utf-8")
+
+            parked = pipeline.park_split_sessions(
+                root, error_text="promoter init failed",
+                now="2026-07-10T01:00:00Z", config_hash="unavailable",
+            )
+
+            self.assertEqual(parked, ["claude:a"])
+            self.assertFalse((cache_dir / f"{cache_key}.json").exists())
+            self.assertFalse((cache_dir / f"{cache_key}.retries").exists())
+            event = processing.fold_events(root)["claude:a"]
+            self.assertEqual(event["cache_key"], cache_key)
+            self.assertEqual(event["attempts"], 5)
+            evidence = json.loads(
+                (root / "runtime" / "queue" / "_failed" / "claude__a.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(evidence["cache_key"], cache_key)
+            self.assertEqual(evidence["attempts"], 5)
+            self.assertEqual(evidence["last_output_excerpt"], "poison output")
+
+    def test_park_clears_all_cache_key_variants_but_not_other_sessions(self):
+        """殘留多個 cache_key 變體時全數清除（主變體取 attempts 最大者落證據）；
+        session 名含 `__` 的鄰居 sidecar 不得被 prefix glob 誤刪。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            processing.append_state(root, session_key="claude:a", state="split",
+                                    now="2026-07-10T00:00:00Z", config_hash="h")
+            cache_dir = root / "runtime" / "cache" / "atomize"
+            cache_dir.mkdir(parents=True)
+            stale = "claude:a__" + "b" * 64    # 只剩毒快取、無 retry 計數的舊變體
+            active = "claude:a__" + "c" * 64   # 帶 retry 計數的變體
+            (cache_dir / f"{stale}.json").write_text("old", encoding="utf-8")
+            (cache_dir / f"{active}.json").write_text("new", encoding="utf-8")
+            (cache_dir / f"{active}.retries").write_text("3", encoding="utf-8")
+            neighbor = "claude:a__b__" + "d" * 64  # 別的 session（名為 a__b）
+            (cache_dir / f"{neighbor}.retries").write_text("2", encoding="utf-8")
+
+            pipeline.park_split_sessions(
+                root, error_text="boom", now="2026-07-10T01:00:00Z",
+                config_hash="unavailable",
+            )
+
+            for name in (f"{stale}.json", f"{active}.json", f"{active}.retries"):
+                self.assertFalse((cache_dir / name).exists(), name)
+            self.assertTrue((cache_dir / f"{neighbor}.retries").exists())
+            event = processing.fold_events(root)["claude:a"]
+            self.assertEqual(event["cache_key"], active)
+            self.assertEqual(event["attempts"], 3)
+
+    def test_requeued_session_gets_fresh_retry_budget_after_init_failure_park(self):
+        """finding 重現劇本的收尾：park（init 失敗）→ requeue 後，promote 再遇
+        1 次 transient 失敗必須從 attempts=1 起算（留在 split），不得繼承殘留
+        計數直接重新 park。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            # 先讓 session 走到 split 並累積 5 次 transient 失敗（仍在 split）
+            promoter = llm_promoter.LLMPromoter(
+                ScriptedAgentClient(
+                    [agent_exec.AgentExecError("boom")] * 5
+                ),
+                skill_text="SKILL", known_projects=["paulshaclaw"], model="fake-llm",
+            )
+            for _ in range(5):
+                pipeline.run(root, config=cfg, config_hash=h,
+                             now="2026-07-10T00:00:00Z", promoter=promoter)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+
+            # atomizer 初始化失敗 → park_split_sessions 強制 park
+            pipeline.park_split_sessions(
+                root, error_text="promoter init failed",
+                now="2026-07-10T01:00:00Z", config_hash="unavailable",
+            )
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            event = processing.fold_events(root)["claude:s1"]
+            self.assertEqual(event["attempts"], 5)  # 證據記真實歷史
+
+            # 修復後 requeue 回 split，再遇 1 次 transient 失敗
+            processing.append_state(root, session_key="claude:s1", state="split",
+                                    now="2026-07-10T02:00:00Z", config_hash=h,
+                                    requeued_from="parked")
+            retry_promoter = llm_promoter.LLMPromoter(
+                ScriptedAgentClient([agent_exec.AgentExecError("boom again")]),
+                skill_text="SKILL", known_projects=["paulshaclaw"], model="fake-llm",
+            )
+            pipeline.run(root, config=cfg, config_hash=h,
+                         now="2026-07-10T03:00:00Z", promoter=retry_promoter)
+
+            # 全新預算：attempts 從 1 起算、留在 split（修前：繼承 5、+1=6 → 重新 park）
+            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+
     def test_second_call_is_noop_for_already_parked(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
