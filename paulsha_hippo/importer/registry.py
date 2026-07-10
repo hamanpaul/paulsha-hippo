@@ -14,7 +14,13 @@ from typing import Iterable, Sequence
 
 from paulsha_hippo import paths
 
-from .config import ProjectConfig, _inline_list, _trimmed_lines
+from .config import (
+    ProjectConfig,
+    ProjectsConfig,
+    _inline_list,
+    _trimmed_lines,
+    load_projects_config,
+)
 
 LOGGER = logging.getLogger("paulsha_hippo.importer")
 
@@ -251,3 +257,52 @@ def auto_write_enabled(config_path: str | Path | None = None) -> bool:
             if key.strip() == "auto_write":
                 return value.strip().strip("\"'").lower() in {"true", "yes", "on", "1"}
     return False
+
+
+def load_union_projects_config(
+    legacy_path: str | Path | None,
+    registry_path: str | Path | None,
+) -> ProjectsConfig:
+    """Union-read：legacy projects.yaml（manual）∪ project-hippo.yaml（generated）。
+
+    Manual 條目在前；同 slug 併 roots/remotes/aliases（manual 值序在前）；
+    alias 衝突 manual 優先並記 warning。legacy 檔不搬移不改寫（非破壞過渡）。
+    """
+    legacy = load_projects_config(legacy_path)
+    discovered = load_registry(registry_path)
+    if not discovered:
+        return legacy
+    merged: list[ProjectConfig] = []
+    index_by_slug: dict[str, int] = {}
+    for project in legacy.projects:
+        index_by_slug[project.slug] = len(merged)
+        merged.append(project)
+    for project in discovered:
+        index = index_by_slug.get(project.slug)
+        if index is None:
+            index_by_slug[project.slug] = len(merged)
+            merged.append(project)
+            continue
+        base = merged[index]
+        merged[index] = ProjectConfig(
+            slug=base.slug,
+            roots=base.roots + tuple(item for item in project.roots if item not in base.roots),
+            remotes=base.remotes
+            + tuple(item for item in project.remotes if item not in base.remotes),
+            aliases=base.aliases
+            + tuple(item for item in project.aliases if item not in base.aliases),
+        )
+    aliases: dict[str, str] = {}
+    for project in merged:
+        for alias in project.aliases:
+            if alias in aliases:
+                if aliases[alias] != project.slug:
+                    LOGGER.warning(
+                        "alias collision for %s: keeping %s, ignoring %s",
+                        alias,
+                        aliases[alias],
+                        project.slug,
+                    )
+                continue
+            aliases[alias] = project.slug
+    return ProjectsConfig(projects=tuple(merged), aliases=aliases)
