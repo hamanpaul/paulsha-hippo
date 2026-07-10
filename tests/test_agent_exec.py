@@ -40,34 +40,47 @@ class AgentExecTests(unittest.TestCase):
         out = client.run("hello prompt")
         self.assertEqual(out.strip(), CANONICAL_FAKE_JSON)
 
-    def test_exec_client_missing_command_raises(self):
+    def test_exec_client_missing_command_raises_unavailable(self):
         client = agent_exec.AgentExecClient(["/nonexistent/bin/nope"], timeout=5)
-        with self.assertRaises(agent_exec.AgentExecError):
+        with self.assertRaises(agent_exec.AgentUnavailableError):
             client.run("x")
 
-    def test_exec_client_nonzero_exit_raises(self):
+    def test_exec_client_not_configured_raises_unavailable(self):
+        with self.assertRaises(agent_exec.AgentUnavailableError):
+            agent_exec.AgentExecClient([], timeout=5).run("x")
+
+    def test_exec_client_nonzero_exit_raises_transient(self):
         client = agent_exec.AgentExecClient(
             [sys.executable, "-c", "import sys; sys.exit(3)"],
             timeout=5,
         )
-        with self.assertRaises(agent_exec.AgentExecError):
+        with self.assertRaises(agent_exec.AgentTransientError):
             client.run("x")
 
-    def test_exec_client_timeout_raises(self):
+    def test_exec_client_timeout_raises_transient(self):
         client = agent_exec.AgentExecClient(
             [sys.executable, "-c", "import time; time.sleep(5)"],
             timeout=1,
         )
-        with self.assertRaises(agent_exec.AgentExecError):
+        with self.assertRaises(agent_exec.AgentTransientError):
             client.run("x")
 
-    def test_exec_client_empty_stdout_raises(self):
+    def test_exec_client_empty_stdout_raises_transient(self):
         client = agent_exec.AgentExecClient(
             [sys.executable, "-c", "import sys; sys.stdin.read(); print('', end='')"],
             timeout=5,
         )
-        with self.assertRaises(agent_exec.AgentExecError):
+        with self.assertRaises(agent_exec.AgentTransientError):
             client.run("x")
+
+    def test_http_client_unreachable_raises_transient(self):
+        client = agent_exec.HttpAgentClient("http://127.0.0.1:1", "m", timeout=2)
+        with self.assertRaises(agent_exec.AgentTransientError):
+            client.run("x")
+
+    def test_typed_errors_remain_agent_exec_errors(self):
+        self.assertTrue(issubclass(agent_exec.AgentUnavailableError, agent_exec.AgentExecError))
+        self.assertTrue(issubclass(agent_exec.AgentTransientError, agent_exec.AgentExecError))
 
     def test_caching_client_reuses_by_prompt_hash(self):
         calls = {"n": 0}
