@@ -13,11 +13,49 @@ from paulsha_hippo.moc import frontmatter_io
 # CJK is what stops pure-CJK titles collapsing to "untitled" (#151).
 _SLUG_STRIP = re.compile(r"[^\w]+", re.UNICODE)
 
+# Linux 檔名上限（ext4/tmpfs NAME_MAX）：以 UTF-8 bytes 計，不是字元數（#16）。
+NAME_MAX_BYTES = 255
+# 直接呼叫 slugify() 的預設 byte 預算：留足 `--<slice_id>.md` 尾段與餘裕。
+SLUG_MAX_BYTES_DEFAULT = 200
 
-def slugify(title: str) -> str:
-    """Convert title to a slug, preserving CJK/Unicode letters; kebab-case ASCII."""
+
+def _utf8_truncate(text: str, max_bytes: int) -> str:
+    """把字串截到 <= max_bytes 個 UTF-8 bytes，且落在 code-point 邊界。
+
+    UTF-8 自同步：截斷後以 errors="ignore" decode 只會丟掉尾端不完整的
+    byte 序列，絕不產生半個字元。max_bytes <= 0 回空字串。
+    """
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def slugify(title: str, max_bytes: int = SLUG_MAX_BYTES_DEFAULT) -> str:
+    """Convert title to a slug, preserving CJK/Unicode letters; kebab-case ASCII.
+
+    slug 以 UTF-8 bytes 上限截斷（#16：超長 LLM title 曾組出超過 NAME_MAX
+    的檔名，令 MOC reconcile rename 觸發 ENAMETOOLONG 中止整輪）。
+    """
     slug = _SLUG_STRIP.sub("-", title.strip().lower()).strip("-_")
-    return slug or "untitled"
+    slug = _utf8_truncate(slug, max_bytes).rstrip("-_")
+    if not slug:
+        slug = _utf8_truncate("untitled", max_bytes)
+    return slug
+
+
+def slice_filename(title: str, slice_id: str) -> str:
+    """組 `<slug>--<slice_id>.md`，保證總長 <= NAME_MAX_BYTES（UTF-8 bytes）。
+
+    `--<slice_id>.md` 尾段永不截斷（截 id 等於毀 id）；byte 預算全由 slug
+    吸收。病態超長 slice_id 令尾段自身超限時這裡不丟例外——組出的名字交由
+    呼叫端 rename 時 fail-soft（reconcile 記 warning 跳過，見 Task 2）。
+    """
+    suffix = f"--{slice_id}.md"
+    budget = NAME_MAX_BYTES - len(suffix.encode("utf-8"))
+    return f"{slugify(title, max_bytes=budget)}{suffix}"
 
 
 def _title(fm: dict[str, Any], body: str) -> str:
@@ -35,8 +73,8 @@ def _title(fm: dict[str, Any], body: str) -> str:
 
 
 def target_name(fm: dict[str, Any], body: str) -> str:
-    """Generate target filename: <slug>--<slice_id>.md"""
-    return f"{slugify(_title(fm, body))}--{fm['slice_id']}.md"
+    """Generate target filename: <slug>--<slice_id>.md（UTF-8 總長 <= NAME_MAX_BYTES）"""
+    return slice_filename(_title(fm, body), str(fm["slice_id"]))
 
 
 def _lifecycle_path(memory_root: Path) -> Path:
