@@ -83,6 +83,32 @@ class NamingTests(unittest.TestCase):
             self.assertEqual(len(renamed), 1)
             self.assertLessEqual(len(renamed[0].name.encode("utf-8")), naming.NAME_MAX_BYTES)
 
+    def test_reconcile_fail_soft_on_unrenamable_slice(self):
+        # 尾段（--<slice_id>.md）永不截斷：病態超長 slice_id 的目標檔名必然
+        # 超過 NAME_MAX，rename 觸發 ENAMETOOLONG——單一壞 slice 只記 warning
+        # 跳過，整輪照常處理其餘 slices（#16）。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad_sid = "sl-" + "a" * 300
+            _write(root, "bad.md", bad_sid, title="bad")
+            _write(root, "good.md", "sl-ok", title="Good Note")
+            warnings = naming.reconcile(root)
+            kdir = root / "knowledge" / "paulshaclaw"
+            self.assertTrue((kdir / "good-note--sl-ok.md").exists())
+            self.assertTrue((kdir / "bad.md").exists())  # 原檔保留，未半毀
+            self.assertTrue(any("bad.md" in w and "reconcile skipped" in w for w in warnings))
+
+    def test_reconcile_fail_soft_on_undecodable_file(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kdir = root / "knowledge" / "paulshaclaw"
+            kdir.mkdir(parents=True)
+            (kdir / "broken.md").write_bytes(b"---\nslice_id: sl-x\n\xff\xfe---\nbody\n")
+            _write(root, "ok.md", "sl-ok2", title="Still Works")
+            warnings = naming.reconcile(root)
+            self.assertTrue((kdir / "still-works--sl-ok2.md").exists())
+            self.assertTrue(any("broken.md" in w for w in warnings))
+
     def test_reconcile_renames_to_title_slice(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
