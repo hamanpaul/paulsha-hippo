@@ -94,6 +94,33 @@ def hippo_invocation(root: Path) -> list[str]:
     return ["python3", "-m", "paulsha_hippo"]
 
 
+def format_recall_command(root: Path, tool: str, session_id: str, cwd: str | None) -> str:
+    """組出顯式 recall 指令字串（tool/session-id 歸因已填、--prompt 留說明佔位）。"""
+    import shlex
+
+    argv = hippo_invocation(root) + [
+        "recall",
+        "--memory-root",
+        str(root),
+        "--tool",
+        tool,
+        "--session-id",
+        session_id,
+    ]
+    if cwd:
+        argv += ["--cwd", str(cwd)]
+    return " ".join(shlex.quote(a) for a in argv) + ' --prompt "<當前任務描述>"'
+
+
+def recall_guidance_hint(root: Path, tool: str, session_id: str, cwd: str | None) -> str:
+    """無 prompt-time hook 平台的顯式 recall 指引（capability matrix: recall-capable）。"""
+    return (
+        "本平台不會在每次 prompt 自動浮現任務相關記憶；需要任務相關記憶時，執行：\n"
+        f"`{format_recall_command(root, tool, session_id, cwd)}`\n"
+        "再用 Read 開啟輸出清單中的絕對路徑取全文。"
+    )
+
+
 def write_queue_payload(
     root: Path,
     tool: str,
@@ -148,8 +175,19 @@ def fire_importer(root: Path, tool: str, queue_path: Path) -> None:
         log_warn(root, tool, f"importer trigger failed: {exc}")
 
 
-def compute_brief_and_record(root: Path, tool: str, session_id: str, cwd: str | None) -> str:
-    """SessionStart 極簡 orientation；不再前置引用前言、不再寫 session-wide offered。"""
+def compute_brief_and_record(
+    root: Path,
+    tool: str,
+    session_id: str,
+    cwd: str | None,
+    *,
+    recall_guidance: bool = False,
+) -> str:
+    """SessionStart 極簡 orientation；不再前置引用前言、不再寫 session-wide offered。
+
+    recall_guidance=True：無 prompt-time hook 的平台改注入顯式 recall 指引
+    （不假裝 SessionStart orientation 等同 task retrieval）。
+    """
     try:
         from paulsha_hippo.importer.project_resolver import resolve_project
         from paulsha_hippo.wakeup.builder import build_orientation
@@ -160,7 +198,13 @@ def compute_brief_and_record(root: Path, tool: str, session_id: str, cwd: str | 
         project = resolve_project(cwd=cwd, memory_root=str(root))
         if project in ("_unknown", ""):
             return ""
-        return build_orientation(root, project)
+        if not recall_guidance:
+            return build_orientation(root, project)
+        return build_orientation(
+            root,
+            project,
+            retrieval_hint=recall_guidance_hint(root, tool, session_id, cwd),
+        )
     except Exception as exc:
         log_warn(root, tool, f"failed to build orientation: {exc}")
         return ""

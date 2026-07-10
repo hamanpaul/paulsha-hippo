@@ -387,5 +387,17 @@ def test_build_orientation_empty_when_no_notes(tmp_path):
     assert build_orientation(tmp_path, "proj") == ""
 
 
+def test_build_orientation_custom_retrieval_hint(tmp_path):
+    from paulsha_hippo.wakeup.builder import build_orientation
+    k = tmp_path / "knowledge" / "proj"
+    k.mkdir(parents=True)
+    (k / "a.md").write_text("---\nmemory_layer: knowledge\n---\nx\n", encoding="utf-8")
+    out = build_orientation(tmp_path, "proj", retrieval_hint="CUSTOM-HINT")
+    assert "CUSTOM-HINT" in out
+    assert "每次 prompt 後以短清單浮現" not in out
+    default = build_orientation(tmp_path, "proj")
+    assert "每次 prompt 後以短清單浮現" in default
+
+
 if __name__ == "__main__":
     unittest.main()
