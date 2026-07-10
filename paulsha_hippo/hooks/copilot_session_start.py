@@ -35,9 +35,9 @@ def main() -> int:
         # Normalize camelCase cwd / session id
         cwd = payload.get("cwd") or payload.get("workingDirectory")
         session_id = str(payload.get("session_id") or payload.get("sessionId") or "unknown")
-        # capability matrix：copilot 無 prompt-time hook → 注入顯式 recall 指引。
-        brief = compute_brief_and_record(root, TOOL, session_id, cwd,
-                                         recall_guidance=True)
+        # capability matrix 2026-07-11 復測：copilot prompt-time hook（userPromptSubmitted）
+        # = supported，自動 shortlist 已接線 → 預設 orientation 提示（同 claude）。
+        brief = compute_brief_and_record(root, TOOL, session_id, cwd)
 
         # Copilot sessionStart shape: additionalContext directly
         output = {

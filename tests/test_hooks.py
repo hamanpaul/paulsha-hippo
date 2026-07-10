@@ -411,6 +411,8 @@ class InstallerTest(unittest.TestCase):
             "claude_user_prompt_submit.py",
             "claude_post_tool_use.py",
             "_shortlist_common.py",
+            "copilot_user_prompt_submit.py",
+            "copilot_post_tool_use.py",
         ):
             deployed = self.memory_root / "hooks" / script
             self.assertTrue(deployed.exists(), f"{script} not deployed")
@@ -518,6 +520,32 @@ class InstallerTest(unittest.TestCase):
 
         self.assertTrue(any("copilot_session_start.py" in c for c in bash_cmds_start), f"copilot_session_start.py not in sessionStart: {bash_cmds_start}")
         self.assertTrue(any("copilot_precompact.py" in c for c in bash_cmds_pre), f"copilot_precompact.py not in preCompact: {bash_cmds_pre}")
+
+    def test_full_install_wires_copilot_consumption_loop_hooks(self):
+        """copilot config 用官方事件 key：userPromptSubmitted（prompt-time shortlist）
+        與 postToolUse（view read attribution）——capability matrix 2026-07-11 復測 supported。"""
+        result = _run_install(self.base_args)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+        hook_path = self.config_root / ".copilot" / "hooks" / "paulsha-memory.json"
+        config = json.loads(hook_path.read_text())
+        hooks = config.get("hooks", {})
+
+        # 官方 key 是 userPromptSubmitted（非 userPromptSubmit——該 key 不存在，hook 不會 fire）
+        self.assertNotIn("userPromptSubmit", hooks)
+        ups = hooks.get("userPromptSubmitted", [])
+        ups_cmds = [e.get("bash", "") for e in ups]
+        self.assertTrue(
+            any("copilot_user_prompt_submit.py" in c for c in ups_cmds),
+            f"copilot_user_prompt_submit.py not in userPromptSubmitted: {ups_cmds}",
+        )
+
+        ptu = hooks.get("postToolUse", [])
+        ptu_cmds = [e.get("bash", "") for e in ptu]
+        self.assertTrue(
+            any("copilot_post_tool_use.py" in c for c in ptu_cmds),
+            f"copilot_post_tool_use.py not in postToolUse: {ptu_cmds}",
+        )
 
     def test_full_install_preserves_existing_claude_settings_non_hook_keys(self):
         """Should not clobber existing keys outside 'hooks' in settings.json."""

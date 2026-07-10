@@ -63,7 +63,7 @@ if command -v copilot >/dev/null 2>&1; then
   cat >"$COPILOT_HOME_DIR/.copilot/hooks/probe.json" <<EOF
 {"version": 1, "hooks": {
   "sessionStart": [{"type": "command", "bash": "touch $M2_START", "timeoutSec": 10}],
-  "userPromptSubmit": [{"type": "command", "bash": "touch $M2_PROMPT", "timeoutSec": 10}]
+  "userPromptSubmitted": [{"type": "command", "bash": "touch $M2_PROMPT", "timeoutSec": 10}]
 }}
 EOF
   (cd "$TMP_DIR" && HOME="$COPILOT_HOME_DIR" timeout 120 \

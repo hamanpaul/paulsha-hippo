@@ -1,5 +1,7 @@
-"""codex/copilot SessionStart 注入顯式 recall 指引（無 prompt-time hook 平台，#17）。
+"""SessionStart retrieval 提示依 capability matrix 分流（#17）。
 
+codex（prompt-time inconclusive）→ 注入顯式 recall 指引；
+copilot / claude（prompt-time supported、自動 shortlist 已接線）→ 保留預設提示。
 沿用 test_session_start_wiring 的 mock 手法：mock resolve_project、真跑
 compute_brief_and_record + build_orientation（需 seed 一筆 knowledge 使 n>0）。
 """
@@ -53,11 +55,12 @@ class RecallGuidanceTests(unittest.TestCase):
         self.assertIn("--session-id sidG", ctx)
         self.assertNotIn("每次 prompt 後以短清單浮現", ctx)
 
-    def test_copilot_session_start_injects_recall_guidance(self):
+    def test_copilot_session_start_keeps_auto_shortlist_hint(self):
+        # capability matrix 2026-07-11 復測：copilot prompt-time（userPromptSubmitted）
+        # = supported，自動 shortlist 已接線 → 不注入顯式 recall 指引（同 claude）。
         ctx = self._ctx("paulsha_hippo.hooks.copilot_session_start")
-        self.assertIn("recall", ctx)
-        self.assertIn("--tool copilot-cli", ctx)
-        self.assertNotIn("每次 prompt 後以短清單浮現", ctx)
+        self.assertIn("每次 prompt 後以短清單浮現", ctx)
+        self.assertNotIn("--tool copilot-cli", ctx)
 
     def test_claude_session_start_keeps_auto_shortlist_hint(self):
         ctx = self._ctx("paulsha_hippo.hooks.claude_session_start")

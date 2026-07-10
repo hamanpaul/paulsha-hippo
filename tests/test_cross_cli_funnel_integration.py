@@ -5,6 +5,10 @@ fake hook harness：以假 hook stdin payload 直接跑 hook 腳本入口——
   B. PostToolUse(Read) payload -> claude_post_tool_use.py -> read 事件（offered=true、同 session）
   C. shortlist 尾行指引對應的 mark-applied -> applied 事件（參照完整性驗證通過）
   D. hippo usage --json -> by_tool 漏斗三欄齊備
+copilot 對稱鏈（capability matrix 2026-07-11 復測 supported 後接線）：
+  userPromptSubmitted payload -> copilot_user_prompt_submit.py；
+  postToolUse(view) payload -> copilot_post_tool_use.py；payload 形以實測為準
+  （camelCase sessionId、toolArgs 為 JSON 字串）。
 live credentialed 腳本（tests/cross_cli_live_check.sh）僅為補充證據；本測試是 #18 的 CI 迴歸保護。
 """
 
@@ -17,6 +21,8 @@ from paulsha_hippo import cli
 
 PROMPT_HOOK = Path("paulsha_hippo/hooks/claude_user_prompt_submit.py").resolve()
 READ_HOOK = Path("paulsha_hippo/hooks/claude_post_tool_use.py").resolve()
+COPILOT_PROMPT_HOOK = Path("paulsha_hippo/hooks/copilot_user_prompt_submit.py").resolve()
+COPILOT_READ_HOOK = Path("paulsha_hippo/hooks/copilot_post_tool_use.py").resolve()
 
 
 def _seed(mr: Path) -> Path:
@@ -123,6 +129,55 @@ def test_funnel_offered_read_applied_full_chain(tmp_path, capsys):
     assert cli.main(["usage", "--memory-root", str(tmp_path), "--json"]) == 0
     rep = json.loads(capsys.readouterr().out)
     assert rep["by_tool"]["claude-code"] == {"offered": 1, "read": 1, "applied": 1}
+
+
+def test_funnel_copilot_offered_read_applied_full_chain(tmp_path, capsys):
+    """copilot adapter 對稱鏈：userPromptSubmitted -> postToolUse(view) -> mark-applied。"""
+    note = _seed(tmp_path)
+    proj_cwd = tmp_path / "proj"
+    proj_cwd.mkdir(exist_ok=True)
+    sid = "it-funnel-cp1"
+
+    # A. userPromptSubmitted（實測 payload 形：camelCase sessionId）
+    out = _run_hook(
+        COPILOT_PROMPT_HOOK,
+        tmp_path,
+        {"sessionId": sid, "timestamp": 0, "cwd": str(proj_cwd), "prompt": "SerialWrap 執行"},
+    )
+    ctx = out["additionalContext"]
+    assert str(note) in ctx and "usage mark-applied" in ctx
+    offered = _events(tmp_path, "offered.jsonl")
+    assert len(offered) == 1
+    assert offered[0]["tool"] == "copilot-cli" and offered[0]["session_id"] == sid
+
+    # B. postToolUse(view)（實測 payload 形：toolArgs 為 JSON 字串）
+    _run_hook(
+        COPILOT_READ_HOOK,
+        tmp_path,
+        {
+            "sessionId": sid,
+            "timestamp": 0,
+            "cwd": str(proj_cwd),
+            "toolName": "view",
+            "toolArgs": json.dumps({"path": str(note), "view_range": [1, 5]}),
+            "toolResult": {"resultType": "success", "textResultForLlm": "1. x"},
+        },
+    )
+    reads = [e for e in _events(tmp_path, "memory_usage.jsonl") if e.get("source") == "read"]
+    assert len(reads) == 1
+    assert reads[0]["tool"] == "copilot-cli" and reads[0]["offered"] is True
+    assert reads[0]["session_id"] == sid and reads[0]["sl_id"] == "sl-aaaaaaaaaaaaaaaa"
+
+    # C+D. mark-applied 參照完整性通過 -> usage 漏斗三欄齊備
+    rc = cli.main(
+        ["usage", "mark-applied", "--memory-root", str(tmp_path),
+         "--session-id", sid, "--slice-id", "sl-aaaaaaaaaaaaaaaa", "--tool", "copilot-cli"]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    assert cli.main(["usage", "--memory-root", str(tmp_path), "--json"]) == 0
+    rep = json.loads(capsys.readouterr().out)
+    assert rep["by_tool"]["copilot-cli"] == {"offered": 1, "read": 1, "applied": 1}
 
 
 def test_funnel_forged_applied_rejected_end_to_end(tmp_path, capsys):
