@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -67,3 +68,23 @@ def sibling_repo_count(toplevel: str | Path | None) -> int:
         return count
     except Exception:
         return 0
+
+
+def git_main_toplevel(toplevel: str | Path | None) -> Optional[str]:
+    """把（可能是 linked worktree 的）toplevel 歸併為主 repo root。
+
+    linked worktree → 主 checkout root；一般 checkout → 自身；
+    rev-parse 失敗 → 回退輸入值；falsy 輸入 → None。best-effort、never raises。
+    """
+    if not toplevel:
+        return None
+    try:
+        common = _run_git(["rev-parse", "--git-common-dir"], cwd=toplevel)
+        if not common:
+            return str(toplevel)
+        common_path = Path(os.path.normpath(str(Path(toplevel, common))))
+        if common_path.name == ".git":
+            return str(common_path.parent)
+        return str(toplevel)
+    except Exception:
+        return str(toplevel)
