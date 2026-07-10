@@ -8,6 +8,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
 from paulsha_hippo import ops, paths
@@ -92,15 +93,73 @@ class ResolveBackendArgvTests(unittest.TestCase):
 
 
 class DoctorTests(unittest.TestCase):
+    _PROBE_OK = ("- distiller backend：✓ mocked", False)
+
     def test_conflicting_roots_fail(self):
         env = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/b"}
-        with mock.patch.dict("os.environ", env):
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(ops, "_probe_backend_service_effective",
+                               return_value=self._PROBE_OK):
             self.assertEqual(ops.run_doctor(), 1)
 
     def test_consistent_roots_pass(self):
         env = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a"}
-        with mock.patch.dict("os.environ", env):
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(ops, "_probe_backend_service_effective",
+                               return_value=self._PROBE_OK):
             self.assertEqual(ops.run_doctor(), 0)
+
+
+class DoctorBackendProbeTests(unittest.TestCase):
+    _ENV = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a"}
+
+    def _fake_cfg(self, **overrides):
+        base = dict(
+            agent_exec_backend="custom-argv",
+            agent_exec_command=("claude", "-p"),
+            agent_exec_base_url="",
+            default_promoter="llm",
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_probe_fails_when_bare_command_unresolvable_in_service_path(self):
+        with mock.patch.dict("os.environ", self._ENV), \
+             mock.patch("paulsha_hippo.atomizer.config.load_config",
+                        return_value=(self._fake_cfg(), "h")), \
+             mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
+                        side_effect=lambda command: tuple(command)), \
+             mock.patch.object(ops, "_service_effective_path_env",
+                               return_value="/usr/bin:/bin"), \
+             mock.patch.object(ops.shutil, "which", return_value=None):
+            self.assertEqual(ops.run_doctor(), 1)
+
+    def test_probe_passes_with_absolute_executable(self):
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text("#!/bin/sh\n", encoding="utf-8")
+            exe.chmod(0o755)
+            cfg = self._fake_cfg(agent_exec_command=(str(exe), "-p"))
+            with mock.patch.dict("os.environ", self._ENV), \
+                 mock.patch("paulsha_hippo.atomizer.config.load_config",
+                            return_value=(cfg, "h")), \
+                 mock.patch("paulsha_hippo.atomizer.config.resolve_command_argv",
+                            side_effect=lambda command: tuple(command)), \
+                 mock.patch.object(ops, "_service_effective_path_env",
+                                   return_value="/usr/bin:/bin"):
+                self.assertEqual(ops.run_doctor(), 0)
+
+    def test_probe_reports_openai_compatible_as_delegated(self):
+        cfg = self._fake_cfg(agent_exec_backend="openai-compatible",
+                             agent_exec_base_url="http://127.0.0.1:11434")
+        with mock.patch.dict("os.environ", self._ENV), \
+             mock.patch("paulsha_hippo.atomizer.config.load_config",
+                        return_value=(cfg, "h")):
+            self.assertEqual(ops.run_doctor(), 0)
+
+    def test_service_effective_path_falls_back_without_systemd(self):
+        with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
+            self.assertEqual(ops._service_effective_path_env(), "/usr/local/bin:/usr/bin:/bin")
 
 
 class InstallServiceTests(unittest.TestCase):

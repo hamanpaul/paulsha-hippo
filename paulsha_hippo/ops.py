@@ -143,7 +143,65 @@ def run_doctor() -> int:
 
     agent = shutil.which("claude")
     print(f"- claude CLI：{'✓ ' + agent if agent else '未找到（claude-headless 檔位需要）'}")
+
+    probe_line, probe_failed = _probe_backend_service_effective()
+    if probe_failed:
+        print(probe_line, file=sys.stderr)
+        failed = True
+    else:
+        print(probe_line)
     return 1 if failed else 0
+
+
+def _service_effective_path_env() -> str:
+    """systemd --user 服務實際看到的 PATH（非互動 shell；#15 根因是 NVM PATH 不在其中）。
+
+    取不到（無 systemd／指令失敗）退保守預設。"""
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "show-environment"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        for line in completed.stdout.splitlines():
+            if line.startswith("PATH="):
+                return line[len("PATH="):]
+    return "/usr/local/bin:/usr/bin:/bin"
+
+
+def _probe_backend_service_effective() -> tuple[str, bool]:
+    """以 service-effective 環境驗證 atomizer backend 可執行。回傳 (報告行, is_failure)。
+
+    dream service template 固定 --promoter llm，故 argv backend 解析不到一律 FAIL，
+    不因 config 的 default promoter 軟化。openai-compatible 非 argv backend，
+    probe 由 PR-D preset registry 接手。"""
+    from paulsha_hippo.atomizer import config as atomizer_config
+
+    try:
+        cfg, _ = atomizer_config.load_config()
+    except Exception as exc:  # config 壞掉本身就是 backend 不可用級的問題
+        return f"FAIL distiller backend config 無法載入：{exc}", True
+    if cfg.agent_exec_backend == "openai-compatible":
+        return (
+            f"- distiller backend：openai-compatible（{cfg.agent_exec_base_url}；"
+            "probe 由 PR-D preset 接手）",
+            False,
+        )
+    command = atomizer_config.resolve_command_argv(cfg.agent_exec_command)
+    argv0 = command[0]
+    if Path(argv0).is_absolute():
+        ok = Path(argv0).is_file() and os.access(argv0, os.X_OK)
+    else:
+        ok = shutil.which(argv0, path=_service_effective_path_env()) is not None
+    if ok:
+        return f"- distiller backend：✓ {argv0}（service-effective 可執行）", False
+    return (
+        f"FAIL distiller backend：{argv0} 在 service-effective 環境解析不到"
+        "（hippo doctor --fix-backend 可嘗試自動遷移）",
+        True,
+    )
 
 
 # ---------------------------------------------------------------- install hooks
