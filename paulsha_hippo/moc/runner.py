@@ -10,7 +10,8 @@ def run_moc(memory_root: Path, now: str) -> dict[str, Any]:
     warnings: list[str] = []
     warnings.extend(naming.reconcile(memory_root, now))
     try:
-        weights = linker.materialize_links(memory_root)
+        weights, linker_warnings = linker.materialize_links(memory_root)
+        warnings.extend(linker_warnings)
     except Exception as exc:  # core-state corruption (relations) -> degrade
         warnings.append(f"linker degraded: {exc}")
         weights = {}
