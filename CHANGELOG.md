@@ -12,7 +12,7 @@
 - `hippo dream supervise` 偵測 systemd dream timer 已接管時會讓位，避免與 timer 雙跑。
 - 索引 coverage 六欄報表（`scanned / invalid_frontmatter / pool_excluded(by reason) / noise_excluded(by reason) / eligible / indexed`）：`build_index()` 回傳、隨索引寫入 `retrieval.db` 的 `coverage` 表（權威來源，與索引成對原子發布）並派生 `runtime/indexes/retrieval.coverage.json`；`dream run` 輸出新增 `index_coverage`。
 - `hippo index verify`：三方對賬（獨立 filesystem census × coverage 報表 × index DB 反查），驗證強不變量 `indexed IDs == eligible IDs`；供 runtime 恢復序列驗證使用。DB 反查驗到實際提供搜尋結果的兩張表（slice_meta ↔ slices_fts slice_id multiset 一對一 + FTS integrity-check）——FTS 缺行／幽靈行／重複行而 metadata 完整時不再 false green。
-- Project registry（#14）：importer ingest 後將已解析的 project mapping（slug/roots/remotes）寫入 generated 檔 `paulsha/project-hippo.yaml`——schema_version 1、deterministic 輸出（排序去重、逐 byte 可重現）、remote 正規化去 credential、worktree 歸併主 repo root、temp+atomic replace+固定名 lock、opt-in `project_registry.auto_write`（預設 off）、fail-open；讀取端（resolve_project 預設載入）union-read legacy `projects.yaml` 與新檔（非破壞過渡）；檔案契約文件 `docs/project-registry-contract.md` 由 producer contract test 逐 byte 錨定。
+- Project registry（#14）：importer ingest 後將已解析的 project mapping（slug/roots/remotes）寫入 generated 檔 `paulsha/project-hippo.yaml`——schema_version 1、deterministic 輸出（排序去重、逐 byte 可重現）、remote 正規化去 credential、worktree 歸併主 repo root（slug 與 roots 同源——linked worktree 的 discovery slug 以主 repo root 重新推導，remoteless worktree 不再寫入矛盾 mapping 汙染主 repo 歸屬）、temp+atomic replace+固定名 lock、opt-in `project_registry.auto_write`（預設 off）、fail-open；讀取端（resolve_project 預設載入）union-read legacy `projects.yaml` 與新檔（非破壞過渡）；檔案契約文件 `docs/project-registry-contract.md` 由 producer contract test 逐 byte 錨定。
 
 ### Changed
 - dream systemd timer 排程改為 `OnCalendar=hourly`，並保留 `Persistent=true`。

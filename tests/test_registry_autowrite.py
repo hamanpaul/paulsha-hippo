@@ -153,6 +153,44 @@ class RegistryAutoWriteTest(unittest.TestCase):
         self.assertEqual(len(projects[0].roots), 1)
         self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
 
+    def test_remoteless_worktree_slug_derived_from_main_root(self):
+        # 回歸釘（#14 review blocking finding）：無 origin remote 的 linked worktree，
+        # discovery slug 必須與 roots 同源（由 main root 推導）。否則會寫入
+        # 「worktree 目錄名 slug ↦ 主 repo root」的自我矛盾 mapping，union-read
+        # 後把主 repo 本體 session 的歸屬翻轉成 worktree 名。
+        self.enable_auto_write()
+        repo = self.make_repo(name="mainrepo", remote=None)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+        )
+        worktree = self.base / "wt"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-b", "wt-branch", str(worktree)],
+            check=True, capture_output=True,
+        )
+        decision = self.ingest(
+            self.payload(cwd=worktree, session_id="registry-sid-wt-remoteless"),
+            name="wt-remoteless.json",
+        )
+        self.assertEqual(decision["status"], "written")
+        # session 本身的歸屬維持既有 dir-name fallback（worktree 名），不受本修正影響
+        self.assertEqual(decision["project"], f"{self.base.name}/wt")
+        projects = self.read_projects()
+        self.assertEqual(len(projects), 1)
+        # slug 與 roots 同源：main root 的 dir-name 解析，不得是 worktree 目錄名
+        self.assertEqual(projects[0].slug, f"{self.base.name}/mainrepo")
+        self.assertEqual(len(projects[0].roots), 1)
+        self.assertEqual(Path(projects[0].roots[0]).resolve(), repo.resolve())
+        self.assertEqual(projects[0].remotes, ())
+        # 反饋面：主 repo 本體的後續 session 歸屬不被 registry 翻轉成 worktree 名
+        main_decision = self.ingest(
+            self.payload(cwd=repo, session_id="registry-sid-main-after-wt"),
+            name="main-after-wt.json",
+        )
+        self.assertEqual(main_decision["project"], f"{self.base.name}/mainrepo")
+
     def test_registry_failure_does_not_break_ingest(self):
         self.enable_auto_write()
         repo = self.make_repo(name="failrepo", remote="git@github.com:acme/failrepo.git")

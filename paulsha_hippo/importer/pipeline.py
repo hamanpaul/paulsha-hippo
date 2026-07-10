@@ -365,6 +365,20 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     # normalize_remote 會把路徑變造成假 remote（work/...、github.com/a/b），不得寫入 registry（#14）。
     explicit_remote = result.raw_payload.get("remote_url") or result.raw_payload.get("remote")
     payload_remote = normalize_remote(explicit_remote) if isinstance(explicit_remote, str) else ""
+    # discovery 的 slug 必須與 roots 同源（#14）：roots 記歸併後的主 repo root，但
+    # project 是以 session cwd（可能是 linked worktree）解析。remoteless worktree 會
+    # 落到 worktree 目錄名 fallback，寫入「worktree 名 slug ↦ 主 repo root」的自我
+    # 矛盾 mapping，union-read 後反饋汙染主 repo 本體 session 的歸屬。linked worktree
+    # 情境一律改以 main_root 重新推導 slug——依構造保證該 root 的未來解析結果就是
+    # 此 slug；有 remote 時 worktree 與主 checkout 共用 remote，推導結果不變。
+    discovery_slug = project
+    if main_root and discovered_toplevel and Path(main_root) != Path(discovered_toplevel):
+        discovery_slug = resolve_project(
+            cwd=main_root,
+            git_toplevel=main_root,
+            remote_url=remote_url,
+            memory_root=str(root),
+        )
     decision = _decision_entry(
         status=status,
         key=key,
@@ -378,7 +392,7 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     decision["classifier_bucket"] = bucket
     decision["project"] = project
     decision["discovery"] = {
-        "slug": project,
+        "slug": discovery_slug,
         "roots": [main_root] if main_root else [],
         "remotes": sorted({value for value in (payload_remote, discovered_remote) if value}),
     }

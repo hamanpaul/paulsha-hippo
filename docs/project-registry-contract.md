@@ -19,7 +19,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 - 檔頭：固定 3 行 `#` 註解（generated 宣告、override 指引、本文件路徑）。
 - `schema_version`：int，必填，目前 `1`。
 - `projects`：list（空集輸出 inline `projects: []`）。每項：
-  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。
+  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。**與 `roots` 同源**：session cwd 位於 linked worktree 時，slug 以歸併後的主 repo root 重新推導（不得記 worktree 目錄名 slug 配主 repo root 的矛盾 mapping）。
   - `roots`：list[str]——絕對路徑；**linked worktree 一律歸併為主 repo root**（`git rev-parse --git-common-dir`）。
   - `remotes`：list[str]——正規化 remote 識別（見 §3）。
   - `aliases`：list[str]——v1 producer 恆輸出 `[]`（hippo 無 alias 發現來源；欄位保留前向相容），inline 形式。
