@@ -1,8 +1,11 @@
 """Prompt-time shortlist: bm25 search -> shortlist injection + offered recording. Best-effort IO."""
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
+import secrets
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +84,15 @@ def _load_offered_ids(root: Path, tool: str, session_id: str) -> set[str]:
 
 def _record_offered(root: Path, tool: str, session_id: str, project: str,
                     offered: list[tuple[str, str]]) -> None:
-    """Append offered ledger + accumulate per-session sl_id<->path map. Best-effort."""
+    """Append offered ledger + accumulate per-session sl_id<->path map. Best-effort.
+
+    map 更新為「讀取→合併→原子替換」的 read-modify-write：Copilot / Claude
+    prompt hook 與顯式 recall 可能對同一 (tool, session_id) 重疊執行，全程
+    持 per-session flock（鎖檔固定命名、與 map 同目錄）序列化所有 writer，
+    否則並發更新互相覆蓋（丟 slice）→ post-tool hook 把真實讀取誤記
+    offered:false，污染漏斗歸因。暫存檔 per-writer 唯一（pid＋隨機後綴），
+    replace 仍原子；持鎖進程死亡時 kernel 自動釋放 flock，不會殘留死鎖。
+    """
     try:
         led_dir = root / "runtime" / "ledger"
         led_dir.mkdir(parents=True, exist_ok=True)
@@ -94,18 +105,32 @@ def _record_offered(root: Path, tool: str, session_id: str, project: str,
         wk_dir = root / "runtime" / "wakeup"
         wk_dir.mkdir(parents=True, exist_ok=True)
         mpath = _offered_map_path(root, tool, session_id)
-        cur = {"by_path": {}, "by_id": {}}
-        if mpath.exists():
+        lock_path = mpath.with_name(f".{mpath.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_handle:
             try:
-                cur = json.loads(mpath.read_text(encoding="utf-8"))
-            except Exception:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
                 cur = {"by_path": {}, "by_id": {}}
-        for sid, p in offered:
-            cur["by_path"][p] = sid
-            cur["by_id"][sid] = p
-        tmp = mpath.with_name(f".{mpath.name}.tmp")
-        tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(mpath)
+                if mpath.exists():
+                    try:
+                        cur = json.loads(mpath.read_text(encoding="utf-8"))
+                    except Exception:
+                        cur = {"by_path": {}, "by_id": {}}
+                for sid, p in offered:
+                    cur["by_path"][p] = sid
+                    cur["by_id"][sid] = p
+                tmp = mpath.with_name(
+                    f".{mpath.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+                try:
+                    tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+                    tmp.replace(mpath)
+                except BaseException:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
     except Exception as exc:
         log_warn(root, tool, f"failed to record offered: {exc}")
 

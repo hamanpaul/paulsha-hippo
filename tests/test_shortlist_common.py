@@ -1,5 +1,6 @@
 # tests/test_shortlist_common.py
 import json
+import multiprocessing
 from pathlib import Path
 from paulsha_hippo.moc import search as S
 from paulsha_hippo.hooks import _shortlist_common as SC
@@ -183,3 +184,58 @@ def test_shortlist_empty_result_has_no_applied_hint(tmp_path, monkeypatch):
         tmp_path, "claude-code", "s", cwd="/x", prompt="zzzznomatch"
     )
     assert out == ""
+
+
+def _offered_writer(root: str, tool: str, session_id: str, barrier, slices) -> None:
+    """multiprocessing worker：同步起跑後逐筆寫入自己的 slices。
+
+    模擬 Copilot prompt hook / Claude prompt hook / 顯式 recall 對同一
+    (tool, session_id) 重疊執行——每次呼叫都是一輪「讀 map→合併→替換」。
+    """
+    from paulsha_hippo.hooks import _shortlist_common as sc
+    barrier.wait()
+    for sid, path in slices:
+        sc._record_offered(Path(root), tool, session_id, "proj", [(sid, path)])
+
+
+def _run_concurrent_offered_writers(tmp_path: Path, session_id: str, n: int = 40):
+    """兩個 writer 進程同 session 同步起跑，各寫 n 筆互斥的 slices。"""
+    ctx = multiprocessing.get_context("fork")
+    barrier = ctx.Barrier(2)
+    slices_a = [(f"sl-aaaa{i:012d}", str(tmp_path / "knowledge" / "proj" / f"a{i}.md"))
+                for i in range(n)]
+    slices_b = [(f"sl-bbbb{i:012d}", str(tmp_path / "knowledge" / "proj" / f"b{i}.md"))
+                for i in range(n)]
+    procs = [
+        ctx.Process(target=_offered_writer,
+                    args=(str(tmp_path), "claude-code", session_id, barrier, s))
+        for s in (slices_a, slices_b)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=120)
+    assert all(p.exitcode == 0 for p in procs)
+    return slices_a, slices_b
+
+
+def test_record_offered_concurrent_writers_keep_both_slice_sets(tmp_path):
+    # 迴歸：無鎖 read-modify-write 下並發更新互相覆蓋（丟 slice）、或 tmp 被
+    # 對方搶先 replace 而整輪更新失敗——兩組 slices 必須全數保留於 map，
+    # 後續 read 判定（by_path / by_id / _load_offered_ids）均 offered:true。
+    slices_a, slices_b = _run_concurrent_offered_writers(tmp_path, "sidCC")
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidCC.offered.json"
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    missing = [(sid, path) for sid, path in slices_a + slices_b
+               if m["by_id"].get(sid) != path or m["by_path"].get(path) != sid]
+    assert missing == []
+    offered_ids = SC._load_offered_ids(tmp_path, "claude-code", "sidCC")
+    assert {sid for sid, _ in slices_a + slices_b} <= offered_ids
+
+
+def test_record_offered_concurrent_writers_leave_no_tmp_residue(tmp_path):
+    # 迴歸：並發 writer 完成後 wakeup 目錄不得殘留任何 .tmp 暫存檔。
+    _run_concurrent_offered_writers(tmp_path, "sidCT")
+    wakeup = tmp_path / "runtime" / "wakeup"
+    residue = sorted(p.name for p in wakeup.iterdir() if p.name.endswith(".tmp"))
+    assert residue == []

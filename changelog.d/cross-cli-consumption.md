@@ -7,3 +7,4 @@
 
 ### Fixed
 - 文件漂移：`hippo usage` 實際同時讀 `offered.jsonl` 與 `memory_usage.jsonl`，openspec telemetry spec 誤稱「僅讀 memory_usage.jsonl」——以實作為準修正（含 `psc memory`→`hippo`、`paulshaclaw/memory/usage.py`→`paulsha_hippo/usage.py` 命名殘留）（#18）。
+- per-session offered map 並發安全（#17）：`_record_offered` 原以無鎖 read-modify-write 更新 map、且所有 writer 共用同一固定 `.tmp` 路徑——Copilot / Claude prompt hook 與顯式 recall 對同一 (tool, session_id) 重疊執行時更新互相覆蓋（丟 slice）、或 replace 因對方已移走 tmp 而失敗，post-tool hook 依此 map 判斷 offered，真實讀取被誤記 `offered:false` 污染漏斗歸因（offered ledger 為 append-only 不受影響）。修正：全程持 per-session flock（鎖檔固定命名、與 map 同目錄，持鎖進程死亡由 kernel 自動釋放）序列化「讀取→合併→原子替換」，暫存檔改 per-writer 唯一（pid＋隨機後綴）、replace 仍原子，stdlib-only；補兩個並發回歸測試（雙 writer 同 session 同步起跑：兩組 slices 全保留、無 `.tmp` 殘留）。

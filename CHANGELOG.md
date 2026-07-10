@@ -59,6 +59,7 @@
 - parked／dream ledger 去敏升級（#15 review）：`sanitize_error_text`、`_failed` 證據（`error`／`last_output_excerpt`）與 dream record warnings 落盤前套用 policy 既有 secret redaction（GitHub PAT／Bearer／OpenAI・Anthropic／AWS key／JWT 等），且 redaction 先於截斷；redaction 機制失效時 fail-closed 以 placeholder 取代——credential 不落任何持久化副本。
 - 持久化 scrub 不可被 override 弱化（#15 Codex 複驗）：`redact_secret_text` 改以 `load_policy(override_path=None)` 載入 immutable baseline 規則——使用者 `policy.override.yaml` 的 `disable_rules`／`disable_rules_for_session` 只影響蒸餾管線，不再能停用持久化出口的強制去敏（先前 `disable_rules: [github_pat]` 會讓 PAT 原文落 `_failed/*.json`／processing.jsonl／dream.jsonl）；補 sanitize＋三持久化出口的全域停用情境回歸測試。
 - 文件漂移：`hippo usage` 實際同時讀 `offered.jsonl` 與 `memory_usage.jsonl`，openspec telemetry spec 誤稱「僅讀 memory_usage.jsonl」——以實作為準修正（含 `psc memory`→`hippo`、`paulshaclaw/memory/usage.py`→`paulsha_hippo/usage.py` 命名殘留）（#18）。
+- per-session offered map 並發安全（#17）：`_record_offered` 原以無鎖 read-modify-write 更新 map、且所有 writer 共用同一固定 `.tmp` 路徑——Copilot / Claude prompt hook 與顯式 recall 對同一 (tool, session_id) 重疊執行時更新互相覆蓋（丟 slice）、或 replace 因對方已移走 tmp 而失敗，post-tool hook 依此 map 判斷 offered，真實讀取被誤記 `offered:false` 污染漏斗歸因（offered ledger 為 append-only 不受影響）。修正：全程持 per-session flock（鎖檔固定命名、與 map 同目錄，持鎖進程死亡由 kernel 自動釋放）序列化「讀取→合併→原子替換」，暫存檔改 per-writer 唯一（pid＋隨機後綴）、replace 仍原子，stdlib-only；補兩個並發回歸測試（雙 writer 同 session 同步起跑：兩組 slices 全保留、無 `.tmp` 殘留）。
 
 ## [0.1.0] - 2026-07-07
 
