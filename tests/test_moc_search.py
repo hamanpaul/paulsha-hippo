@@ -154,6 +154,67 @@ class SearchTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_build_index_survives_wrong_typed_tags(self):
+        # Codex review blocking（#16 同類失效鏈）：row 組裝對 list 型 tags 直接
+        # " ".join、只檢查 isinstance(list) 不驗元素型別——合法 YAML 的
+        # `tags: [1]` 即 TypeError 炸掉整批，健康 slice 不被發布。修正後嚴格
+        # 驗證：錯型（list 含非字串、或非 list）歸 invalid_frontmatter 記
+        # 路徑 warning，其餘照常索引。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            k = root / "knowledge" / "proj"
+            k.mkdir(parents=True)
+            (k / "poison.md").write_text(
+                "---\nslice_id: sl-poison\nmemory_layer: knowledge\nproject: proj\n"
+                "title: poison\ntags: [1]\n---\npoison body\n", encoding="utf-8")
+            (k / "strtags.md").write_text(
+                "---\nslice_id: sl-strtags\nmemory_layer: knowledge\nproject: proj\n"
+                "title: strtags\ntags: not-a-list\n---\nstr tags body\n",
+                encoding="utf-8")
+            _slice(root, "sl-ok", "proj", "healthy-note", "healthy unrelated body")
+
+            report = search.build_index(root, link_weights={})  # 不得 raise
+
+            self.assertEqual(report["scanned"], 3)
+            self.assertEqual(report["invalid_frontmatter"], 2)
+            self.assertEqual(report["eligible"], 1)
+            self.assertEqual(report["indexed"], 1)
+            self.assertTrue(any("invalid tags" in w and "poison.md" in w
+                                for w in report["warnings"]), report["warnings"])
+            self.assertTrue(any("invalid tags" in w and "strtags.md" in w
+                                for w in report["warnings"]), report["warnings"])
+            hits = search.search(root, "healthy", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-ok"])
+
+    def test_build_index_per_slice_boundary_catches_classifier_crash(self):
+        # per-slice 例外邊界：分類器對單一 slice 拋非預期例外 → 該檔歸
+        # invalid_frontmatter 記路徑 warning，其餘健康 slice 照常發布，
+        # build_index 不得整批中止。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-boom", "proj", "boom-note", "boom body")
+            _slice(root, "sl-ok", "proj", "healthy-note", "healthy unrelated body")
+            real_classify = search.classify_noise
+
+            def bomb(fm, body, *, doc_corpus=None):
+                if fm.get("slice_id") == "sl-boom":
+                    raise RuntimeError("classifier bomb")
+                return real_classify(fm, body, doc_corpus=doc_corpus)
+
+            with mock.patch.object(search, "classify_noise", bomb):
+                report = search.build_index(root, link_weights={})  # 不得 raise
+
+            self.assertEqual(report["scanned"], 2)
+            self.assertEqual(report["invalid_frontmatter"], 1)
+            self.assertEqual(report["eligible"], 1)
+            self.assertEqual(report["indexed"], 1)
+            self.assertTrue(any("poison slice" in w and "boom-note--sl-boom.md" in w
+                                for w in report["warnings"]), report["warnings"])
+            hits = search.search(root, "healthy", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-ok"])
+
     def test_build_index_persists_coverage_json_atomically(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

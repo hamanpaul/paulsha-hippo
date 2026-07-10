@@ -158,6 +158,23 @@ def read_coverage(memory_root: Path) -> "dict[str, object] | None":
     return payload if isinstance(payload, dict) else None
 
 
+def _tags_fts_text(tags: object) -> "str | None":
+    """tags 正規化成 FTS 欄位文字；錯型回 None（→ invalid_frontmatter）。
+
+    嚴格驗證：缺欄／null → ""；全字串元素的 list → join；其他一律錯型
+    （非 list、或 list 內含非字串元素，如合法 YAML 的 ``tags: [1]``）。
+    舊實作直接 ``" ".join(list)`` 且只檢查 isinstance(list)——單一
+    ``tags: [1]`` 毒 slice 就 TypeError 炸掉整批 build_index：健康 slices
+    不被發布、已有舊 DB 時持續提供 stale index（#16 同類失效鏈）。
+    census._census_tags_invalid 為本規則的對賬雙寫版（兩邊必須同步改）。
+    """
+    if tags is None:
+        return ""
+    if isinstance(tags, list) and all(isinstance(tag, str) for tag in tags):
+        return " ".join(tags)
+    return None
+
+
 def build_index(memory_root: Path, link_weights: dict[str, int],
                 doc_corpus: "object | None" = None) -> dict[str, object]:
     """建 retrieval index（temp DB + atomic replace）並回傳 coverage 報表。
@@ -175,12 +192,16 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     模組 docstring）：讀檔失敗/壞 frontmatter
     → invalid_frontmatter；memory_layer != knowledge →
     pool_excluded[non-knowledge-layer:<layer>]；缺 slice_id →
-    invalid_frontmatter；pool_exclude_reason → pool_excluded[<reason>]；
+    invalid_frontmatter；tags 錯型（非 list[str]，如 ``tags: [1]``）→
+    invalid_frontmatter（記路徑 warning；_tags_fts_text 嚴格驗證）；
+    pool_exclude_reason → pool_excluded[<reason>]；
     classify_noise → noise_excluded[<reason>]；slice_id 已被本輪較早的
     eligible 檔佔用（naming dedup fail-soft 後磁碟殘留重複）→
     pool_excluded[duplicate-slice-id-on-disk]（先到先贏，fail-soft 記
     warning，不中止整批；census 的鏡像規則在 reconcile_index 迴圈）；
-    其餘 eligible（=實際入索引）。
+    其餘 eligible（=實際入索引）。整段逐檔分類＋row 正規化包在 per-slice
+    例外邊界內：任何非預期失敗只犧牲該檔（invalid_frontmatter + 路徑
+    warning），單一毒 slice 不得中止整批、其餘健康 slices 照常發布。
 
     並發安全：全程持 ``index_lock_path()`` 阻塞式 flock 序列化所有 writer
     （dream／rekey／retitle 任意呼叫路徑），temp DB 與 coverage 皆用
@@ -263,58 +284,86 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
             corpus_by_project[project] = corpus
             return corpus
 
+        def classify(fpath: Path) -> "tuple[str, str, str, str, str, str, str] | None":
+            """單檔唯一去向（分類＋row 正規化）；非 eligible 記帳後回 None。
+
+            呼叫端包 per-slice 例外邊界：這裡任何非預期 raise 只犧牲該檔。
+            記帳（counter 遞增）一律緊貼對應 return——row 正規化先於
+            eligible 記帳，任何中途 raise 都不會留下已計數的半途狀態
+            （否則 fate 分割總和會失衡、reconcile 誤報）。
+            """
+            try:
+                fm, body = fio.read(fpath.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                coverage["invalid_frontmatter"] += 1
+                warnings.append(f"index: unreadable {fpath.name} ({exc})")
+                return None
+            if not fm:
+                coverage["invalid_frontmatter"] += 1
+                return None
+            layer = fm.get("memory_layer")
+            if layer != "knowledge":
+                reason = f"non-knowledge-layer:{layer or 'none'}"
+                pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
+                return None
+            sid = fm.get("slice_id")
+            if not sid:
+                coverage["invalid_frontmatter"] += 1
+                return None
+            tags_text = _tags_fts_text(fm.get("tags"))
+            if tags_text is None:
+                coverage["invalid_frontmatter"] += 1
+                warnings.append(
+                    f"index: invalid tags type in {fpath.name} "
+                    f"(expected list of strings, got {fm.get('tags')!r}); excluded")
+                return None
+            reason = pool_exclude_reason(fm)
+            if reason is not None:
+                pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
+                return None
+            project = str(fm.get("project", ""))
+            project_stats = per_project.setdefault(project, ProjectIndexStats())
+            verdict = classify_noise(fm, body, doc_corpus=project_corpus(project))
+            if verdict.is_noise:
+                noise_excluded[verdict.reason] = noise_excluded.get(verdict.reason, 0) + 1
+                project_stats.excluded += 1
+                return None
+            sid_str = str(sid)
+            if sid_str in seen_slice_ids:
+                # 磁碟上同 slice_id 多檔（naming.reconcile dedup fail-soft
+                # 後的合法殘留狀態）：slice_meta 的 PK 會讓 INSERT 丟
+                # IntegrityError 炸掉整批、連健康 slices 都退回舊索引。
+                # 先到先贏：後到者歸 pool_excluded 記 warning，整批續行。
+                reason = "duplicate-slice-id-on-disk"
+                pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
+                warnings.append(
+                    f"index: duplicate slice_id on disk {sid_str}; "
+                    f"excluded {fpath.name} (kept first occurrence)")
+                return None
+            row = (sid_str, project, str(fm.get("title", "")), tags_text,
+                   body, str(fm.get("captured_at", "")), str(fpath))
+            seen_slice_ids.add(sid_str)
+            coverage["eligible"] += 1
+            project_stats.indexed += 1
+            return row
+
         rows: list[tuple[str, str, str, str, str, str, str]] = []
         seen_slice_ids: set[str] = set()
         if knowledge.exists():
             for fpath in sorted(knowledge.rglob("*.md")):
                 coverage["scanned"] += 1
                 try:
-                    fm, body = fio.read(fpath.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError) as exc:
+                    row = classify(fpath)
+                except Exception as exc:
+                    # per-slice 邊界（#16 驗收：單一壞 slice 不中止整批）：
+                    # 非預期失敗歸 invalid_frontmatter 記路徑 warning 續行，
+                    # 其餘健康 slices 照常發布。
                     coverage["invalid_frontmatter"] += 1
-                    warnings.append(f"index: unreadable {fpath.name} ({exc})")
+                    warnings.append(f"index: poison slice {fpath.name} skipped ({exc})")
                     continue
-                if not fm:
-                    coverage["invalid_frontmatter"] += 1
+                if row is None:
                     continue
-                layer = fm.get("memory_layer")
-                if layer != "knowledge":
-                    reason = f"non-knowledge-layer:{layer or 'none'}"
-                    pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
-                    continue
-                sid = fm.get("slice_id")
-                if not sid:
-                    coverage["invalid_frontmatter"] += 1
-                    continue
-                reason = pool_exclude_reason(fm)
-                if reason is not None:
-                    pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
-                    continue
-                project = str(fm.get("project", ""))
-                project_stats = per_project.setdefault(project, ProjectIndexStats())
-                verdict = classify_noise(fm, body, doc_corpus=project_corpus(project))
-                if verdict.is_noise:
-                    noise_excluded[verdict.reason] = noise_excluded.get(verdict.reason, 0) + 1
-                    project_stats.excluded += 1
-                    continue
-                sid_str = str(sid)
-                if sid_str in seen_slice_ids:
-                    # 磁碟上同 slice_id 多檔（naming.reconcile dedup fail-soft
-                    # 後的合法殘留狀態）：slice_meta 的 PK 會讓 INSERT 丟
-                    # IntegrityError 炸掉整批、連健康 slices 都退回舊索引。
-                    # 先到先贏：後到者歸 pool_excluded 記 warning，整批續行。
-                    reason = "duplicate-slice-id-on-disk"
-                    pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
-                    warnings.append(
-                        f"index: duplicate slice_id on disk {sid_str}; "
-                        f"excluded {fpath.name} (kept first occurrence)")
-                    continue
-                seen_slice_ids.add(sid_str)
-                coverage["eligible"] += 1
-                project_stats.indexed += 1
-                rows.append((sid_str, project, str(fm.get("title", "")),
-                             " ".join(fm.get("tags", []) if isinstance(fm.get("tags"), list) else []),
-                             body, str(fm.get("captured_at", "")), str(fpath)))
+                rows.append(row)
                 if len(rows) >= INDEX_WRITE_BATCH_SIZE:
                     flush_batch(rows)
                     rows.clear()
