@@ -18,10 +18,13 @@
 - `hippo doctor --probe-live`（或 env `HIPPO_DOCTOR_LIVE_PROBE=1`）：對 configured backend 實際送一次 bounded smoke prompt（真實喚起、60s timeout、可能產生 API 成本）；未帶時裸 doctor 僅做解析級檢查。
 - `paulsha_hippo/dream/lock.py`：global dream lock（`dream_lock_path`／`acquire_dream_lock`），PR-C doctor 引用同一路徑。
 - `paulsha_hippo/ops.py`：`resolve_backend_argv` + `BackendUnavailableError`（PR-D preset registry 重用）。
+- `hippo locks cleanup-legacy --memory-root <root> [--apply]`：legacy per-session lock 檔一次性清理；預設 dry-run，apply 受雙層安全閘保護（偵測到其他 hippo 進程即拒絕＋逐檔 flock 探測跳過 busy），僅供恢復序列維護窗口使用（#19）
 
 ### Changed
 - dream systemd timer 排程改為 `OnCalendar=hourly`，並保留 `Persistent=true`。
 - dream systemd service 新增 `CPUWeight=20`、`MemoryHigh=20%`、`MemoryMax=30%`、`TasksMax=256` 的可攜 cgroup 資源上限，且不設 `CPUQuota`。
+- importer per-session lock 改為固定 64 個 hash-sharded locks（`lock_shard_{h:02x}.lock`，`h = crc32(safe_key(key)) % 64`）：`runtime/locks/` 檔案數收斂為常數上界，碰撞只降低並行度、不影響互斥正確性（#19）
+- `hippo doctor` 新增 runtime 健康報告：global dream lock（`runtime/locks/dream.lock`）持鎖狀態＋dream/supervise 進程清單（PID/start time/cmdline/cwd），標記非 canonical 實例（interpreter-mismatch／cwd-missing／cwd-temp-worktree）；只報告，不自動 kill（#19）
 
 ### Fixed
 - `install service` 生成的 systemd unit：`ExecStart` 綁定當前 interpreter（`sys.executable`），修正 pipx / venv 隔離安裝下寫死 `/usr/bin/env python3`（全域 python）import 不到 `paulsha_hippo`、導致 dream service 一觸發即 `exit 1`（ModuleNotFoundError）的問題。
