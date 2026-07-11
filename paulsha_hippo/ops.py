@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from paulsha_hippo import paths
@@ -677,3 +678,118 @@ def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
             print(f"dream supervise: 單輪失敗（{exc}），下一輪重試", file=sys.stderr)
         if once:
             return 0
+
+
+# ---------------------------------------------------------------- runtime hygiene (#19)
+
+_TEMP_WORKTREE_SEGMENTS = {".psc_tmp", ".test-work"}
+
+
+def _iter_pids(proc_root: Path) -> list[int]:
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return []
+    return sorted(int(name) for name in entries if name.isdigit())
+
+
+def _read_cmdline(proc_root: Path, pid: int) -> list[str]:
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part]
+
+
+def _read_started_at(proc_root: Path, pid: int) -> str:
+    """btime + starttime/SC_CLK_TCK → ISO UTC；任一環節失敗回 'unknown'（診斷 fail-open）。"""
+    try:
+        btime: int | None = None
+        for line in (proc_root / "stat").read_text(
+                encoding="ascii", errors="replace").splitlines():
+            if line.startswith("btime "):
+                btime = int(line.split()[1])
+                break
+        if btime is None:
+            return "unknown"
+        stat = (proc_root / str(pid) / "stat").read_text(
+            encoding="ascii", errors="replace")
+        fields = stat.rpartition(")")[2].split()
+        starttime = int(fields[19])  # 整行第 22 欄（')' 後第 20 個 token）
+        ticks = os.sysconf("SC_CLK_TCK")
+        return datetime.fromtimestamp(btime + starttime // ticks,
+                                      tz=timezone.utc).isoformat()
+    except (OSError, ValueError, IndexError):
+        return "unknown"
+
+
+def _read_cwd(proc_root: Path, pid: int) -> str | None:
+    try:
+        return os.readlink(proc_root / str(pid) / "cwd")
+    except OSError:
+        return None
+
+
+def scan_hippo_processes(*, proc_root: str | Path = "/proc") -> list[dict[str, object]]:
+    """列出 cmdline 涉及 paulsha_hippo（或 argv[0] 為 hippo）的其他進程。
+
+    只讀 /proc、不發任何 signal；排除自身 PID。proc_root 可注入假目錄供測試。
+    """
+    root = Path(proc_root)
+    records: list[dict[str, object]] = []
+    for pid in _iter_pids(root):
+        if pid == os.getpid():
+            continue
+        argv = _read_cmdline(root, pid)
+        if not argv:
+            continue
+        is_hippo = any("paulsha_hippo" in token for token in argv) or Path(argv[0]).name == "hippo"
+        if not is_hippo:
+            continue
+        records.append({
+            "pid": pid,
+            "argv": argv,
+            "cmdline": " ".join(argv),
+            "started_at": _read_started_at(root, pid),
+            "cwd": _read_cwd(root, pid),
+        })
+    return records
+
+
+def dream_process_report(*, proc_root: str | Path = "/proc",
+                         canonical_interpreter: str | None = None
+                         ) -> list[dict[str, object]]:
+    """dream/supervise 進程健康報告素材：附 non_canonical 標記與 reasons。
+
+    只報告，不自動 kill（#19）。reason tokens：
+      interpreter-mismatch —— argv[0]（絕對路徑時）不在本安裝環境的 interpreter 目錄
+      cwd-missing          —— 進程 cwd 已不存在（多半是被清掉的暫存 worktree）
+      cwd-temp-worktree    —— 進程 cwd 位於暫存區（.psc_tmp / .test-work / tempdir）
+    """
+    canonical = Path(canonical_interpreter or sys.executable).resolve(strict=False)
+    reports: list[dict[str, object]] = []
+    for record in scan_hippo_processes(proc_root=proc_root):
+        argv_value = record.get("argv")
+        if not isinstance(argv_value, list):
+            continue
+        argv = [str(token) for token in argv_value]
+        if "dream" not in argv:
+            continue
+        reasons: list[str] = []
+        if argv[0].startswith("/"):
+            argv0 = Path(argv[0]).resolve(strict=False)
+            if argv0.parent != canonical.parent:
+                reasons.append("interpreter-mismatch")
+        cwd = record.get("cwd")
+        if isinstance(cwd, str):
+            cwd_path = Path(cwd)
+            if not cwd_path.exists():
+                reasons.append("cwd-missing")
+            elif any(part in _TEMP_WORKTREE_SEGMENTS for part in cwd_path.parts) or str(
+                    cwd_path).startswith(tempfile.gettempdir() + os.sep):
+                reasons.append("cwd-temp-worktree")
+        report = dict(record)
+        report["non_canonical"] = bool(reasons)
+        report["reasons"] = reasons
+        reports.append(report)
+    return reports
