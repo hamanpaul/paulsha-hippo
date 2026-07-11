@@ -356,8 +356,8 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     健康，gate 綠燈後 requeue 立即再度失敗或 parked。改為 fail-closed：經 stdin
     送 bounded smoke prompt（比照 AgentExecClient.run 的餵入方式），timeout 內
     exit 0 且 stdout 非空（可解析回應）才 PASS；timeout、任何非零 exit（含
-    126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈）
-    一律 FAIL。
+    126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈、
+    輸出非 UTF-8 位元組令 text=True decode 失敗）一律 FAIL。
 
     Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（manager env
     或標示近似的 fallback），本函式不再自行繼承 os.environ——僅疊加
@@ -387,6 +387,13 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
         return False, "exec 失敗：無執行權限"
     except OSError as exc:
         return False, f"exec 失敗：{exc}"
+    except UnicodeDecodeError as exc:
+        # text=True 以 locale 編碼解 stdout/stderr，backend 吐非 UTF-8 位元組
+        # （跑錯 binary／crash dump／locale 錯亂的錯誤文字）時 decode 於 run()
+        # 內拋 UnicodeDecodeError（ValueError 子類，非 OSError）。此正是本 probe
+        # 要偵測的故障類；比照恢復 gate fail-closed 語意判 FAIL，不得逸出崩潰 CLI。
+        return False, (f"exec 失敗：backend 輸出非 UTF-8 位元組"
+                       f"（跑錯 binary／crash dump／locale 錯亂；fail-closed）：{exc}")
     if completed.returncode != 0:
         stderr_tail = " ".join(str(completed.stderr or "").split())[:200]
         return False, (f"exit {completed.returncode}（smoke prompt 失敗；"

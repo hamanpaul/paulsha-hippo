@@ -469,6 +469,23 @@ class DoctorBackendProbeTests(unittest.TestCase):
         # exit 0 但無可解析回應（空輸出）→ FAIL
         self.assertEqual(self._doctor_with_command(("/bin/sh", "-c", "exit 0")), 1)
 
+    def test_probe_fails_on_non_utf8_output(self):
+        # text=True 以 UTF-8 解 stdout/stderr；backend 吐非 UTF-8 位元組（跑錯
+        # binary／crash dump／locale 錯亂的錯誤文字）時，decode 於 run() 內即拋
+        # UnicodeDecodeError（ValueError 子類、非 OSError）。此正是本 probe 要偵測
+        # 的故障類——須 fail-closed 判 FAIL，不得讓 UnicodeDecodeError 逸出崩潰 CLI
+        # （run_doctor→_ops_doctor→cli.main 皆不接此例外，否則 assertEqual 會被
+        # traceback 取代而 error）。stdout 非 UTF-8＋exit 0：decode 於檢查 exit 前就拋。
+        self.assertEqual(
+            self._doctor_with_command(("/bin/sh", "-c", r'printf "\377\376\200\201"')),
+            1,
+        )
+        # stderr 非 UTF-8（text=True 同時解 stderr）同樣不得崩潰、判 FAIL。
+        self.assertEqual(
+            self._doctor_with_command(("/bin/sh", "-c", r'printf "\377\376\200\201" >&2')),
+            1,
+        )
+
     def test_probe_passes_when_smoke_prompt_answered(self):
         # cat 把 stdin 的 smoke prompt 原樣回吐：exit 0＋非空輸出 → PASS，
         # 同時驗證 prompt 確實經 stdin 餵入（比照 AgentExecClient.run）
