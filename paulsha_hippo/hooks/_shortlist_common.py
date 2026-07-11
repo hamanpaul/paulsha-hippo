@@ -84,15 +84,56 @@ def _offered_map_path(root: Path, tool: str, session_id: str) -> Path:
     return path
 
 
+def _offered_pairs_from_ledger(root: Path, tool: str, session_id: str) -> list[tuple[str, str]]:
+    """從 append-only offered ledger 還原本 (tool, session_id) 曾 offer 的 (sl_id, path) 清單。
+
+    ledger 是 offered 的**單一真值**、跨 session 共用（同一 offered.jsonl）；依 session_id＋tool
+    過濾出本 session 的事件。per-session map 為此清單的衍生 cache——硬中止或 cache 寫入失敗
+    落在「ledger 有、map 無」時，這裡是重建 map／判定 offered 的權威來源。讀不到（不存在／IO／
+    單行壞）一律略過該來源（fail-open），不讓恢復路徑因殘缺 ledger 崩掉。
+    """
+    pairs: list[tuple[str, str]] = []
+    try:
+        raw = (root / "runtime" / "ledger" / "offered.jsonl").read_text(encoding="utf-8")
+    except OSError:
+        return pairs
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if ev.get("session_id") != session_id or ev.get("tool") != tool:
+            continue
+        for item in ev.get("offered") or []:
+            sid = item.get("sl_id") if isinstance(item, dict) else None
+            p = item.get("path") if isinstance(item, dict) else None
+            if sid and p:
+                pairs.append((str(sid), str(p)))
+    return pairs
+
+
 def _load_offered_ids(root: Path, tool: str, session_id: str) -> set[str]:
+    """本 (tool, session_id) 已 offer 的 sl_id 集合——以 offered ledger（單一真值）為準。
+
+    回傳 per-session map 的 sl_id ∪ offered ledger 的 sl_id。map 是衍生 cache：反轉發布順序
+    （先 ledger 後 map）後，硬中止／cache 寫入失敗可能落在「ledger 有、map 無」，聯集 ledger
+    使去重判定不漏掉已 offer 的 slice——既不重複送達、也不永久去重。純讀取、不持鎖、不寫檔，
+    可安全在既有 per-session flock 臨界區內呼叫（reconcile 已於同鎖內先補齊 map）。map 讀取
+    失敗（不存在／壞檔／非法 tool）視為空集合（fail-open），仍以 ledger 補全。
+    """
+    ids: set[str] = set()
     try:
         payload = json.loads(_offered_map_path(root, tool, session_id).read_text(encoding="utf-8"))
         by_id = payload.get("by_id")
-        if not isinstance(by_id, dict):
-            return set()
-        return {str(k) for k in by_id.keys()}
+        if isinstance(by_id, dict):
+            ids.update(str(k) for k in by_id.keys())
     except Exception:
-        return set()
+        pass
+    ids.update(sid for sid, _ in _offered_pairs_from_ledger(root, tool, session_id))
+    return ids
 
 
 @contextlib.contextmanager
@@ -118,7 +159,12 @@ def _session_lock(mpath: Path):
 
 def _append_offered_ledger(root: Path, tool: str, session_id: str, project: str,
                            offered: list[tuple[str, str]]) -> None:
-    """Append 一筆 offered 事件到 append-only ledger。呼叫端持 per-session flock。"""
+    """Append 一筆 offered 事件到 append-only ledger 並 fsync 落盤。呼叫端持 per-session flock。
+
+    ledger 是 offered 的單一真值＋crash commit point：write 後 flush＋fsync 確保硬中止
+    （SIGKILL／hook timeout／主機中斷）發生前已落盤——否則資料僅留在 Python／OS 緩衝，強制
+    終止會連同「map 尚未更新」一起遺失，重現本 finding 的缺口（見 _publish_offered）。
+    """
     led_dir = root / "runtime" / "ledger"
     led_dir.mkdir(parents=True, exist_ok=True)
     ev = {"ts": datetime.now(timezone.utc).isoformat(), "session_id": session_id,
@@ -126,6 +172,8 @@ def _append_offered_ledger(root: Path, tool: str, session_id: str, project: str,
           "offered": [{"sl_id": sid, "path": p} for sid, p in offered]}
     with (led_dir / "offered.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def _commit_offered_map(mpath: Path, offered: list[tuple[str, str]]) -> None:
@@ -135,6 +183,7 @@ def _commit_offered_map(mpath: Path, offered: list[tuple[str, str]]) -> None:
     仍原子。必須在 _session_lock 內呼叫，序列化 read→merge→replace——否則並發
     更新互相覆蓋（丟 slice）→ post-tool hook 把真實讀取誤記 offered:false。
     """
+    mpath.parent.mkdir(parents=True, exist_ok=True)
     cur = {"by_path": {}, "by_id": {}}
     if mpath.exists():
         try:
@@ -156,74 +205,56 @@ def _commit_offered_map(mpath: Path, offered: list[tuple[str, str]]) -> None:
         raise
 
 
-def _read_map_snapshot(mpath: Path) -> bytes | None:
-    """Commit 前的 per-session map 原始 bytes（回滾用）；None＝檔案不存在。呼叫端持 flock。
+def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) -> None:
+    """以 offered ledger（單一真值）補齊 per-session map——ledger 有但 map 無的 slice 寫回 map。呼叫端持 flock。
 
-    讀不到（不存在／IO 錯誤）一律視為「無前態」→ 回滾時直接移除本次寫入的 map
-    （獨佔鎖下無其他 writer 的狀態可丟）。
+    map 是 ledger 的衍生 cache。反轉發布順序（先 ledger 後 map）後，硬中止或 map cache 寫入
+    失敗會落在「ledger 有、map 無」；在同一把 per-session flock 內、claim 去重前先 reconcile，
+    把 ledger 的 offered slice 補回 map，使 (a) 去重判定回到 ledger 真值、(b) post-tool 讀取端
+    直接讀 map by_path 時拿到的即 ledger 可重建的真值。無缺漏時不寫檔（省去多餘的原子 replace，
+    維持既有 map 冪等）。map 讀取失敗（壞檔）視為空 → 由 _commit_offered_map 以 ledger 重建。
     """
-    try:
-        return mpath.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-
-
-def _restore_offered_map(mpath: Path, snapshot: bytes | None) -> None:
-    """把 per-session map 原子回滾到 commit 前的 snapshot。呼叫端持 per-session flock。
-
-    snapshot 為 commit 前擷取的原始 bytes，或 None（map 原本不存在→移除本次寫入）。
-    沿用與 _commit_offered_map 相同的 tmp＋原子 replace，並發 reader 不會看到半寫檔。
-    """
-    if snapshot is None:
-        with contextlib.suppress(FileNotFoundError):
-            mpath.unlink()
+    pairs = _offered_pairs_from_ledger(root, tool, session_id)
+    if not pairs:
         return
-    tmp = mpath.with_name(f".{mpath.name}.{os.getpid()}-{secrets.token_hex(4)}.rollback")
+    by_id: dict = {}
     try:
-        tmp.write_bytes(snapshot)
-        tmp.replace(mpath)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+        payload = json.loads(mpath.read_text(encoding="utf-8"))
+        if isinstance(payload.get("by_id"), dict):
+            by_id = payload["by_id"]
+    except Exception:
+        by_id = {}
+    missing = [(sid, p) for sid, p in pairs if by_id.get(sid) != p]
+    if missing:
+        _commit_offered_map(mpath, missing)
 
 
 def _publish_offered(root: Path, tool: str, session_id: str, project: str,
                      mpath: Path, offered: list[tuple[str, str]]) -> None:
-    """原子發布一筆 offered 事件——per-session map 與 offered ledger 全有或全無。呼叫端持 flock。
+    """發布一筆 offered 事件——offered ledger 為單一真值＋commit point，per-session map 為可重建 cache。呼叫端持 flock。
 
-    兩產物的可逆性不對稱：per-session map 是「tmp＋原子 replace」可逆；offered ledger
-    是 append-only 不可逆，且被**跨 session 共用**（per-session flock 不序列化不同 session
-    對同一 offered.jsonl 的 append）→ 絕不能事後改寫 ledger 回滾。因此排序為：
+    排序反轉為「先 ledger、後 map」並讓 ledger fsync 落盤，關閉前輪 map-先寫留下的
+    crash-consistency 缺口：舊序在 map commit 與 ledger append 之間被 SIGKILL／hook timeout
+    強制中止時，map 已標記 slice 為 seen 但 ledger 無事件 → 該 slice 永久被去重、不再送達
+    （違反全有或全無）；前輪只修可捕捉例外路徑（rollback），涵蓋不到硬中止。
 
-      1. 先 commit 可逆的 map（失敗→ledger 完全未動，直接 raise）；
-      2. 後 append 不可逆的 ledger 作為 commit point（失敗→把 map 回滾到 snapshot 再 raise）。
+      1. 先 append 不可逆的 offered ledger 並 fsync（durable commit point）。失敗 → 尚無任何
+         產物發布，raise 由外層 fail-closed，相同輸入可乾淨重試（無半發布、無重複事件）。
+      2. 再更新可重建的 map cache。硬中止只會落在「ledger 有、map 無」＝安全側：map 為 ledger
+         衍生，下一輪 _reconcile_offered_map／_load_offered_ids 以 ledger 為準補齊——既不永久遺漏、
+         也不重複送達。
 
-    任一階段失敗都不會單邊發布：
-      - map commit 失敗 → 無幽靈 ledger 事件（不灌 offered/never-read 指標、不讓
-        mark-applied 的參照驗證接受從未實際送達的 slice）；
-      - ledger append 失敗 → map 還原到前態（不留幽靈 seen-id 去無聲壓掉未來的真實 offer）。
-
-    失敗時例外往外拋、shortlist pipeline 外層 fail-closed 回 ''；因兩產物皆未發布，相同
-    輸入的重試會乾淨地重新嘗試（無重複 ledger 事件、無 map 汙染）。若回滾亦失敗（雙重
-    故障：map 已含該 slice、ledger 未寫），ledger（漏斗真值）仍保持乾淨、不重現本 finding
-    的指標膨脹，僅使該 slice 本 session 不再被 offer——記 loud warning 供恢復診斷。
+    map 更新失敗不回滾、不外拋（ledger 已是真值，其失敗態等同硬中止落點，由 reconcile 重建）：
+    僅記 warning。若在此 fail-closed，會使 agent 收不到「已 commit」的 offer、重現前輪
+    offered-but-undelivered 的指標膨脹，故降級為 best-effort cache 更新。
     """
-    snapshot = _read_map_snapshot(mpath)
-    _commit_offered_map(mpath, offered)
+    _append_offered_ledger(root, tool, session_id, project, offered)
     try:
-        _append_offered_ledger(root, tool, session_id, project, offered)
-    except BaseException as append_exc:
-        try:
-            _restore_offered_map(mpath, snapshot)
-        except BaseException as rollback_exc:
-            log_warn(root, tool,
-                     f"offered ledger append failed AND map rollback failed; per-session "
-                     f"map may retain un-published slice(s) while ledger stays clean: "
-                     f"append={append_exc!r} rollback={rollback_exc!r}")
-        raise
+        _commit_offered_map(mpath, offered)
+    except Exception as exc:
+        log_warn(root, tool,
+                 f"offered map cache update failed after ledger commit; map will be "
+                 f"rebuilt from ledger on next reconcile: {exc}")
 
 
 def _record_offered(root: Path, tool: str, session_id: str, project: str,
@@ -285,6 +316,10 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
         # search 屬只讀且不需序列化，留在鎖外。
         mpath = _offered_map_path(root, tool, session_id)
         with _session_lock(mpath):
+            # map 為 offered ledger 的衍生 cache：claim 去重前先以 ledger（單一真值）reconcile，
+            # 補齊硬中止／前次 cache 寫入失敗殘留的「ledger 有、map 無」，使去重判定與 post-tool
+            # 讀取端皆回到 ledger 可重建的真值（seen 亦已聯集 ledger，reconcile 另把真值落回 map）。
+            _reconcile_offered_map(root, tool, session_id, mpath)
             seen = _load_offered_ids(root, tool, session_id)
             claim = [h for h in hits
                      if h.get("slice_id") and h["slice_id"] not in seen][:SHORTLIST_K]
@@ -298,9 +333,10 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                 # NOT record offered (nothing was surfaced to the agent).
                 return ""
             offered = [(h["slice_id"], h["path"]) for h in claim if h.get("path")]
-            # 原子發布：map commit 與 ledger append 全有或全無。任一階段失敗會 raise，
-            # 由下方外層 fail-closed 回 ''——不會出現「ledger 已記 offered 但 agent 收不到
-            # shortlist」的單邊發布（膨脹 offered/never-read、污染 mark-applied 參照驗證）。
+            # 發布：先 fsync offered ledger（單一真值＋commit point）後更新 map cache。ledger
+            # append 失敗會 raise，由下方外層 fail-closed 回 ''——不出現「ledger 已記但 agent 收不到
+            # shortlist」的膨脹；ledger 成功後的硬中止只落在「ledger 有、map 無」安全側，由 reconcile
+            # 重建（見 _publish_offered）。
             _publish_offered(root, tool, session_id, project, mpath, offered)
         return block + "\n" + _applied_hint(root, tool, session_id)
     except Exception as exc:

@@ -337,27 +337,30 @@ def _boom_oserror(*a, **k):
     raise OSError("disk full")
 
 
-def test_publish_offered_map_commit_failure_writes_no_ledger(tmp_path, monkeypatch):
-    # 迴歸（#17 Codex gate [high]）：offered ledger 與 per-session map 過去非原子雙寫——
-    # 先 append 不可逆的 ledger、才 commit map。map commit 因磁碟滿／權限／IO 失敗時，
-    # 外層 fail-closed 回 ''（agent 收不到 shortlist），但 ledger 已寫入該 offered 事件
-    # （膨脹 offered/never-read、讓 mark-applied 參照驗證接受從未送達的 slice）。修正後
-    # map commit 先行、失敗即 raise，ledger 完全未動。
+def test_publish_offered_map_cache_failure_keeps_ledger_truth(tmp_path, monkeypatch):
+    # 反轉為「先 ledger 後 map」後：map cache 更新失敗（磁碟滿／權限／IO）發生在 ledger 已
+    # commit 之後。ledger 是單一真值＋commit point——此失敗不回滾、不 fail-closed（否則 agent
+    # 收不到已 commit 的 offer，重現前輪 offered-but-undelivered 的指標膨脹）：offer 視為已發布
+    # （block 照常回傳），ledger 保有事件，讀取端以 ledger 為準仍視該 slice 為 offered，
+    # 下一輪 reconcile 由 ledger 重建 map。此失敗態等同硬中止落在「ledger 有、map 無」的安全側。
     monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
     _seed(tmp_path)
     monkeypatch.setattr(SC, "_commit_offered_map", _boom_oserror)
 
     out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidMC", cwd="/x",
                                         prompt="SerialWrap 執行")
-    assert out == ""
-    # KEY：ledger 不得有任何 offered 事件（修正前此處會有一筆從未送達的 offer）
-    assert _offered_events(tmp_path) == []
-    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidMC.offered.json").exists()
+    assert out != ""  # ledger 已 commit → offer 已發布，block 照常送達（非 fail-closed）
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+    # map cache 寫入失敗 → 檔案缺該 slice，但讀取端以 ledger 為準仍 offered:true（不永久遺漏）
+    assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidMC")
 
 
-def test_publish_offered_ledger_failure_rolls_back_map(tmp_path, monkeypatch):
-    # ledger append 失敗（disk full）：map 必須回滾到前態（此處前態＝不存在），外層回
-    # ''，兩產物皆未發布，且不留 .tmp / .rollback 殘留。
+def test_publish_offered_ledger_failure_publishes_nothing(tmp_path, monkeypatch):
+    # ledger append（commit point、發布第一步）失敗（disk full）：map 從未被觸及（不是回滾——
+    # 反轉後 map 更新在 ledger 之後，ledger 一失敗就 raise、根本不到 map 步驟），外層回 ''，
+    # 兩產物皆未發布、可乾淨重試，且不留 .tmp 殘留。
     monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
     _seed(tmp_path)
     monkeypatch.setattr(SC, "_append_offered_ledger", _boom_oserror)
@@ -366,18 +369,19 @@ def test_publish_offered_ledger_failure_rolls_back_map(tmp_path, monkeypatch):
                                         prompt="SerialWrap 執行")
     assert out == ""
     assert _offered_events(tmp_path) == []
-    # map commit 已寫入又被回滾移除（前態為不存在）
+    # map 從未寫入（ledger 先失敗）
     assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidLA.offered.json").exists()
     wakeup = tmp_path / "runtime" / "wakeup"
     if wakeup.exists():
-        residue = [p.name for p in wakeup.iterdir() if p.name.endswith((".tmp", ".rollback"))]
+        residue = [p.name for p in wakeup.iterdir() if p.name.endswith(".tmp")]
         assert residue == []
 
 
-def test_publish_offered_ledger_failure_restores_prior_nonempty_map(tmp_path, monkeypatch):
-    # 前態非空的回滾：先成功 offer A（map={A}、ledger=[A]），第二筆 B 於 ledger append
-    # 失敗——map 必須還原成 {A}（B 被回滾）、ledger 仍只有 A（不會落入 map 有 B、ledger
-    # 無 B 的單邊態）。以 _record_offered 直呼，精準控制 offered 清單。
+def test_publish_offered_ledger_failure_leaves_prior_map_untouched(tmp_path, monkeypatch):
+    # 前態非空：先成功 offer A（map={A}、ledger=[A]），第二筆 B 於 ledger append 失敗——反轉後
+    # B 的 append（commit point）失敗發生在 map 更新之前，故 map 從未因 B 改動（無需回滾），逐
+    # byte 維持 {A}、ledger 仍只有 A（不會落入 map 有 B、ledger 無 B 的單邊態）。以 _record_offered
+    # 直呼，精準控制 offered 清單。
     note_a = str(tmp_path / "knowledge" / "proj" / "a.md")
     note_b = str(tmp_path / "knowledge" / "proj" / "b.md")
     SC._record_offered(tmp_path, "claude-code", "sidRB", "proj",
@@ -389,7 +393,7 @@ def test_publish_offered_ledger_failure_restores_prior_nonempty_map(tmp_path, mo
     SC._record_offered(tmp_path, "claude-code", "sidRB", "proj",
                        [("sl-bbbbbbbbbbbbbbbb", note_b)])  # _record_offered 內部吞例外
 
-    assert mpath.read_text(encoding="utf-8") == before  # 逐 byte 還原
+    assert mpath.read_text(encoding="utf-8") == before  # 逐 byte 不變（B 從未寫入）
     m = json.loads(mpath.read_text(encoding="utf-8"))
     assert m["by_id"] == {"sl-aaaaaaaaaaaaaaaa": note_a}
     assert "sl-bbbbbbbbbbbbbbbb" not in m["by_id"]
@@ -398,23 +402,24 @@ def test_publish_offered_ledger_failure_restores_prior_nonempty_map(tmp_path, mo
     assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
 
 
-def test_publish_offered_retry_after_failure_is_clean(tmp_path, monkeypatch):
-    # 失敗的發布不留半發布狀態 → 相同輸入重試乾淨成功：恰一筆 offered（首次失敗的嘗試
-    # 未污染 seen／未重複記帳）。_commit_offered_map 首呼失敗、次呼委派真實實作。
+def test_publish_offered_ledger_failure_then_retry_is_clean(tmp_path, monkeypatch):
+    # 失敗的發布不留半發布狀態 → 相同輸入重試乾淨成功：恰一筆 offered。ledger 是 commit point
+    # ——首呼 append 失敗（disk full）時尚無任何產物發布（map 未動）、外層 fail-closed 回 ''、
+    # 未污染 seen／未重複記帳；次呼（磁碟恢復）乾淨成功。
     monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
     _seed(tmp_path)
-    real_commit = SC._commit_offered_map
+    real_append = SC._append_offered_ledger
     calls = {"n": 0}
 
-    def _flaky_commit(mpath, offered):
+    def _flaky_append(root, tool, session_id, project, offered):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("disk full")
-        return real_commit(mpath, offered)
+        return real_append(root, tool, session_id, project, offered)
 
-    monkeypatch.setattr(SC, "_commit_offered_map", _flaky_commit)
+    monkeypatch.setattr(SC, "_append_offered_ledger", _flaky_append)
 
-    # 第一次：map commit 失敗 → '' 且無 ledger、無 map
+    # 第一次：ledger append 失敗 → '' 且無 ledger、無 map（commit point 未達）
     assert SC.build_shortlist_and_record(tmp_path, "claude-code", "sidRT", cwd="/x",
                                          prompt="SerialWrap 執行") == ""
     assert _offered_events(tmp_path) == []
@@ -428,3 +433,89 @@ def test_publish_offered_retry_after_failure_is_clean(tmp_path, monkeypatch):
     assert len(events) == 1
     assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
     assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRT")
+
+
+def _kill_before_map_worker(root: str, tool: str, session_id: str, note: str, sid_val: str) -> None:
+    """fork child：ledger append（含 fsync）成功後、map 更新前以 os._exit(1) 模擬硬中止。
+
+    發布順序為「先 ledger 後 map」，故 monkeypatch map 更新步驟（_commit_offered_map）為
+    os._exit——child 死在 ledger 已落盤、map 尚未更新的窗口（正是本 finding 的硬中止點）。
+    os._exit 不執行 except/finally，等同 SIGKILL/hook timeout 之不可捕捉終止。
+    """
+    import os as _os
+    from paulsha_hippo.hooks import _shortlist_common as sc
+
+    def _die(*a, **k):
+        _os._exit(1)
+
+    sc._commit_offered_map = _die
+    sc._record_offered(Path(root), tool, session_id, "proj", [(sid_val, note)])
+
+
+def test_kill_after_ledger_before_map_no_permanent_loss(tmp_path, monkeypatch):
+    # 迴歸（#17 Codex high, conf 0.99）：_publish_offered 前輪「先 commit map 再 append
+    # ledger」，SIGKILL / hook timeout / 主機中斷落在兩步之間 → map 已標記 slice 為 seen
+    # 但 ledger 無 offered 事件 → 重啟後該 slice 永久被去重、不再送達（違反全有或全無），
+    # 前輪只修可捕捉例外路徑。修正：反轉為「先 fsync ledger（單一真值＋commit point）後更新
+    # map（可重建 cache）」，硬中止只會落在「ledger 有、map 無」＝安全側，reconcile 以 ledger
+    # 為準補齊 map。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    monkeypatch.setattr(SC, "SHORTLIST_K", 1)
+    _seed(tmp_path)  # 命中 slice sl-aaaaaaaaaaaaaaaa @ knowledge/proj/a.md
+    note = str(tmp_path / "knowledge" / "proj" / "a.md")
+    sid_val = "sl-aaaaaaaaaaaaaaaa"
+
+    ctx = multiprocessing.get_context("fork")
+    proc = ctx.Process(target=_kill_before_map_worker,
+                       args=(str(tmp_path), "claude-code", "sidKILL", note, sid_val))
+    proc.start()
+    proc.join(timeout=120)
+    # 確認確實走到「map 更新前」的中止點（os._exit(1)）——否則測不到目標窗口
+    assert proc.exitcode == 1
+
+    # 硬中止後的 durable 狀態：ledger 有事件（write 後 fsync 落盤，撐過 os._exit），map
+    # 尚未更新（缺該 slice）——正是「ledger 有、map 無」的安全側（不是舊 bug 的相反單邊態）
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["session_id"] == "sidKILL"
+    assert [i["sl_id"] for i in events[0]["offered"]] == [sid_val]
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidKILL.offered.json"
+    map_by_id = json.loads(mpath.read_text(encoding="utf-8")).get("by_id", {}) if mpath.exists() else {}
+    assert sid_val not in map_by_id  # 中止點：map 尚未含該 slice
+
+    # 「重啟」讀取端以 ledger 為準：該 slice 仍被視為 offered（不永久遺漏）
+    assert sid_val in SC._load_offered_ids(tmp_path, "claude-code", "sidKILL")
+
+    # 下一輪完整管線以 ledger 為準去重：不重複送達（out==''）、不重複 append ledger、也不永久
+    # 遺漏（ledger 仍持有事件）；reconcile 已把該 slice 補回 map（post-tool 讀取端據此判定）
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidKILL", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out == ""  # 不重複去重／不重複送達
+    events_after = _offered_events(tmp_path)
+    assert len(events_after) == 1  # 不重複 append
+    reconciled = json.loads(mpath.read_text(encoding="utf-8"))
+    assert reconciled["by_id"].get(sid_val) == note  # reconcile 補回 map
+    assert reconciled["by_path"].get(note) == sid_val
+
+
+def test_reconcile_from_ledger_rebuilds_missing_map(tmp_path):
+    # 直接構造硬中止後的 durable 狀態（「先 ledger 後 map」的中止窗口）：offered ledger 有
+    # 事件、per-session map 檔尚不存在。斷言 (a) 讀取端以 ledger 為準視該 slice 為 offered
+    # （不永久遺漏），(b) reconcile 把 ledger 有、map 無的 slice 補回 map（post-tool 讀取端
+    # 據此拿到 ledger 可重建的真值），(c) reconcile 幂等。
+    note = str(tmp_path / "knowledge" / "proj" / "a.md")
+    sid_val = "sl-aaaaaaaaaaaaaaaa"
+    SC._append_offered_ledger(tmp_path, "claude-code", "sidLO", "proj", [(sid_val, note)])
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidLO.offered.json"
+    assert not mpath.exists()  # 中止窗口：map 尚未建立
+
+    assert sid_val in SC._load_offered_ids(tmp_path, "claude-code", "sidLO")
+
+    SC._reconcile_offered_map(tmp_path, "claude-code", "sidLO", mpath)
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    assert m["by_id"] == {sid_val: note}
+    assert m["by_path"] == {note: sid_val}
+
+    # reconcile 幂等：ledger 已全在 map 中 → 不重複寫、內容不變
+    SC._reconcile_offered_map(tmp_path, "claude-code", "sidLO", mpath)
+    assert json.loads(mpath.read_text(encoding="utf-8")) == m
