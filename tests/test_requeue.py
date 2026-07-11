@@ -334,6 +334,100 @@ class RequeueCoreTests(unittest.TestCase):
             )
 
 
+class RequeueAtomicTransitionTests(unittest.TestCase):
+    """parked→split 的 read-check-write 必須原子：快照後被併發 writer 改狀態、或帶
+    較舊 `--now`，都不得錯誤復活已 promote 的 session，也不得回報未生效的 split。"""
+
+    def test_concurrent_promote_after_snapshot_is_refused_not_resurrected(self):
+        # 併發回歸：requeue 取得快照時 s1 仍 parked，但在轉移前另一 writer 已把 s1
+        # promote（較 requeue `--now` 早的 ts）。修法前 requeue 會以較晚的 now append
+        # split，在 fold 中勝出 → 已 promote 的 session 被錯誤復活成 split。原子轉移
+        # 以持鎖重讀為準：偵測 promoted、拒絕、維持 promoted。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            _seed_fragment(root, "claude:s1")
+
+            def concurrent_promote() -> None:
+                processing.append_state(
+                    root, session_key="claude:s1", state="promoted",
+                    now="2026-07-10T00:30:00Z", config_hash="cfg-hash",
+                )
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+                reason="backend fixed", _after_snapshot=concurrent_promote,
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "promoted"}],
+            )
+            # 未生效的 split 不得落 ledger（拒絕在寫入之前）
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_stale_now_does_not_false_succeed(self):
+        # 較舊 `--now` 回歸：parked 事件 ts=2026-07-10T00:00:00Z，requeue 帶更早的
+        # now。修法前 requeue 會 append 一筆較舊 ts 的 split——它在 fold 中輸給既有
+        # parked，狀態實際仍是 parked，但 requeue 卻回報 requeued（false-success）。
+        # 原子轉移拒絕 stale ts：維持 parked、計入 skipped、不寫入。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            _seed_fragment(root, "claude:s1")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-09T00:00:00Z",
+                reason="backend fixed",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "stale-timestamp"}],
+            )
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_all_parked_concurrent_promote_does_not_block_healthy(self):
+        # --all-parked：併發被 promote 的 session 拒絕（維持 promoted），不連坐其他
+        # 本可正常 requeue 的健康 session。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:raced", category="transient")
+            _seed_fragment(root, "claude:raced")
+            _park(root, "claude:healthy", category="transient")
+            _seed_fragment(root, "claude:healthy")
+
+            def concurrent_promote() -> None:
+                processing.append_state(
+                    root, session_key="claude:raced", state="promoted",
+                    now="2026-07-10T00:30:00Z", config_hash="cfg-hash",
+                )
+
+            summary = requeue.requeue(
+                root, all_parked=True, now="2026-07-10T01:00:00Z",
+                _after_snapshot=concurrent_promote,
+            )
+
+            self.assertEqual(
+                [entry["session_key"] for entry in summary["requeued"]],
+                ["claude:healthy"],
+            )
+            self.assertEqual(processing.state_of(root, "claude:healthy"), "split")
+            self.assertEqual(processing.state_of(root, "claude:raced"), "promoted")
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:raced", "reason": "promoted"}],
+            )
+
+
 class RequeueCliTests(unittest.TestCase):
     def _run_cli(self, argv: list[str]) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

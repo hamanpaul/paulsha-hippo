@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,39 +42,46 @@ def resolve_backend_argv(argv: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- init
 
-def _write_if_absent(path: Path, content: str, *, force: bool = False) -> bool:
-    if path.exists() and not force:
-        return False
+def _stage_temp(path: Path, content: str) -> str:
+    """把 content 寫入 path 同目錄的 fsync 過暫存檔，回傳暫存檔路徑。
+
+    呼叫端稍後以 `os.replace` 一次性 commit（同檔案系統上為原子操作，讀者永不會
+    看到半寫入的設定檔）。同目錄確保 replace 不跨 filesystem。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return True
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    return tmp
 
 
 def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
              api_key_env: str | None, model: str | None, assume_yes: bool) -> int:
-    """產生 ~/.config/paulsha-hippo/config.yaml 與 atomizer override（backend preset）。"""
+    """產生 ~/.config/paulsha-hippo/config.yaml 與 atomizer override（backend preset）。
+
+    G3「先驗證再選路」：所有 backend 參數與 executable 驗證、config／override 完整
+    內容一律「在動任何檔案之前」完成；任一驗證失敗即回非零，絕不建立或修改任一
+    設定檔——避免留下「宣告 claude-headless 卻缺 override」的半初始化不一致設定，
+    使後續 doctor/dream 失敗或誤 park。通過後才以暫存檔＋atomic replace 一次性提交。
+    """
     if backend not in _BACKENDS:
         print(f"init: 不支援的 backend: {backend}（可選 {', '.join(_BACKENDS)}）", file=sys.stderr)
         return 2
     root = memory_root or str(paths.memory_root())
 
-    cfg_dir = paths.hippo_config_root()
-    cfg = cfg_dir / "config.yaml"
-    wrote_cfg = _write_if_absent(
-        cfg,
-        (
-            f"memory_root: {root}\n"
-            "distiller:\n"
-            f"  backend: {backend}\n"
-            + (f"  base_url: {base_url}\n" if base_url else "")
-            + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
-            + (f"  model: {model}\n" if model else "")
-        ),
-        force=assume_yes and not cfg.exists(),
+    # --- 先驗證＋生成完整內容（純字串，不碰檔案系統） ---
+    cfg_body = (
+        f"memory_root: {root}\n"
+        "distiller:\n"
+        f"  backend: {backend}\n"
+        + (f"  base_url: {base_url}\n" if base_url else "")
+        + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
+        + (f"  model: {model}\n" if model else "")
     )
 
     # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）
-    override = paths.config_path("atomizer.override.yaml")
     if backend == "claude-headless":
         try:
             argv = resolve_backend_argv(["claude", "-p"])
@@ -81,7 +89,7 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
             print(f"init: {exc}（請先安裝 claude CLI，或改用 --backend openai-compatible/custom-argv）",
                   file=sys.stderr)
             return 2
-        override_body = (
+        override_body: str | None = (
             "schema_version: \"1\"\n"
             "agent_exec:\n"
             "  command:\n"
@@ -102,15 +110,47 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
         )
     else:  # custom-argv：不動 override（沿 atomizer.yaml 或既有 override）
         override_body = None
-    wrote_override = False
-    if override_body is not None:
-        wrote_override = _write_if_absent(override, override_body)
+
+    # --- 驗證全過；以暫存檔全數落地後，再 atomic replace 一次性提交 ---
+    # 既有 config/override 刻意不覆寫（保留使用者設定）；未存在者才 stage。
+    # 先把所有暫存檔寫完（含 fsync）再逐一 os.replace——失敗鏈全數回復到「這些新檔
+    # 都不存在」的乾淨狀態（stage 中途失敗清暫存檔；replace 中途失敗連已 commit 的
+    # 新檔一併 unlink），杜絕「宣告 claude-headless 卻缺 override」的半初始化殘留。
+    cfg = paths.hippo_config_root() / "config.yaml"
+    override = paths.config_path("atomizer.override.yaml")
+    to_write: list[tuple[Path, str]] = []
+    if not cfg.exists():
+        to_write.append((cfg, cfg_body))
+    if override_body is not None and not override.exists():
+        to_write.append((override, override_body))
+
+    staged: list[tuple[str, Path]] = []
+    committed: set[Path] = set()
+    try:
+        for dst, body in to_write:
+            staged.append((_stage_temp(dst, body), dst))
+        for tmp, dst in staged:
+            os.replace(tmp, dst)
+            committed.add(dst)
+    except BaseException:
+        for dst in committed:  # 回復新建立的檔案（原本不存在）
+            try:
+                os.unlink(dst)
+            except OSError:
+                pass
+        raise
+    finally:
+        for tmp, _ in staged:  # 清掉尚未 os.replace 的暫存檔（已 replace 者 unlink 無害失敗）
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     print(f"memory_root: {root}")
     print(f"distiller backend: {backend}")
-    print(f"config: {cfg}{'（既存，未覆寫）' if not wrote_cfg and cfg.exists() else ''}")
+    print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
     if override_body is not None:
-        print(f"atomizer override: {override}{'（既存，未覆寫）' if not wrote_override else ''}")
+        print(f"atomizer override: {override}{'' if override in committed else '（既存，未覆寫）'}")
     print("下一步：hippo install hooks && hippo install service --enable")
     return 0
 

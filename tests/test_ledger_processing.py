@@ -180,6 +180,112 @@ class TestParkedState(unittest.TestCase):
             self.assertEqual(event["requeue_reason"], "backend fixed")
 
 
+class TestTransitionStateAtomic(unittest.TestCase):
+    """條件式原子轉移：整段 read-check-write 持同一把 exclusive lock。
+
+    守門一律以「持鎖重讀後 fold」為準，不信任呼叫端快照——攔下 parked→split 的
+    read-check-write race（快照後被 promote/park 的錯誤復活、較舊 ts 的 false-success）。
+    """
+
+    def _park(self, root: Path, key: str, *, now: str) -> None:
+        processing.append_state(
+            root, session_key=key, state="parked", now=now, config_hash="cfg",
+            failure_category="transient", attempts=6, cache_key="", error="boom",
+        )
+
+    def test_transition_appends_when_current_state_expected(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._park(root, "claude:s1", now="2026-07-10T00:00:00Z")
+            ok, reason = processing.transition_state_atomic(
+                root, session_key="claude:s1", expected_states=("parked",),
+                state="split", now="2026-07-10T01:00:00Z", config_hash="cfg",
+                requeued_from="parked", requeue_reason="fixed",
+            )
+            self.assertEqual((ok, reason), (True, ""))
+            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            event = processing.read_events(root)[-1]
+            self.assertEqual(event["state"], "split")
+            self.assertEqual(event["requeued_from"], "parked")
+            self.assertEqual(event["requeue_reason"], "fixed")
+
+    def test_transition_equal_timestamp_wins_via_append_order(self):
+        # now == 最新事件 ts：後追加者（index 較大）在 fold 的 (ts, index) 排序中勝出，
+        # 屬合法轉移；只有『嚴格較舊』才是 stale。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._park(root, "claude:s1", now="2026-07-10T00:00:00Z")
+            ok, reason = processing.transition_state_atomic(
+                root, session_key="claude:s1", expected_states=("parked",),
+                state="split", now="2026-07-10T00:00:00Z", config_hash="cfg",
+            )
+            self.assertEqual((ok, reason), (True, ""))
+            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+
+    def test_transition_refuses_when_state_changed_after_snapshot(self):
+        # 併發 writer 在（呼叫端）快照後已 promote：轉移必須以持鎖重讀為準，
+        # 拒絕而非把已 promote 的 session 錯誤復活成 split。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._park(root, "claude:s1", now="2026-07-10T00:00:00Z")
+            processing.append_state(
+                root, session_key="claude:s1", state="promoted",
+                now="2026-07-10T00:30:00Z", config_hash="cfg",
+            )
+            ok, reason = processing.transition_state_atomic(
+                root, session_key="claude:s1", expected_states=("parked",),
+                state="split", now="2026-07-10T01:00:00Z", config_hash="cfg",
+            )
+            self.assertEqual((ok, reason), (False, "promoted"))
+            self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
+            # 拒絕分支不得寫入任何 split 事件
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_transition_refuses_stale_timestamp(self):
+        # 較舊 `now`：即便目前狀態仍是 parked，較舊 ts 不會贏得 ts 排序的 fold，
+        # append 會被既有 parked 事件遮蔽、狀態實際不變——必須拒絕（否則 false-success）。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._park(root, "claude:s1", now="2026-07-10T00:00:00Z")
+            ok, reason = processing.transition_state_atomic(
+                root, session_key="claude:s1", expected_states=("parked",),
+                state="split", now="2026-07-09T00:00:00Z", config_hash="cfg",
+            )
+            self.assertEqual((ok, reason), (False, "stale-timestamp"))
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            # 拒絕在寫入之前：ledger 不得出現 split 事件
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_transition_refuses_unknown_session(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok, reason = processing.transition_state_atomic(
+                root, session_key="claude:ghost", expected_states=("parked",),
+                state="split", now="2026-07-10T01:00:00Z", config_hash="cfg",
+            )
+            self.assertEqual((ok, reason), (False, "unknown session"))
+            self.assertEqual(processing.read_events(root), [])
+
+    def test_transition_validates_target_state(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                processing.transition_state_atomic(
+                    root, session_key="claude:s1", expected_states=("parked",),
+                    state="bogus", now="2026-07-10T01:00:00Z", config_hash="cfg",
+                )
+            with self.assertRaises(ValueError):
+                # parked target 需已知 failure_category（比照 append_state）
+                processing.transition_state_atomic(
+                    root, session_key="claude:s1", expected_states=("split",),
+                    state="parked", now="2026-07-10T01:00:00Z", config_hash="cfg",
+                )
+
+
 class TestSanitizeErrorText(unittest.TestCase):
     def test_truncates_to_limit(self):
         self.assertEqual(len(processing.sanitize_error_text("x" * 2000)), 500)

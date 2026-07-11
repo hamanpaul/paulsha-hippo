@@ -56,13 +56,114 @@ class InitTests(unittest.TestCase):
                     base_url=None, api_key_env=None, model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 2)
+            # blocking：驗證失敗前不得寫入任一設定檔——config 與 override 皆不存在，
+            # 否則會留下「宣告 claude-headless 卻缺 override」的半初始化不一致設定。
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
             self.assertFalse(override.exists())
+            cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
+            self.assertFalse(cfg.exists())
 
     def test_init_openai_compatible_requires_base_url(self):
         rc = ops.run_init(memory_root=None, backend="openai-compatible",
                           base_url=None, api_key_env=None, model=None, assume_yes=True)
         self.assertEqual(rc, 2)
+
+    def test_init_openai_missing_base_url_writes_no_files(self):
+        # 驗證失敗（openai-compatible 缺 --base-url）前不得建立 config/override。
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env):
+                rc = ops.run_init(
+                    memory_root=None, backend="openai-compatible",
+                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                )
+            self.assertEqual(rc, 2)
+            self.assertFalse((Path(tmp) / "hippo-cfg" / "config.yaml").exists())
+            self.assertFalse(
+                (Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml").exists()
+            )
+
+    def test_init_backend_missing_keeps_existing_config_unmodified(self):
+        # 既有 config 在驗證失敗時必須維持原內容，不得被半初始化寫入污染。
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
+            cfg.parent.mkdir(parents=True, exist_ok=True)
+            cfg.write_text("memory_root: /keep/me\ndistiller:\n  backend: custom-argv\n",
+                           encoding="utf-8")
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops.shutil, "which", return_value=None):
+                rc = ops.run_init(
+                    memory_root=None, backend="claude-headless",
+                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                )
+            self.assertEqual(rc, 2)
+            self.assertEqual(cfg.read_text(encoding="utf-8"),
+                             "memory_root: /keep/me\ndistiller:\n  backend: custom-argv\n")
+
+    def test_init_claude_headless_commits_config_and_override_atomically(self):
+        # 驗證全過才落地：config 與 override 都寫入，且不殘留暫存檔（.tmp）。
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
+                rc = ops.run_init(
+                    memory_root=None, backend="claude-headless",
+                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                )
+            self.assertEqual(rc, 0)
+            cfg_dir = Path(tmp) / "hippo-cfg"
+            self.assertTrue((cfg_dir / "config.yaml").is_file())
+            override_dir = Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+            self.assertTrue((override_dir / "atomizer.override.yaml").is_file())
+            leftover = list(cfg_dir.glob("*.tmp")) + list(override_dir.glob("*.tmp"))
+            self.assertEqual(leftover, [])
+
+    def test_init_rolls_back_first_file_when_second_commit_fails(self):
+        # 硬化：驗證全過但 commit 第二個檔（override）時 IO 失敗——第一個已 commit 的
+        # 新檔（config）必須回復到不存在，且不殘留暫存檔，杜絕半初始化殘留。
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            real_replace = os.replace
+            calls = {"n": 0}
+
+            def flaky_replace(src, dst):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("disk gone")
+                return real_replace(src, dst)
+
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"), \
+                 mock.patch.object(ops.os, "replace", side_effect=flaky_replace):
+                with self.assertRaises(OSError):
+                    ops.run_init(
+                        memory_root=None, backend="claude-headless",
+                        base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    )
+            cfg_dir = Path(tmp) / "hippo-cfg"
+            override_dir = Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+            self.assertFalse((cfg_dir / "config.yaml").exists())
+            self.assertFalse((override_dir / "atomizer.override.yaml").exists())
+            leftover = (list(cfg_dir.glob("*.tmp")) if cfg_dir.exists() else []) + \
+                       (list(override_dir.glob("*.tmp")) if override_dir.exists() else [])
+            self.assertEqual(leftover, [])
 
     def test_init_never_overwrites_existing_config(self):
         with TemporaryDirectory() as tmp:

@@ -17,7 +17,7 @@ source_agent／source_session 相符。gate 不過 → 維持 parked、計入 sk
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .atomizer import pipeline as atomizer_pipeline
 from .ledger import processing
@@ -60,7 +60,19 @@ def requeue(
     all_parked: bool = False,
     now: str,
     reason: str = "",
+    _after_snapshot: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    """把 parked session 送回 split。
+
+    進入時的 fold 快照只用來「挑選目標」與跑檔案系統 fragment 閘（不需原子性）；
+    真正的 parked→split 轉移一律經 `processing.transition_state_atomic` 於同一把
+    exclusive lock 內「重讀＋重新確認狀態＋拒絕 stale ts＋fold 後驗證」原子提交——
+    快照後被另一 writer promote/park、或帶較舊 `now` 的呼叫，都會被拒絕並計入
+    skipped，而非錯誤復活已 promote 的 session 或回報未生效的 false-success。
+
+    `_after_snapshot` 為測試接縫（併發回歸用）：於取得快照後、任何轉移前觸發一次，
+    讓測試注入「快照後才發生」的併發寫入，驗證轉移確實以持鎖重讀為準而非信任快照。
+    """
     events = processing.fold_events(memory_root)
     if all_parked:
         targets = sorted(
@@ -68,6 +80,9 @@ def requeue(
         )
     else:
         targets = [session_key] if session_key else []
+
+    if _after_snapshot is not None:
+        _after_snapshot()
 
     requeued: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -83,15 +98,22 @@ def requeue(
             # 永久卡非終態（或錯 promote 別 session）；維持 parked。
             skipped.append({"session_key": key, "reason": "no-valid-fragments"})
             continue
-        processing.append_state(
+        ok, refusal = processing.transition_state_atomic(
             memory_root,
             session_key=key,
+            expected_states=("parked",),
             state="split",
             now=now,
             config_hash=str(event.get("atomizer_config_hash", "")),
             requeued_from="parked",
             requeue_reason=reason,
         )
+        if not ok:
+            # 併發 writer 在快照後改了狀態（refusal=目前狀態），或 stale `now`
+            # 不會贏得 fold（refusal="stale-timestamp"）：拒絕而非復活已 promote
+            # 的 session、或回報未實際生效的 split。
+            skipped.append({"session_key": key, "reason": refusal})
+            continue
         requeued.append(
             {
                 "session_key": key,
