@@ -1259,3 +1259,26 @@ class InitBackendChoicesTests(unittest.TestCase):
         from paulsha_hippo.cli import _build_parser
         with self.assertRaises(SystemExit):
             _build_parser().parse_args(["init", "--backend", "definitely-not-a-backend"])
+
+
+class SuperviseCliWiringTests(unittest.TestCase):
+    def test_supervise_cli_forwards_once_and_overrides(self):
+        from paulsha_hippo import cli as memory_cli
+        captured: dict = {}
+
+        def fake_supervise(*, interval, extra_argv=None, once=False, runner=None):
+            captured.update(interval=interval, extra_argv=list(extra_argv or []), once=once)
+            return 0
+
+        with mock.patch.object(ops, "run_dream_supervise", side_effect=fake_supervise):
+            rc = memory_cli.main([
+                "dream", "supervise", "--interval", "5", "--once",
+                "--memory-root", "/mr", "--max-load", "99.5",
+                "--promoter", "identity", "--agent-command", "python x.py",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured["once"])
+        self.assertEqual(captured["interval"], 5)
+        self.assertEqual(captured["extra_argv"], [
+            "--memory-root", "/mr", "--max-load", "99.5",
+            "--promoter", "identity", "--agent-command", "python x.py"])
