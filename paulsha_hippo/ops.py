@@ -5,6 +5,7 @@ fallback 指引而非硬錯（G3「先驗證再選路」）。
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -55,6 +56,82 @@ def _stage_temp(path: Path, content: str) -> str:
         f.flush()
         os.fsync(f.fileno())
     return tmp
+
+
+_INIT_LOCK_NAME = ".init.lock"
+
+
+def _init_lock_path() -> Path:
+    """init transaction lock 固定路徑（hippo config 目錄）。
+
+    同一 config 目標的並行 init 以此 rendezvous inode 互斥；lock 檔本身不含資料、
+    永不 unlink（unlink 會破壞互斥語意）。"""
+    return paths.hippo_config_root() / _INIT_LOCK_NAME
+
+
+def _commit_init_atomic(cfg: Path, cfg_body: str,
+                        override: Path, override_body: str | None) -> set[Path]:
+    """持 transaction lock 執行 init 檔案交易，回傳本交易新寫入的路徑集合。
+
+    #15 Codex high（併發／rollback 危害）三層防護：
+
+    1. 同一把 `fcntl.flock`（固定鎖檔 `<hippo_config_root>/.init.lock`）涵蓋
+       「存在性檢查 → stage → commit → rollback」全程，讓並行 init 互斥——杜絕兩個
+       init 各自 TOCTOU 通過存在性檢查後互相覆寫、或誤刪對方剛落地的有效 config。
+    2. 既有 config/override 刻意不覆寫（保留使用者設定）；僅「交易前不存在」者才
+       stage——已存在路徑（別人的 config）不入 to_write，rollback 全程不碰。
+    3. rollback 只移除「可證明由本交易建立、且自建立後未被替換」的檔案：每個 commit
+       落地當下記錄其 `(st_dev, st_ino)` 指紋，rollback 時重新 stat，指紋相符才 unlink。
+       若並行 writer 在本交易 commit 後替換了同路徑（寫入自己的有效 config），指紋不符
+       → 不刪，避免盲刪對方有效設定、留下 config/override 不一致——第一個 commit 已成功、
+       第二個失敗時，還原成交易前狀態（本交易新建者移除、既存／被替換者不動）而非盲刪。
+    """
+    lock_path = _init_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # --- 存在性檢查（持鎖，與 commit/rollback 同一臨界區）：僅交易前不存在者才 stage ---
+        to_write: list[tuple[Path, str]] = []
+        if not cfg.exists():
+            to_write.append((cfg, cfg_body))
+        if override_body is not None and not override.exists():
+            to_write.append((override, override_body))
+
+        staged: list[tuple[str, Path]] = []
+        # committed: dst -> 本交易 os.replace 落地當下的 (st_dev, st_ino) 指紋
+        committed: dict[Path, tuple[int, int]] = {}
+        try:
+            for dst, body in to_write:
+                staged.append((_stage_temp(dst, body), dst))
+            for tmp, dst in staged:
+                os.replace(tmp, dst)
+                st = os.stat(dst)
+                committed[dst] = (st.st_dev, st.st_ino)
+        except BaseException:
+            # 只回復「本交易建立、且自落地後指紋未變（未被並行 writer 替換）」的檔案
+            for dst, fingerprint in committed.items():
+                try:
+                    st = os.stat(dst)
+                except OSError:
+                    continue
+                if (st.st_dev, st.st_ino) != fingerprint:
+                    continue  # 已被並行 writer 替換成別的有效 config——絕不 unlink
+                try:
+                    os.unlink(dst)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for tmp, _ in staged:  # 清掉尚未 os.replace 的暫存檔（已 replace 者 unlink 無害失敗）
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return set(committed)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
@@ -111,40 +188,14 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     else:  # custom-argv：不動 override（沿 atomizer.yaml 或既有 override）
         override_body = None
 
-    # --- 驗證全過；以暫存檔全數落地後，再 atomic replace 一次性提交 ---
-    # 既有 config/override 刻意不覆寫（保留使用者設定）；未存在者才 stage。
-    # 先把所有暫存檔寫完（含 fsync）再逐一 os.replace——失敗鏈全數回復到「這些新檔
-    # 都不存在」的乾淨狀態（stage 中途失敗清暫存檔；replace 中途失敗連已 commit 的
-    # 新檔一併 unlink），杜絕「宣告 claude-headless 卻缺 override」的半初始化殘留。
+    # --- 驗證全過；持 transaction lock 以暫存檔全數落地後，再 atomic replace 一次性提交 ---
+    # 既有 config/override 刻意不覆寫（保留使用者設定）；未存在者才 stage。併發／rollback
+    # 硬化（#15 Codex high）全數收斂於 `_commit_init_atomic`：存在性檢查→commit→rollback
+    # 全程互斥，rollback 以 inode 指紋只移除本交易新建且未被替換者，絕不誤刪並行 writer
+    # 剛落地的有效 config，杜絕「宣告 claude-headless 卻缺 override」的半初始化殘留。
     cfg = paths.hippo_config_root() / "config.yaml"
     override = paths.config_path("atomizer.override.yaml")
-    to_write: list[tuple[Path, str]] = []
-    if not cfg.exists():
-        to_write.append((cfg, cfg_body))
-    if override_body is not None and not override.exists():
-        to_write.append((override, override_body))
-
-    staged: list[tuple[str, Path]] = []
-    committed: set[Path] = set()
-    try:
-        for dst, body in to_write:
-            staged.append((_stage_temp(dst, body), dst))
-        for tmp, dst in staged:
-            os.replace(tmp, dst)
-            committed.add(dst)
-    except BaseException:
-        for dst in committed:  # 回復新建立的檔案（原本不存在）
-            try:
-                os.unlink(dst)
-            except OSError:
-                pass
-        raise
-    finally:
-        for tmp, _ in staged:  # 清掉尚未 os.replace 的暫存檔（已 replace 者 unlink 無害失敗）
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    committed = _commit_init_atomic(cfg, cfg_body, override, override_body)
 
     print(f"memory_root: {root}")
     print(f"distiller backend: {backend}")

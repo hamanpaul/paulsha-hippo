@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import multiprocessing
 import os
 import sys
 import threading
@@ -16,6 +17,133 @@ from unittest import mock
 
 from paulsha_hippo import ops, paths
 from paulsha_hippo.atomizer.agent_exec import AgentExecError, HttpAgentClient
+
+
+def _concurrent_init_worker(env, fail_second_replace, result_path):
+    """fork 子進程 entrypoint：設 env、可注入第二次 os.replace 失敗，跑 run_init。
+
+    兩個此 worker 並行驗證 init transaction lock（#15 Codex high）：第二次 commit
+    失敗的交易 rollback 不得誤刪另一交易寫入的有效 config、不留 config/override
+    不一致。結果（`ok:<rc>` 或 `err:<type>`）寫入 result_path 供父進程觀察。"""
+    import os as _os
+    from unittest import mock as _mock
+
+    from paulsha_hippo import ops as _ops
+
+    _os.environ.update(env)
+    real_replace = _os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if fail_second_replace and calls["n"] == 2:
+            raise OSError("injected second-replace failure (concurrent init)")
+        return real_replace(src, dst)
+
+    try:
+        with _mock.patch.object(_ops.shutil, "which", return_value="/fake/bin/claude"), \
+             _mock.patch.object(_ops.os, "replace", side_effect=flaky):
+            rc = _ops.run_init(
+                memory_root=None, backend="claude-headless",
+                base_url=None, api_key_env=None, model=None, assume_yes=True,
+            )
+        outcome = f"ok:{rc}"
+    except BaseException as exc:  # noqa: BLE001 — 交易失敗屬預期，記錄供父進程斷言
+        outcome = f"err:{type(exc).__name__}"
+    with open(result_path, "w", encoding="utf-8") as fh:
+        fh.write(outcome)
+
+
+class InitConcurrencyTests(unittest.TestCase):
+    """#15 Codex high：init transaction 併發／rollback 危害硬化。
+
+    存在性檢查→stage→commit→rollback 全程受同一把 fcntl.flock 交易鎖保護，且
+    rollback 只移除「可證明由本交易建立、且自建立後未被替換」的檔案——第二次
+    commit 失敗時不得盲刪已被並行 writer 替換的有效 config、不留 config/override
+    不一致。"""
+
+    def _env(self, tmp):
+        return {
+            "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+            "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+            "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+        }
+
+    def _paths(self, tmp):
+        cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
+        override = (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                    / "atomizer.override.yaml")
+        return cfg, override
+
+    def test_rollback_spares_config_replaced_by_concurrent_writer(self):
+        # 決定性回歸（抓誤刪）：本交易 commit config 後、第二次 commit（override）失敗前，
+        # 模擬並行交易以自己的有效 config 替換同一路徑（inode 改變）。盲刪版 rollback 會
+        # unlink 該路徑而誤刪對方有效 config；硬化後 rollback 以 inode 佐證只移除本交易
+        # 所寫且未被替換者，對方 config 應完好保留。
+        with TemporaryDirectory() as tmp:
+            cfg, override = self._paths(tmp)
+            foreign = ("memory_root: /foreign/valid\n"
+                       "distiller:\n  backend: custom-argv\n")
+            real_replace = os.replace
+            calls = {"n": 0}
+
+            def orchestrated_replace(src, dst):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    # 我方 config 已 commit 且被指紋化；此刻並行交易以有效 config 替換之
+                    cfg.parent.mkdir(parents=True, exist_ok=True)
+                    ftmp = cfg.parent / ".foreign.tmp"
+                    ftmp.write_text(foreign, encoding="utf-8")
+                    real_replace(str(ftmp), str(cfg))
+                    raise OSError("override commit fails after concurrent replace")
+                return real_replace(src, dst)
+
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"), \
+                 mock.patch.object(ops.os, "replace", side_effect=orchestrated_replace):
+                with self.assertRaises(OSError):
+                    ops.run_init(
+                        memory_root=None, backend="claude-headless",
+                        base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    )
+            # 併發交易寫入的有效 config 未被本交易 rollback 誤刪
+            self.assertTrue(cfg.exists(), "並行交易寫入的有效 config 不得被 rollback 誤刪")
+            self.assertEqual(cfg.read_text(encoding="utf-8"), foreign)
+            # 不殘留暫存檔（override 端本交易的 staged tmp 由 finally 清掉）
+            self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
+            if override.parent.exists():
+                self.assertEqual(list(override.parent.glob("*.tmp")), [])
+
+    def test_concurrent_init_second_commit_failure_keeps_valid_config(self):
+        # 併發兩個 init（fork）：A 注入第二次 commit 失敗 → 其交易 rollback；B 正常寫入。
+        # transaction lock 序列化兩者，最終狀態必一致：有效 config 存在且與 override
+        # 一致，A 的 rollback 不得刪掉 B 寫入的有效 config、不留半初始化。
+        ctx = multiprocessing.get_context("fork")
+        with TemporaryDirectory() as tmp:
+            env = self._env(tmp)
+            cfg, override = self._paths(tmp)
+            ra = Path(tmp) / "result_a.txt"
+            rb = Path(tmp) / "result_b.txt"
+            pa = ctx.Process(target=_concurrent_init_worker, args=(env, True, str(ra)))
+            pb = ctx.Process(target=_concurrent_init_worker, args=(env, False, str(rb)))
+            pa.start()
+            pb.start()
+            pa.join(30)
+            pb.join(30)
+            self.assertFalse(pa.is_alive(), "worker A 逾時未結束")
+            self.assertFalse(pb.is_alive(), "worker B 逾時未結束")
+            # 不變量：有效 config 存在（B 寫入），未被 A 的 rollback 誤刪
+            self.assertTrue(cfg.exists(), "有效 config 不得被並行交易 rollback 誤刪")
+            self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
+            # 一致性：config 與 override 皆存在（B 成功寫入兩者），無「config 有／override 缺」
+            self.assertTrue(override.exists(), "不得留 config/override 不一致（override 缺）")
+            self.assertIn("- /fake/bin/claude", override.read_text(encoding="utf-8"))
+            # 不殘留暫存檔
+            self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
+            self.assertEqual(
+                list(override.parent.glob("*.tmp")) if override.parent.exists() else [],
+                [],
+            )
 
 
 class InitTests(unittest.TestCase):
