@@ -8,6 +8,7 @@ import logging
 import re
 import shutil
 import threading
+import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -128,6 +129,25 @@ def idempotency_key(session: NormalizedSession) -> str:
 
 def safe_key(key: str) -> str:
     return re.sub(r"[\\/]+", "__", key.replace(":", "__"))
+
+
+_LOCK_SHARD_COUNT = 64
+_SHARD_LOCK_NAME_RE = re.compile(r"^lock_shard_[0-3][0-9a-f]\.lock$")
+
+
+def shard_lock_path(memory_root: Path, key: str) -> Path:
+    """契約 4：importer per-key lock → 固定 64 個 hash shard。
+
+    檔名 ``lock_shard_{h:02x}.lock``，``h = crc32(safe_key(key)) % 64``。
+    取代 per-key 無界 lock 檔（#19）：碰撞只降低並行度，不影響互斥正確性。
+    """
+    h = zlib.crc32(safe_key(key).encode("utf-8")) % _LOCK_SHARD_COUNT
+    return Path(memory_root) / "runtime" / "locks" / f"lock_shard_{h:02x}.lock"
+
+
+def is_shard_lock_name(name: str) -> bool:
+    """檔名是否為現行 shard lock（lock_shard_00.lock ～ lock_shard_3f.lock）。"""
+    return bool(_SHARD_LOCK_NAME_RE.fullmatch(name))
 
 
 def _date_parts(session: NormalizedSession) -> tuple[str, str, str]:
