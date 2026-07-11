@@ -6,7 +6,7 @@ import re
 from dataclasses import replace
 
 from . import llm_output, prompt, slice_frontmatter
-from .agent_exec import AgentClient, AgentExecError, CachingAgentClient
+from .agent_exec import AgentClient, AgentExecError, AgentUnavailableError, CachingAgentClient
 from .config import AtomizerConfig, is_safe_path_component
 from .promoter import Promoter
 from .slice_frontmatter import Slice
@@ -16,7 +16,22 @@ _LOG = logging.getLogger("paulsha_hippo.atomizer")
 
 
 class PromoteError(Exception):
-    """Raised when session-level promotion cannot complete safely."""
+    """Raised when session-level promotion cannot complete safely.
+
+    category ∈ {"backend_unavailable", "transient", "invalid_output"}（#15 失敗分類）。
+    """
+
+    def __init__(self, message: str, *, category: str = "invalid_output") -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _failure_category(exc: Exception) -> str:
+    if isinstance(exc, AgentUnavailableError):
+        return "backend_unavailable"
+    if isinstance(exc, AgentExecError):
+        return "transient"
+    return "invalid_output"
 
 
 class LLMPromoter(Promoter):
@@ -113,7 +128,9 @@ class LLMPromoter(Promoter):
                 raw = self._agent.run(built_prompt)
             proposals = llm_output.parse(raw, self._projects)
         except (AgentExecError, llm_output.LlmOutputError) as exc:
-            raise PromoteError(f"llm promote failed: {exc}") from exc
+            raise PromoteError(
+                f"llm promote failed: {exc}", category=_failure_category(exc)
+            ) from exc
 
         slices: list[Slice] = []
         for proposal in proposals:

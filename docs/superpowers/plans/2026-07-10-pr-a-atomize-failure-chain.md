@@ -31,6 +31,11 @@
 3. **global dream lock**：`<memory_root>/runtime/locks/dream.lock` 固定路徑；PR-A 於 dream run 入口 `fcntl.flock(LOCK_EX|LOCK_NB)` 整輪持有，取不到→log 後 exit 0；PR-C doctor 引用同一路徑報告持鎖狀態（本 plan 以 `paulsha_hippo/dream/lock.py:dream_lock_path()` 匯出該路徑供 PR-C import）。
 4. **CLI 子命令**一律走 `paulsha_hippo/cli.py` 的 `memory_subparsers.add_parser` 既有模式：PR-A 加 `requeue`（`<session-key>|--all-parked`）。
 5. 恢復序列／收口不在本 plan 內（workflow 主編排執行，spec §4/§5）。lock sharding（PR-C）、preset registry 全量（PR-D）不做。
+6. **doctor backend probe 兩檔行為**（review 後偏離 Task 9 原設計的落地契約——PR-C/PR-D 呼叫 `ops.run_doctor()` 前必讀）：`_probe_backend_service_effective(*, live: bool = False)` 分兩檔——
+   - **`live=False`（裸 `hippo doctor` 預設）**：純解析檢查（bare argv 以 service-effective PATH `shutil.which`、絕對路徑 `is_file`+`X_OK`；openai-compatible 只驗 config 可載入、不打端點）。快速、免費、無副作用，**不會真實喚起 backend、不產生 LLM/API 成本**。
+   - **`live=True`**：對 configured backend 真送 bounded smoke prompt（argv 真實 subprocess exec、60s timeout；openai-compatible 真 HTTP 打 `/v1/chat/completions`），fail-closed。開啟途徑：`hippo doctor --fix-backend`（spec §4.1 恢復序列 gate「實際喚起 backend 一次」）、`--probe-live`、env `HIPPO_DOCTOR_LIVE_PROBE=1`。
+   - **對 PR-C 的含義**：`DoctorRuntimeHealthTest` 直呼 `ops.run_doctor(proc_root=...)` 不 mock probe——預設 gate 關閉下只做本地解析檢查，不會每次真打 LLM；但在無 backend 的 CI 上解析檢查仍可能 FAIL → 沿用「不斷言 return code」的既有寫法，或 mock `_probe_backend_service_effective`。
+   - **對 PR-D 的含義**：PR-D plan 對本函式「真實呼叫 load_config 並 shutil.which 解析」的理解對應 `live=False` 檔；其 preset-matrix 測試對 `_probe_backend_service_effective` 的 mock 手法照舊有效（函式名不變，僅新增 keyword-only `live` 參數，`run_doctor` 一律以 `live=` kwarg 呼叫）。
 
 ## 既有行為反轉清單（spec §3.1.9「測試反轉」，實作者須知）
 

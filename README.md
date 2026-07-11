@@ -12,7 +12,7 @@
     pipx install git+https://github.com/hamanpaul/paulsha-hippo
     hippo init                          # 預設：~/.agents/memory + claude-headless（零 key 設定）
     hippo install hooks && hippo install service --enable
-    hippo doctor                        # 健檢：路徑契約/hooks/服務/backend
+    hippo doctor                        # 健檢：路徑契約/hooks/服務/backend（--fix-backend 冪等遷移裸命令為絕對路徑；預設解析級檢查，--probe-live 才真實喚起 backend smoke probe）
     hippo dream run --dry-run --memory-root ~/.agents/memory
     hippo wakeup --project <slug>
 
@@ -24,7 +24,8 @@
 
 ## Usage
 
-日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo search`／`hippo index verify`／`hippo replay`／`hippo bundle`。
+日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo search`／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）。
+蒸餾失敗顯性化：backend 不可用／重試超限的 session 進 `parked`（證據在 `runtime/queue/_failed/`），修復後 `hippo requeue` 恢復；`dream run` 以 global lock 保證單一 writer，並發第二實例記 log 後跳過。
 
 設定：單一檔 `~/.config/paulsha-hippo/config.yaml` + `HIPPO_*` env 覆寫；密鑰一律 `secret.env`（0600）。
 Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。

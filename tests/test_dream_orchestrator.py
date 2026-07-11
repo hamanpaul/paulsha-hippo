@@ -5,12 +5,31 @@ These tests assert the *plan-shaped* contract for Task 4.
 
 from __future__ import annotations
 
+import json
+import os
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from paulsha_hippo.dream import orchestrator
 from paulsha_hippo.ledger import dream
+
+
+@contextmanager
+def _global_disable_rules_override(rule_ids):
+    """模擬使用者 policy.override.yaml 的全域 disable_rules 生效（Codex 複驗情境）。"""
+    with TemporaryDirectory() as tmp:
+        config_dir = Path(tmp) / ".config" / "paulshaclaw"
+        config_dir.mkdir(parents=True)
+        (config_dir / "policy.override.yaml").write_text(
+            json.dumps({"disable_rules": list(rule_ids)}), encoding="utf-8"
+        )
+        with mock.patch.dict(
+            os.environ, {"HOME": str(tmp), "PSC_CONFIG_ROOT": str(config_dir)}
+        ):
+            yield
 
 
 class TestDreamOrchestrator(unittest.TestCase):
@@ -66,7 +85,10 @@ class TestDreamOrchestrator(unittest.TestCase):
 
             self.assertEqual(calls, ["a", "j"])
             record = dream.last_run(root)
-            self.assertEqual(record["passes"]["atomize"], {"error": "RuntimeError"})
+            self.assertEqual(
+                record["passes"]["atomize"],
+                {"error": "RuntimeError", "error_message": "boom", "errno": None},
+            )
             self.assertEqual(record["errors"], ["atomize:RuntimeError"])
 
     def test_warnings_produce_partial(self):
@@ -175,26 +197,51 @@ class TestDreamOrchestrator(unittest.TestCase):
             self.assertNotIn("warnings", source_summary)
             self.assertNotIn("warnings_total", source_summary)
 
-    def test_failure_record_redacts_exception_message(self):
+    def test_failure_record_keeps_bounded_error_message_and_errno(self):
         def atomize_fn():
-            raise RuntimeError("raw prompt leaked")
+            raise OSError(36, "File name too long: " + "x" * 600)
 
         def janitor_fn():
             return {"summary": {"skipped": 0}, "warnings": []}
 
         with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
             record = orchestrator.run_dream(
-                root,
+                Path(tmpdir),
                 atomize_fn=atomize_fn,
                 janitor_fn=janitor_fn,
-                now="2026-06-02T00:00:00Z",
+                now="2026-07-10T00:00:00Z",
                 config_hash="cfg",
             )
 
-            rendered = str(record)
-            self.assertIn("RuntimeError", rendered)
-            self.assertNotIn("raw prompt leaked", rendered)
+            atomize = record["passes"]["atomize"]
+            self.assertEqual(atomize["error"], "OSError")
+            self.assertEqual(atomize["errno"], 36)
+            self.assertIn("File name too long", atomize["error_message"])
+            self.assertLessEqual(len(atomize["error_message"]), 500)
+            self.assertEqual(record["errors"], ["atomize:OSError"])
+
+    def test_errno_extracted_from_cause_chain(self):
+        def atomize_fn():
+            try:
+                raise OSError(2, "No such file or directory")
+            except OSError as exc:
+                raise RuntimeError("wrapper") from exc
+
+        def janitor_fn():
+            return {"summary": {"skipped": 0}, "warnings": []}
+
+        with TemporaryDirectory() as tmpdir:
+            record = orchestrator.run_dream(
+                Path(tmpdir),
+                atomize_fn=atomize_fn,
+                janitor_fn=janitor_fn,
+                now="2026-07-10T00:00:00Z",
+                config_hash="cfg",
+            )
+
+            atomize = record["passes"]["atomize"]
+            self.assertEqual(atomize["error"], "RuntimeError")
+            self.assertEqual(atomize["errno"], 2)
 
     def test_dry_run_writes_no_ledger(self):
         def atomize_fn():
@@ -234,6 +281,33 @@ class TestDreamOrchestrator(unittest.TestCase):
 
             self.assertEqual(record["status"], "partial")
             self.assertIn("indexed", record["passes"]["moc"])
+
+    def test_global_disable_rules_override_cannot_weaken_dream_ledger(self):
+        """Codex 複驗 blocking：override 全域 disable_rules 停用規則後，dream ledger
+        的 error_message／warnings 強制 scrub 不得弱化——credential 原文不得落
+        dream.jsonl。"""
+        secret_err = "ghp_" + "A1b2C3d4" * 5
+        secret_warn = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXBhcnQ"
+
+        def atomize_fn():
+            raise RuntimeError(f"HTTP 401: token {secret_err} rejected")
+
+        def janitor_fn():
+            return {"summary": {"skipped": 0},
+                    "warnings": [f"jwt observed: {secret_warn}"]}
+
+        with _global_disable_rules_override(["github_pat", "jwt"]):
+            with TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                orchestrator.run_dream(
+                    root, atomize_fn=atomize_fn, janitor_fn=janitor_fn,
+                    now="2026-07-10T00:00:00Z", config_hash="cfg",
+                )
+
+                blob = dream.dream_path(root).read_text(encoding="utf-8")
+                self.assertNotIn(secret_err, blob)
+                self.assertNotIn(secret_warn, blob)
+                self.assertIn("REDACTED", blob)
 
 
 if __name__ == "__main__":

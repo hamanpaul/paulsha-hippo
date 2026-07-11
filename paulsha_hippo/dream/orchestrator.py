@@ -13,13 +13,22 @@ from pathlib import Path
 from typing import Any, Callable
 
 from paulsha_hippo.ledger import dream as dream_ledger
+from paulsha_hippo.ledger import processing as processing_ledger
 
 _WARNINGS_RECORDED_MAX = 10
 _WARNING_TEXT_MAX_CHARS = 500
 
 
-def _error_category(exc: Exception) -> str:
-    return type(exc).__name__
+def _error_entry(exc: Exception) -> dict[str, Any]:
+    """#19 錯誤可見性：bounded 訊息（≤500、去敏）＋ errno，不再只存類別名。"""
+    errno_value = getattr(exc, "errno", None)
+    if errno_value is None and exc.__cause__ is not None:
+        errno_value = getattr(exc.__cause__, "errno", None)
+    return {
+        "error": type(exc).__name__,
+        "error_message": processing_ledger.sanitize_error_text(str(exc)),
+        "errno": errno_value if isinstance(errno_value, int) else None,
+    }
 
 
 def _run_pass(
@@ -31,9 +40,9 @@ def _run_pass(
     try:
         result = fn()
     except Exception as exc:  # noqa: BLE001 - orchestration boundary
-        category = _error_category(exc)
-        passes[name] = {"error": category}
-        errors.append(f"{name}:{category}")
+        entry = _error_entry(exc)
+        passes[name] = entry
+        errors.append(f"{name}:{entry['error']}")
         return False
 
     summary: dict[str, Any] = {}
@@ -48,8 +57,10 @@ def _run_pass(
 
     if isinstance(warnings, list) and warnings:
         summary = dict(summary)
+        # 警告會持久化進 dream ledger：與 error_message 同等去敏（secret redaction、
+        # fail-closed），不得留 credential 副本。
         summary["warnings"] = [
-            str(warning)[:_WARNING_TEXT_MAX_CHARS]
+            processing_ledger.sanitize_error_text(warning, limit=_WARNING_TEXT_MAX_CHARS)
             for warning in warnings[:_WARNINGS_RECORDED_MAX]
         ]
         summary["warnings_total"] = len(warnings)

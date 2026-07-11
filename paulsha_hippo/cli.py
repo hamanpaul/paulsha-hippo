@@ -64,6 +64,14 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.set_defaults(func=_ops_init)
 
     doctor_p = memory_subparsers.add_parser("doctor", help="健檢：路徑契約/hooks/服務/backend")
+    doctor_p.add_argument(
+        "--fix-backend", action="store_true",
+        help="冪等遷移：override 中 service-effective 解析不到的裸 backend 命令改寫為絕對路徑"
+             "（先備份）；隱含 --probe-live 以真實 smoke probe 驗證遷移結果")
+    doctor_p.add_argument(
+        "--probe-live", action="store_true",
+        help="對 configured backend 實際送一次 bounded smoke prompt（真實喚起，60s timeout、"
+             "可能產生 API 成本；亦可 HIPPO_DOCTOR_LIVE_PROBE=1）。預設僅做解析檢查")
     doctor_p.set_defaults(func=_ops_doctor)
 
     install_p = memory_subparsers.add_parser("install")
@@ -251,6 +259,19 @@ def _build_parser() -> argparse.ArgumentParser:
     usage_p.add_argument("--since", default=None)
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
+
+    requeue_p = memory_subparsers.add_parser(
+        "requeue", help="把 parked session 送回 split 重走 promote（#15 恢復路徑）"
+    )
+    requeue_p.add_argument("session_key", nargs="?", default=None,
+                           help="session key（如 claude:s1）；與 --all-parked 擇一")
+    requeue_p.add_argument("--all-parked", action="store_true",
+                           help="requeue 全部 parked sessions")
+    requeue_p.add_argument("--memory-root", required=True)
+    requeue_p.add_argument("--reason", default="",
+                           help="requeue 原因（記入 ledger requeue_reason）")
+    requeue_p.add_argument("--now", default=None)
+    requeue_p.set_defaults(func=_requeue)
 
     return parser
 
@@ -798,7 +819,10 @@ def _ops_init(args) -> int:
 def _ops_doctor(args) -> int:
     from paulsha_hippo import ops
 
-    return ops.run_doctor()
+    return ops.run_doctor(
+        fix_backend=getattr(args, "fix_backend", False),
+        live_probe=getattr(args, "probe_live", False),
+    )
 
 
 def _ops_install_hooks(args) -> int:
@@ -811,6 +835,44 @@ def _ops_install_service(args) -> int:
     from paulsha_hippo import ops
 
     return ops.run_install_service(enable=args.enable)
+
+
+def _requeue(args: argparse.Namespace) -> int:
+    from . import requeue as requeue_mod
+
+    if bool(args.session_key) == bool(args.all_parked):
+        print("error: 需指定 <session-key> 或 --all-parked（擇一）", file=sys.stderr)
+        return 2
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    summary = requeue_mod.requeue(
+        root,
+        session_key=args.session_key,
+        all_parked=args.all_parked,
+        now=now,
+        reason=args.reason,
+    )
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    # Codex 複驗 B2：無「有效且屬於該 session」fragment 的 parked session 被 gate
+    # 擋下（維持 parked）時必須非零 exit＋stderr 說明——早前 exit 0 會把「沒東西
+    # 可重走」誤報成功。有效 = pipeline `_read_fragment` 讀得動且 frontmatter 相符。
+    no_valid_entries = [
+        entry
+        for entry in summary["skipped"]
+        if entry.get("reason") == "no-valid-fragments"
+    ]
+    for entry in no_valid_entries:
+        print(
+            f"error: {entry['session_key']} 無有效 fragment（inbox 的 _slices 下"
+            "無 frontmatter 完整（project／source_session）且屬於該 session 的 "
+            "fragment 檔）——維持 parked 未 requeue；送回 split 會永久卡非終態",
+            file=sys.stderr,
+        )
+    if no_valid_entries:
+        return 1
+    if not summary["requeued"] and summary["skipped"]:
+        return 1
+    return 0
 
 
 def _dream_supervise(args) -> int:

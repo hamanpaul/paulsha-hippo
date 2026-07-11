@@ -11,6 +11,14 @@ class AgentExecError(Exception):
     """Raised when an agent subprocess cannot produce usable output."""
 
 
+class AgentUnavailableError(AgentExecError):
+    """backend executable 不存在／未設定（#15 分類：backend_unavailable，不重試）。"""
+
+
+class AgentTransientError(AgentExecError):
+    """timeout／non-zero exit／空輸出／端點不可達（#15 分類：transient，有限重試）。"""
+
+
 class AgentClient(ABC):
     @abstractmethod
     def run(self, prompt: str) -> str:
@@ -25,7 +33,7 @@ class AgentExecClient(AgentClient):
 
     def run(self, prompt: str) -> str:
         if not self._command:
-            raise AgentExecError("agent command not configured")
+            raise AgentUnavailableError("agent command not configured")
         try:
             completed = subprocess.run(
                 self._command,
@@ -39,13 +47,15 @@ class AgentExecClient(AgentClient):
                 env={**os.environ, "HIPPO_SELF_SESSION": "1", **(self._env or {})},
             )
         except FileNotFoundError as exc:
-            raise AgentExecError(f"agent command not found: {self._command[0]}") from exc
+            raise AgentUnavailableError(f"agent command not found: {self._command[0]}") from exc
+        except PermissionError as exc:
+            raise AgentUnavailableError(f"agent command not executable: {self._command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
-            raise AgentExecError(f"agent timed out after {self._timeout}s") from exc
+            raise AgentTransientError(f"agent timed out after {self._timeout}s") from exc
         if completed.returncode != 0:
-            raise AgentExecError(f"agent exited with code {completed.returncode}")
+            raise AgentTransientError(f"agent exited with code {completed.returncode}")
         if not completed.stdout.strip():
-            raise AgentExecError("agent produced empty output")
+            raise AgentTransientError("agent produced empty output")
         return completed.stdout
 
 
@@ -53,16 +63,20 @@ class HttpAgentClient(AgentClient):
     """openai-compatible 檔位：stdlib urllib 直呼 /v1/chat/completions。
 
     api_key 由 env 名解析（config 永不放值）；缺 key 時不帶 Authorization
-    （地端 ollama/vLLM 常無需驗證）。
+    （地端 ollama/vLLM 常無需驗證）。key 解析來源預設 os.environ；`env` 可
+    注入替代來源（#15 Codex B1：doctor probe 傳 service-effective manager
+    env——注入後即不回頭讀 os.environ，互動 shell 才有的 key 不得滲入判定）。
     """
 
     def __init__(self, base_url: str, model: str, *, api_key_env: str | None = None,
-                 timeout: int = 600, max_tokens: int = 8192) -> None:
+                 timeout: int = 600, max_tokens: int = 8192,
+                 env: dict | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
         self._timeout = timeout
         self._max_tokens = max_tokens
+        self._env = env
 
     def run(self, prompt: str) -> str:
         import json as _json
@@ -76,7 +90,8 @@ class HttpAgentClient(AgentClient):
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key_env:
-            key = os.environ.get(self._api_key_env, "").strip()
+            source = self._env if self._env is not None else os.environ
+            key = str(source.get(self._api_key_env, "") or "").strip()
             if key:
                 headers["Authorization"] = f"Bearer {key}"
         request = urllib.request.Request(
@@ -89,13 +104,13 @@ class HttpAgentClient(AgentClient):
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 body = _json.loads(response.read().decode("utf-8"))
         except urllib.error.URLError as exc:
-            raise AgentExecError(f"openai-compatible endpoint unreachable: {exc}") from exc
+            raise AgentTransientError(f"openai-compatible endpoint unreachable: {exc}") from exc
         try:
             content = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise AgentExecError("openai-compatible response missing choices[0].message.content") from exc
+            raise AgentTransientError("openai-compatible response missing choices[0].message.content") from exc
         if not str(content).strip():
-            raise AgentExecError("agent produced empty output")
+            raise AgentTransientError("agent produced empty output")
         return str(content)
 
 
