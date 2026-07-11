@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from paulsha_hippo import paths
+from paulsha_hippo.dream.lock import dream_lock_path as _dream_lock_path
 
 _PKG_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_ROOT.parent
@@ -209,7 +210,8 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
 
 # ---------------------------------------------------------------- doctor
 
-def run_doctor(*, fix_backend: bool = False, live_probe: bool = False) -> int:
+def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
+               proc_root: str | Path = "/proc") -> int:
     """健檢。backend 檢查預設為解析級（快速、免費、無副作用——shutil.which／
     is_file+X_OK，不喚起 backend）；live smoke probe（實際喚起 backend 一次，
     spec §4.1 恢復序列 gate 語意）僅在 `fix_backend=True`／`live_probe=True`／
@@ -254,6 +256,7 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False) -> int:
         failed = True
     else:
         print(probe_line)
+    _print_runtime_health(memory_root, proc_root=proc_root)
     return 1 if failed else 0
 
 
@@ -793,3 +796,44 @@ def dream_process_report(*, proc_root: str | Path = "/proc",
         report["reasons"] = reasons
         reports.append(report)
     return reports
+
+
+def dream_lock_status(memory_root: Path) -> str:
+    """點時探測 dream lock：absent / free / held / unknown。
+
+    以 LOCK_EX|LOCK_NB 探測並立即釋放，不長持；探測瞬間與同時啟動的
+    dream run 存在極小視窗（對方 LOCK_NB 會失敗跳過一輪），屬診斷面可接受成本。
+    """
+    lock_path = _dream_lock_path(Path(memory_root))
+    if not lock_path.exists():
+        return "absent"
+    try:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return "held"
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return "free"
+    except OSError:
+        return "unknown"
+
+
+def _print_runtime_health(memory_root: Path, *,
+                          proc_root: str | Path = "/proc") -> None:
+    """doctor 的 runtime 健康報告段落（#19）：只報告，不自動 kill、不影響 exit code。"""
+    print(f"- dream lock（runtime/locks/dream.lock）：{dream_lock_status(memory_root)}")
+    reports = dream_process_report(proc_root=proc_root)
+    if not reports:
+        print("- dream/supervise 進程：無")
+        return
+    print(f"- dream/supervise 進程：{len(reports)} 個（只報告，不自動 kill）")
+    for report in reports:
+        reasons_value = report.get("reasons")
+        reasons = [str(reason) for reason in reasons_value] if isinstance(reasons_value, list) else []
+        if report["non_canonical"]:
+            mark = "non-canonical[" + ",".join(reasons) + "]"
+        else:
+            mark = "canonical"
+        print(f"  - pid={report['pid']} start={report['started_at']} {mark} "
+              f"cwd={report['cwd']} cmdline={report['cmdline']}")

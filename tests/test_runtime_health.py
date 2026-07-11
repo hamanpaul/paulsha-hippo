@@ -154,5 +154,73 @@ class DreamProcessReportTest(unittest.TestCase):
         self.assertIn("cwd-temp-worktree", reports[0]["reasons"])
 
 
+class DreamLockStatusTest(unittest.TestCase):
+    def test_absent_free_held(self):
+        import fcntl as _fcntl
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # absent：契約 3 路徑 <memory_root>/runtime/locks/dream.lock 尚未存在
+            self.assertEqual(ops.dream_lock_status(root), "absent")
+
+            lock_path = root / "runtime" / "locks" / "dream.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.touch()
+            self.assertEqual(ops.dream_lock_status(root), "free")
+
+            with lock_path.open("a+", encoding="utf-8") as holder:
+                _fcntl.flock(holder, _fcntl.LOCK_EX)  # 模擬 PR-A dream run 整輪持鎖
+                self.assertEqual(ops.dream_lock_status(root), "held")
+            self.assertEqual(ops.dream_lock_status(root), "free")
+
+
+class DoctorRuntimeHealthTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.proc = make_fake_proc(self.base)
+        self.memory_root = self.base / "memory"
+        (self.memory_root / "runtime" / "locks").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_doctor_reports_dream_lock_and_identifies_fake_orphan(self):
+        """驗收（spec §3.4）：doctor 能識別偽造的孤兒進程 fixture——只報告，不 kill。
+
+        偽造 pid 4242 非真實進程；若實作誤發 signal 會 ProcessLookupError 直接紅燈。
+        """
+        add_fake_process(
+            self.proc, 4242,
+            ["/fake-venv/bin/python3", "-m", "paulsha_hippo.cli", "dream", "run"],
+            cwd_target=self.base / "gone-worktree")
+        (self.memory_root / "runtime" / "locks" / "dream.lock").touch()
+
+        env = {"HIPPO_MEMORY_ROOT": str(self.memory_root),
+               "PSC_MEMORY_ROOT": str(self.memory_root)}
+        buffer = io.StringIO()
+        with mock.patch.dict("os.environ", env), redirect_stdout(buffer):
+            # 不斷言 return code：PR-A 的 backend probe 段落可能因環境無 backend 而非零；
+            # 本 task 的段落是 report-only、不改 exit code。
+            ops.run_doctor(proc_root=self.proc)
+        out = buffer.getvalue()
+
+        self.assertIn("dream lock（runtime/locks/dream.lock）：free", out)
+        self.assertIn("dream/supervise 進程：1 個（只報告，不自動 kill）", out)
+        self.assertIn("pid=4242", out)
+        self.assertIn("non-canonical[interpreter-mismatch,cwd-missing]", out)
+
+    def test_doctor_reports_no_processes_when_proc_is_quiet(self):
+        env = {"HIPPO_MEMORY_ROOT": str(self.memory_root),
+               "PSC_MEMORY_ROOT": str(self.memory_root)}
+        buffer = io.StringIO()
+        with mock.patch.dict("os.environ", env), redirect_stdout(buffer):
+            ops.run_doctor(proc_root=self.proc)
+        out = buffer.getvalue()
+
+        self.assertIn("dream lock（runtime/locks/dream.lock）：absent", out)
+        self.assertIn("dream/supervise 進程：無", out)
+
+
 if __name__ == "__main__":
     unittest.main()
