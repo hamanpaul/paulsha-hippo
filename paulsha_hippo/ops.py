@@ -17,13 +17,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from paulsha_hippo import paths
+from paulsha_hippo import backends, paths
 from paulsha_hippo.dream.lock import dream_lock_path as _dream_lock_path
 
 _PKG_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_ROOT.parent
 
-_BACKENDS = ("claude-headless", "openai-compatible", "custom-argv")
+# 契約 7：_BACKENDS 改由 preset registry 導出（向後相容）。
+_BACKENDS = tuple(backends.PRESETS)
 
 
 class BackendUnavailableError(ValueError):
@@ -146,8 +147,12 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     設定檔——避免留下「宣告 claude-headless 卻缺 override」的半初始化不一致設定，
     使後續 doctor/dream 失敗或誤 park。通過後才以暫存檔＋atomic replace 一次性提交。
     """
-    if backend not in _BACKENDS:
+    preset = backends.PRESETS.get(backend)
+    if preset is None:
         print(f"init: 不支援的 backend: {backend}（可選 {', '.join(_BACKENDS)}）", file=sys.stderr)
+        return 2
+    if not preset.available:
+        print(f"init: backend {backend} 尚不可用（命令契約未確認，見 issue #10）", file=sys.stderr)
         return 2
     root = memory_root or str(paths.memory_root())
 

@@ -1120,3 +1120,37 @@ class FixBackendMigrationTests(unittest.TestCase):
                                    return_value={"PATH": "/usr/bin:/bin"}), \
                  mock.patch.object(ops.shutil, "which", return_value=None):
                 self.assertEqual(ops.run_doctor(fix_backend=True), 1)
+
+
+class BackendRegistryWiringTests(unittest.TestCase):
+    def test_backends_tuple_derived_from_registry(self):
+        from paulsha_hippo import backends
+        self.assertEqual(ops._BACKENDS, tuple(backends.PRESETS))
+
+    def test_init_rejects_unknown_backend(self):
+        rc = ops.run_init(memory_root=None, backend="definitely-not-a-backend",
+                          base_url=None, api_key_env=None, model=None, assume_yes=True)
+        self.assertEqual(rc, 2)
+
+    def test_init_rejects_unavailable_presets(self):
+        for name in ("gemini-headless", "antigravity-headless"):
+            with self.subTest(backend=name):
+                rc = ops.run_init(memory_root=None, backend=name, base_url=None,
+                                  api_key_env=None, model=None, assume_yes=True)
+                self.assertEqual(rc, 2)
+
+
+class InitBackendChoicesTests(unittest.TestCase):
+    def test_parser_accepts_all_registry_presets(self):
+        from paulsha_hippo import backends
+        from paulsha_hippo.cli import _build_parser
+        parser = _build_parser()
+        for name in backends.PRESETS:
+            with self.subTest(backend=name):
+                args = parser.parse_args(["init", "--backend", name])
+                self.assertEqual(args.backend, name)
+
+    def test_parser_rejects_non_registry_backend(self):
+        from paulsha_hippo.cli import _build_parser
+        with self.assertRaises(SystemExit):
+            _build_parser().parse_args(["init", "--backend", "definitely-not-a-backend"])

@@ -63,10 +63,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"hippo {__version__}")
     memory_subparsers = parser.add_subparsers(dest="command", required=True)
 
+    from paulsha_hippo import backends as hippo_backends
+
     init_p = memory_subparsers.add_parser("init", help="初始化 config 與蒸餾 backend")
     init_p.add_argument("--memory-root")
+    _backend_help = "蒸餾 backend preset：" + "、".join(
+        name + ("（尚不可用）" if not preset.available else "")
+        for name, preset in hippo_backends.PRESETS.items()
+    )
     init_p.add_argument("--backend", default="claude-headless",
-                        choices=["claude-headless", "openai-compatible", "custom-argv"])
+                        choices=list(hippo_backends.PRESETS), help=_backend_help)
     init_p.add_argument("--base-url")
     init_p.add_argument("--api-key-env")
     init_p.add_argument("--model")
