@@ -260,6 +260,16 @@ def _build_parser() -> argparse.ArgumentParser:
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
 
+    locks_p = memory_subparsers.add_parser("locks", help="runtime lock 維運")
+    locks_sub = locks_p.add_subparsers(dest="locks_command", required=True)
+    locks_cleanup = locks_sub.add_parser(
+        "cleanup-legacy",
+        help="一次性清理 legacy per-session lock 檔（僅維護窗口；預設 dry-run）",
+    )
+    locks_cleanup.add_argument("--memory-root", required=True)
+    locks_cleanup.add_argument("--apply", action="store_true")
+    locks_cleanup.set_defaults(func=_locks_cleanup_legacy)
+
     requeue_p = memory_subparsers.add_parser(
         "requeue", help="把 parked session 送回 split 重走 promote（#15 恢復路徑）"
     )
@@ -880,6 +890,17 @@ def _dream_supervise(args) -> int:
 
     extra = ["--memory-root", args.memory_root] if args.memory_root else []
     return ops.run_dream_supervise(interval=args.interval, extra_argv=extra)
+
+
+def _locks_cleanup_legacy(args: argparse.Namespace) -> int:
+    from paulsha_hippo import ops
+
+    result = ops.cleanup_legacy_locks(Path(args.memory_root), apply=args.apply)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if (result.get("blocked") or result.get("busy")
+            or result.get("unknown") or result.get("unsafe_locks_dir")):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
