@@ -119,13 +119,22 @@ def service_effective_env() -> dict[str, str]:
 
 
 def probe_preset(preset: BackendPreset, *, env: dict[str, str] | None = None,
-                 timeout: int = 30) -> ProbeResult:
+                 timeout: int = 30, live: bool = False) -> ProbeResult:
     """以指定環境驗證單一 preset 可用性（doctor 用；只報告、不 gate）。
 
     env 預設 service_effective_env()：executable 先以 service PATH 解析，
-    找不到再退互動 PATH（此時 detail 註記「不在 service PATH」）。probe 子程序
-    一律以 env 執行——node-shebang 類 CLI 在 service PATH 缺 node 時會在此
-    誠實暴露 rc!=0。
+    找不到再退互動 PATH（此時 detail 註記「不在 service PATH」）。
+
+    `live` 是喚起 backend 的 opt-in 閘門，語意比照 ops.
+    _probe_backend_service_effective 的跨批次共享契約 6（PR-C/PR-D 呼叫端必讀
+    ——裸 `hippo doctor` 預設快速、免費、無副作用、不喚起 backend）：
+    - `live=False`（run_doctor 預設）：只做解析級檢查——shutil.which（已含
+      is_file+X_OK）解析得到即回 ok=True 的「已解析、即時 probe 需 --probe-live／
+      --fix-backend」ProbeResult，完全不 exec doctor_probe（無 backend 喚起、無
+      延遲、無潛在網路存取）。
+    - `live=True`（`--probe-live`／`--fix-backend`／`HIPPO_DOCTOR_LIVE_PROBE=1`）：
+      才實際以 env 執行 doctor_probe 子程序——node-shebang 類 CLI 在 service PATH
+      缺 node 時會在此誠實暴露 rc!=0。
     """
     if not preset.available:
         return ProbeResult(preset.name, False, None, None,
@@ -142,12 +151,29 @@ def probe_preset(preset: BackendPreset, *, env: dict[str, str] | None = None,
     note = "" if exe_service else "（不在 service PATH；由 init 寫入絕對路徑）"
     if preset.doctor_probe is None:
         return ProbeResult(preset.name, True, exe, None, f"無 probe 定義{note}")
+    if not live:
+        # 裸 `hippo doctor` 預設：解析級即止——shutil.which 已驗 is_file+X_OK，
+        # 不 exec doctor_probe（不喚起 backend、無延遲／潛在網路存取）。即時 probe
+        # 需 opt-in 閘門（--probe-live／--fix-backend／HIPPO_DOCTOR_LIVE_PROBE=1），
+        # 與 configured-backend probe 共用同一閘門（跨批次共享契約 6）。
+        return ProbeResult(preset.name, True, exe, True,
+                           f"已解析；即時 probe 需 --probe-live／--fix-backend{note}")
     argv = [exe] + list(preset.doctor_probe[1:])
     try:
         completed = subprocess.run(argv, capture_output=True, text=True,
                                    timeout=timeout, env=probe_env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ProbeResult(preset.name, True, exe, False, f"probe 失敗：{exc}"[:200])
+    except UnicodeDecodeError as exc:
+        # text=True 以 locale 編碼解 stdout/stderr，backend --version 吐非 UTF-8
+        # 位元組（跑錯 binary／crash dump／locale 錯亂）時 decode 於 run() 內拋
+        # UnicodeDecodeError（ValueError 子類，非 OSError）——比照 ops.
+        # _exec_probe_service_effective 的同類處理判 FAIL，不得逸出崩潰 hippo
+        # doctor（run_doctor 逐 preset 呼叫無 try/except 包覆，例外會一路傳到
+        # cli.main）。
+        detail = (f"probe 失敗：輸出非 UTF-8 位元組"
+                  f"（跑錯 binary／crash dump／locale 錯亂）：{exc}")
+        return ProbeResult(preset.name, True, exe, False, detail[:200])
     if completed.returncode != 0:
         stream = (completed.stderr or completed.stdout).strip().splitlines()
         head = stream[0] if stream else ""

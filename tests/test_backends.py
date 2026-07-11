@@ -97,7 +97,7 @@ class ProbeTests(unittest.TestCase):
             self._make_bin(bin_dir, "codex", "#!/bin/sh\necho fake-codex 9.9\nexit 0\n")
             result = backends.probe_preset(
                 backends.PRESETS["codex-headless"],
-                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp})
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}, live=True)
         self.assertTrue(result.ok)
         self.assertEqual(result.executable, str(bin_dir / "codex"))
         self.assertIn("fake-codex 9.9", result.detail)
@@ -110,7 +110,7 @@ class ProbeTests(unittest.TestCase):
             self._make_bin(bin_dir, "copilot", "#!/bin/sh\necho auth broken >&2\nexit 41\n")
             result = backends.probe_preset(
                 backends.PRESETS["copilot-headless"],
-                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp})
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}, live=True)
         self.assertFalse(result.ok)
         self.assertIn("rc=41", result.detail)
         self.assertIn("auth broken", result.detail)
@@ -158,9 +158,47 @@ class ProbeTests(unittest.TestCase):
             result = backends.probe_preset(
                 backends.PRESETS["codex-headless"],
                 env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp},
-                timeout=1)
+                timeout=1, live=True)
         self.assertFalse(result.ok)
         self.assertIn("probe 失敗", result.detail)
+
+    def test_probe_not_live_is_resolution_only(self):
+        # 裸 doctor 預設 live=False：解析得到即回 ok=True 的解析級結果，完全不 exec
+        # doctor_probe（不喚起 backend）——stub 的輸出不得出現在 detail，且
+        # subprocess.run 若被呼叫即判測試失敗（鎖住 opt-in 閘門）。
+        with TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._make_bin(bin_dir, "codex",
+                           "#!/bin/sh\necho SHOULD-NOT-RUN 9.9\nexit 0\n")
+            with mock.patch.object(
+                    backends.subprocess, "run",
+                    side_effect=AssertionError("live=False 不得 exec doctor_probe")):
+                result = backends.probe_preset(
+                    backends.PRESETS["codex-headless"],
+                    env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.executable, str(bin_dir / "codex"))
+        self.assertNotIn("SHOULD-NOT-RUN", result.detail)
+        self.assertIn("即時 probe", result.detail)
+
+    def test_probe_non_utf8_output_is_failure_not_crash(self):
+        # blocking 回歸：doctor_probe 目標吐非 UTF-8 位元組（跑錯 binary／crash
+        # dump／locale 錯亂）時，text=True 的 decode 於 subprocess.run() 內拋
+        # UnicodeDecodeError（ValueError 子類，非 OSError）。probe_preset 必須攔下
+        # 判 FAIL、不得逸出——否則 run_doctor 逐 preset 呼叫無 try/except 包覆，
+        # 例外一路傳到 cli.main，整支 `hippo doctor` 崩潰、rc!=0（違反 Task 4
+        # 「preset 矩陣只報告、不影響 exit code」契約）。live=True 才走 exec 分支；
+        # stub 即使 exit 0，decode 也在檢查 returncode 前就拋。
+        with TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            self._make_bin(bin_dir, "codex",
+                           '#!/bin/sh\nprintf "\\377\\376\\200\\201"\nexit 0\n')
+            result = backends.probe_preset(
+                backends.PRESETS["codex-headless"],
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}, live=True)
+        self.assertEqual(result.preset, "codex-headless")
+        self.assertFalse(result.ok)
+        self.assertIn("非 UTF-8", result.detail)
 
 
 if __name__ == "__main__":

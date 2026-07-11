@@ -265,9 +265,16 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     # 只報告、不影響 doctor exit code——configured backend 的 gate 檢查另見下方
     # _probe_backend_service_effective（PR-A/PR-C 既有）。取代舊版僅檢查單一
     # `claude` 執行檔的兩行（PR-D Task 4：擴到全 registry preset）。
+    #
+    # live 閘門（--fix-backend／--probe-live／HIPPO_DOCTOR_LIVE_PROBE=1）同時管轄
+    # preset 矩陣與下方 configured-backend probe：裸 `hippo doctor` 一律解析級、
+    # 不喚起任何 backend（跨批次共享契約 6）。故 live 必須在 preset 迴圈之前算出
+    # 並傳入 probe_preset——否則矩陣會繞過閘門，對每個已安裝 preset 真跑
+    # `<exe> --version`（有 CLI 的開發機每次裸 doctor 都產生副作用／潛在網路存取）。
+    live = fix_backend or live_probe or _live_probe_env_enabled()
     print("- backend presets（service-effective probe）:")
     for preset in backends.PRESETS.values():
-        result = backends.probe_preset(preset)
+        result = backends.probe_preset(preset, live=live)
         if not result.available:
             print(f"  - {result.preset}: ✗ {result.detail}")
         elif result.ok is None:
@@ -277,7 +284,6 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
         else:
             print(f"  - {result.preset}: ✗ {result.detail}")
 
-    live = fix_backend or live_probe or _live_probe_env_enabled()
     probe_line, probe_failed = _probe_backend_service_effective(live=live)
     if probe_failed:
         print(probe_line, file=sys.stderr)

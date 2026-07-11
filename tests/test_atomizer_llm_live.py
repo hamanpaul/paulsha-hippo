@@ -56,8 +56,10 @@ class AtomizerLlmLiveMatrixTests(unittest.TestCase):
 
     def _smoke(self, preset_name: str) -> None:
         preset = backends.PRESETS[preset_name]
-        # 第一層：executable/version probe（互動環境；快、免 LLM 配額）
-        probe = backends.probe_preset(preset, env=dict(os.environ), timeout=60)
+        # 第一層：executable/version probe（互動環境；快、免 LLM 配額）。
+        # live=True 才真跑 `<exe> --version`——本層意圖即實際版本 probe，非解析級。
+        probe = backends.probe_preset(preset, env=dict(os.environ), timeout=60,
+                                      live=True)
         if probe.ok is not True:
             self.skipTest(f"{preset_name} 本機不可用（version probe）：{probe.detail}")
         argv = [probe.executable] + list(preset.argv_template[1:])

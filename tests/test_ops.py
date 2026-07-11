@@ -409,7 +409,7 @@ class DoctorTests(unittest.TestCase):
     def test_doctor_reports_backend_preset_matrix(self):
         from paulsha_hippo import backends
 
-        def fake_probe(preset, *, env=None, timeout=30):
+        def fake_probe(preset, *, env=None, timeout=30, live=False):
             if preset.name == "claude-headless":
                 return backends.ProbeResult(preset.name, True, "/abs/claude", True,
                                             "2.1.206 (Claude Code)")
@@ -829,6 +829,58 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
                          return_value=("- distiller backend：✓ mocked", False)) as probe:
                     self.assertEqual(ops.run_doctor(**doctor_kwargs), 0)
                 probe.assert_called_once_with(live=expected_live)
+
+    @staticmethod
+    def _stub_preset_bins(tmp: str) -> dict[str, str]:
+        # 三家 argv preset 執行檔的 stub（內容無關——resolution 只需存在＋X_OK，
+        # 且 live 分支下 subprocess.run 已被 spy 攔截、stub 不會真跑）；回傳可餵給
+        # backends.service_effective_env 的 env（PATH 命中 tmpdir，模擬本機裝有
+        # claude/codex/copilot 三家 CLI）。
+        bin_dir = Path(tmp)
+        for name in ("claude", "codex", "copilot"):
+            exe = bin_dir / name
+            exe.write_text("#!/bin/sh\necho stub\n", encoding="utf-8")
+            exe.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}
+
+    def test_bare_doctor_preset_matrix_never_execs_subprocess(self):
+        # blocking 回歸：裸 doctor 的 preset 矩陣必須解析級——即使每個 preset 執行檔
+        # 都解析得到（stub 命中 service_effective_env，模擬同時裝有 claude/codex/
+        # copilot 的開發機，正是本 blocking 的重現環境），也不得對任何 preset 觸發
+        # 真實 `<exe> --version` 子程序（無 backend 喚起／潛在網路存取）。CI 因 CLI
+        # 未安裝、which 落空而 subprocess 分支走不到，故此處強制解析命中，鎖住既有
+        # 測試套件測不到的路徑。
+        # 註：backends.subprocess 與 ops.subprocess 是同一 module 物件，故一併把
+        # _systemd_user_available 收斂為 False，避免 systemctl 探測誤觸 spy。
+        with TemporaryDirectory() as tmp:
+            fake_env = self._stub_preset_bins(tmp)
+            with mock.patch.object(ops, "_systemd_user_available", return_value=False), \
+                 mock.patch.object(ops.backends, "service_effective_env",
+                                   return_value=fake_env), \
+                 mock.patch.object(
+                     ops.backends.subprocess, "run",
+                     side_effect=AssertionError(
+                         "裸 doctor 不得對 preset 觸發真實 subprocess exec")) as spy:
+                self.assertEqual(self._doctor(self._fake_cfg()), 0)
+            spy.assert_not_called()
+
+    def test_live_probe_preset_matrix_execs_resolved_presets(self):
+        # 對照組：gate 開啟時，preset 矩陣確實對解析得到的 preset exec
+        # `<exe> --version`——證明上面的 no-exec 斷言非因解析落空而 vacuous，且
+        # preset 矩陣與 configured-backend probe 共用同一 opt-in 閘門。
+        completed = SimpleNamespace(returncode=0, stdout="1.0 fake", stderr="")
+        with TemporaryDirectory() as tmp:
+            fake_env = self._stub_preset_bins(tmp)
+            with mock.patch.object(ops, "_systemd_user_available", return_value=False), \
+                 mock.patch.object(ops.backends, "service_effective_env",
+                                   return_value=fake_env), \
+                 mock.patch.object(ops.backends.subprocess, "run",
+                                   return_value=completed) as spy, \
+                 mock.patch.object(ops, "_probe_backend_service_effective",
+                                   return_value=("- distiller backend：✓ mocked", False)):
+                self.assertEqual(
+                    self._doctor(self._fake_cfg(), live_probe=True), 0)
+            self.assertTrue(spy.called)
 
 
 class ServiceManagerEnvironmentTests(unittest.TestCase):
