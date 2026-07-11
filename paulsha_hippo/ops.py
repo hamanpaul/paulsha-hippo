@@ -686,6 +686,7 @@ def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
 # ---------------------------------------------------------------- runtime hygiene (#19)
 
 _TEMP_WORKTREE_SEGMENTS = {".psc_tmp", ".test-work"}
+_KEEP_LOCK_NAMES = {"import-ledger.lock", "dream.lock"}
 
 
 def _iter_pids(proc_root: Path) -> list[int]:
@@ -837,3 +838,67 @@ def _print_runtime_health(memory_root: Path, *,
             mark = "canonical"
         print(f"  - pid={report['pid']} start={report['started_at']} {mark} "
               f"cwd={report['cwd']} cmdline={report['cmdline']}")
+
+
+def cleanup_legacy_locks(memory_root: Path, *, apply: bool = False,
+                         proc_root: str | Path = "/proc") -> dict[str, object]:
+    """#19：legacy per-session lock 檔一次性清理（僅維護窗口執行）。
+
+    #19 教訓：執行中直接 unlink lock 檔會破壞 flock 互斥（新開者 rendezvous 到新
+    inode）。因此雙層安全閘：
+      1. 進程閘：偵測到其他 paulsha_hippo/hippo 進程（可能是尚未升版的 importer）
+         → apply 直接拒絕（result["blocked"]），一檔不刪。
+      2. flock 閘：逐檔 LOCK_EX|LOCK_NB 探測，busy 檔跳過（result["busy"]）。
+    keep-set：import-ledger.lock、dream.lock（契約 3）、lock_shard_XX.lock（契約 4）。
+    非 .lock 檔一律不碰。預設 dry-run（apply=False）只列清單。
+    """
+    from paulsha_hippo.importer.pipeline import is_shard_lock_name
+
+    locks_dir = Path(memory_root) / "runtime" / "locks"
+    others = scan_hippo_processes(proc_root=proc_root)
+    legacy: list[str] = []
+    kept: list[str] = []
+    if locks_dir.is_dir():
+        for path in sorted(locks_dir.iterdir()):
+            if not path.is_file() or path.suffix != ".lock":
+                continue
+            if path.name in _KEEP_LOCK_NAMES or is_shard_lock_name(path.name):
+                kept.append(path.name)
+            else:
+                legacy.append(path.name)
+    result: dict[str, object] = {
+        "locks_dir": str(locks_dir),
+        "legacy": legacy,
+        "kept": kept,
+        "other_processes": [{"pid": r["pid"], "cmdline": r["cmdline"]} for r in others],
+        "applied": False,
+        "deleted": [],
+        "busy": [],
+    }
+    if not apply:
+        return result
+    if others:
+        result["blocked"] = "偵測到其他 hippo 進程，維護窗口未確立；拒絕清理"
+        return result
+    deleted: list[str] = []
+    busy: list[str] = []
+    for name in legacy:
+        path = locks_dir / name
+        try:
+            with path.open("a+", encoding="utf-8") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    busy.append(name)
+                    continue
+                try:
+                    path.unlink()
+                    deleted.append(name)
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            busy.append(name)
+    result["applied"] = True
+    result["deleted"] = deleted
+    result["busy"] = busy
+    return result
