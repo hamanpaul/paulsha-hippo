@@ -137,7 +137,11 @@ class InitConcurrencyTests(unittest.TestCase):
             self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
             # 一致性：config 與 override 皆存在（B 成功寫入兩者），無「config 有／override 缺」
             self.assertTrue(override.exists(), "不得留 config/override 不一致（override 缺）")
-            self.assertIn("- /fake/bin/claude", override.read_text(encoding="utf-8"))
+            # PR-D Task 3：argv token 改以 json.dumps 加引號輸出（路徑含空白也安全），
+            # 以 yaml.safe_load 解析後比對結構，語意不變、不做未加引號的 substring 斷言。
+            import yaml
+            override_data = yaml.safe_load(override.read_text(encoding="utf-8"))
+            self.assertEqual(override_data["agent_exec"]["command"][0], "/fake/bin/claude")
             # 不殘留暫存檔
             self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
             self.assertEqual(
@@ -155,7 +159,8 @@ class InitTests(unittest.TestCase):
                 "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
             }
             with mock.patch.dict("os.environ", env), \
-                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=lambda argv: ["/fake/abs/claude"] + list(argv[1:])):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
                     base_url=None, api_key_env=None, model=None, assume_yes=True,
@@ -163,12 +168,72 @@ class InitTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
             self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
+            import yaml
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
-            body = override.read_text(encoding="utf-8")
-            # #15：argv[0] 絕對路徑化——systemd 環境沒有 NVM PATH，裸命令找不到
-            self.assertIn("- /fake/bin/claude", body)
-            self.assertIn("- -p", body)
-            self.assertNotIn("\n    - claude\n", body)
+            data = yaml.safe_load(override.read_text(encoding="utf-8"))
+            self.assertEqual(str(data["schema_version"]), "1")
+            self.assertEqual(data["agent_exec"]["command"], ["/fake/abs/claude", "-p"])
+
+    def test_init_each_argv_preset_writes_registry_template(self):
+        from paulsha_hippo import backends
+        for name in ("claude-headless", "codex-headless", "copilot-headless"):
+            with self.subTest(backend=name), TemporaryDirectory() as tmp:
+                env = {
+                    "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                    "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                    "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+                }
+                template = backends.PRESETS[name].argv_template
+                with mock.patch.dict("os.environ", env), \
+                     mock.patch.object(ops, "resolve_backend_argv",
+                                       side_effect=lambda argv: ["/fake/abs/" + argv[0]] + list(argv[1:])):
+                    rc = ops.run_init(memory_root=None, backend=name, base_url=None,
+                                      api_key_env=None, model=None, assume_yes=True)
+                self.assertEqual(rc, 0)
+                import yaml
+                data = yaml.safe_load(
+                    (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                     / "atomizer.override.yaml").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    data["agent_exec"]["command"],
+                    ["/fake/abs/" + template[0]] + list(template[1:]))
+
+    def test_init_argv_preset_includes_model_when_given(self):
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=lambda argv: ["/fake/abs/codex"] + list(argv[1:])):
+                rc = ops.run_init(memory_root=None, backend="codex-headless",
+                                  base_url=None, api_key_env=None,
+                                  model="gpt-5.4", assume_yes=True)
+            self.assertEqual(rc, 0)
+            import yaml
+            data = yaml.safe_load(
+                (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                 / "atomizer.override.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(data["agent_exec"]["model"], "gpt-5.4")
+
+    def test_init_argv_preset_backend_unavailable_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=ops.BackendUnavailableError("codex not found")):
+                rc = ops.run_init(memory_root=None, backend="codex-headless",
+                                  base_url=None, api_key_env=None, model=None, assume_yes=True)
+            self.assertEqual(rc, 2)
+            self.assertFalse((Path(tmp) / "hippo-cfg" / "config.yaml").exists())
+            self.assertFalse((Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                              / "atomizer.override.yaml").exists())
 
     def test_init_claude_headless_fails_when_backend_missing(self):
         with TemporaryDirectory() as tmp:

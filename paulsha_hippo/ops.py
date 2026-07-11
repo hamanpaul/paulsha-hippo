@@ -6,6 +6,7 @@ fallback 指引而非硬錯（G3「先驗證再選路」）。
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shutil
@@ -166,31 +167,39 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
         + (f"  model: {model}\n" if model else "")
     )
 
-    # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）
-    if backend == "claude-headless":
-        try:
-            argv = resolve_backend_argv(["claude", "-p"])
-        except BackendUnavailableError as exc:
-            print(f"init: {exc}（請先安裝 claude CLI，或改用 --backend openai-compatible/custom-argv）",
-                  file=sys.stderr)
-            return 2
-        override_body: str | None = (
-            "schema_version: \"1\"\n"
-            "agent_exec:\n"
-            "  command:\n"
-            + "".join(f"    - {token}\n" for token in argv)
-            + (f"  model: {model}\n" if model else "")
-        )
-    elif backend == "openai-compatible":
+    # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）。
+    # PR-D Task 3：泛化舊版僅 claude-headless 特判的絕對路徑化——任何 registry
+    # preset 只要有非空 argv_template（claude/codex/copilot-headless……）都走同一條
+    # resolve_backend_argv 路徑，取代先前 codex/copilot-headless 誤落 custom-argv
+    # 分支、init 不寫 override 的缺口。argv token 以 json.dumps 加引號輸出（合法
+    # YAML double-quoted scalar），路徑含空白也安全。
+    if backend == "openai-compatible":
         if not base_url:
             print("init: openai-compatible 需要 --base-url", file=sys.stderr)
             return 2
-        override_body = (
+        override_body: str | None = (
             "schema_version: \"1\"\n"
             "agent_exec:\n"
             "  backend: openai-compatible\n"
             f"  base_url: {base_url}\n"
             + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
+            + (f"  model: {model}\n" if model else "")
+        )
+    elif preset.argv_template:
+        try:
+            argv = resolve_backend_argv(list(preset.argv_template))
+        except BackendUnavailableError as exc:
+            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend openai-compatible/custom-argv）",
+                  file=sys.stderr)
+            return 2
+        command_lines = "".join(
+            f"    - {json.dumps(token, ensure_ascii=False)}\n" for token in argv
+        )
+        override_body = (
+            "schema_version: \"1\"\n"
+            "agent_exec:\n"
+            "  command:\n"
+            f"{command_lines}"
             + (f"  model: {model}\n" if model else "")
         )
     else:  # custom-argv：不動 override（沿 atomizer.yaml 或既有 override）
