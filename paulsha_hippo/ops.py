@@ -261,8 +261,21 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     else:
         print("- systemd --user 不可用（fallback：hippo dream supervise）")
 
-    agent = shutil.which("claude")
-    print(f"- claude CLI：{'✓ ' + agent if agent else '未找到（claude-headless 檔位需要）'}")
+    # backend preset 矩陣（spec §3.5.4）：service-effective 環境逐 preset probe。
+    # 只報告、不影響 doctor exit code——configured backend 的 gate 檢查另見下方
+    # _probe_backend_service_effective（PR-A/PR-C 既有）。取代舊版僅檢查單一
+    # `claude` 執行檔的兩行（PR-D Task 4：擴到全 registry preset）。
+    print("- backend presets（service-effective probe）:")
+    for preset in backends.PRESETS.values():
+        result = backends.probe_preset(preset)
+        if not result.available:
+            print(f"  - {result.preset}: ✗ {result.detail}")
+        elif result.ok is None:
+            print(f"  - {result.preset}: - {result.detail}")
+        elif result.ok:
+            print(f"  - {result.preset}: ✓ {result.executable}（{result.detail}）")
+        else:
+            print(f"  - {result.preset}: ✗ {result.detail}")
 
     live = fix_backend or live_probe or _live_probe_env_enabled()
     probe_line, probe_failed = _probe_backend_service_effective(live=live)

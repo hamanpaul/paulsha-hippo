@@ -406,6 +406,46 @@ class DoctorTests(unittest.TestCase):
                                return_value=self._PROBE_OK):
             self.assertEqual(ops.run_doctor(), 0)
 
+    def test_doctor_reports_backend_preset_matrix(self):
+        from paulsha_hippo import backends
+
+        def fake_probe(preset, *, env=None, timeout=30):
+            if preset.name == "claude-headless":
+                return backends.ProbeResult(preset.name, True, "/abs/claude", True,
+                                            "2.1.206 (Claude Code)")
+            if preset.name == "codex-headless":
+                return backends.ProbeResult(preset.name, True, "/abs/codex", False,
+                                            "probe rc=127：node not found")
+            if not preset.available:
+                return backends.ProbeResult(preset.name, False, None, None,
+                                            "unavailable（命令契約未確認，選單不可選）")
+            if preset.required_executable is not None:
+                return backends.ProbeResult(preset.name, True, None, False,
+                                            "executable 未安裝")
+            return backends.ProbeResult(preset.name, True, None, None,
+                                        "config 驅動（無本機執行檔需求）")
+
+        env = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a"}
+        buf = io.StringIO()
+        # 比照本 class 既有測試的 _PROBE_OK 手法：patch 掉 PR-A 的
+        # _probe_backend_service_effective，隔離 configured-backend probe 的環境依賴
+        # （否則 CI 無 backend → probe FAIL → rc=1，下方 rc==0 斷言必紅）。
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(ops, "_probe_backend_service_effective",
+                               return_value=("- distiller backend：✓ mocked", False)), \
+             mock.patch.object(ops.backends, "probe_preset", side_effect=fake_probe), \
+             redirect_stdout(buf):
+            rc = ops.run_doctor()
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("- backend presets（service-effective probe）:", out)
+        self.assertIn("  - claude-headless: ✓ /abs/claude（2.1.206 (Claude Code)）", out)
+        self.assertIn("  - codex-headless: ✗ probe rc=127：node not found", out)
+        self.assertIn("  - copilot-headless: ✗ executable 未安裝", out)
+        self.assertIn("  - gemini-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
+        self.assertIn("  - antigravity-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
+        self.assertIn("  - openai-compatible: - config 驅動（無本機執行檔需求）", out)
+
 
 class DoctorBackendProbeTests(unittest.TestCase):
     """live probe（smoke exec／HTTP）語意——一律經 opt-in gate（live_probe=True）驅動。
