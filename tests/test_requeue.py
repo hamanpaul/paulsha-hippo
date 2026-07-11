@@ -21,10 +21,22 @@ def _park(root: Path, session_key: str, *, category: str = "invalid_output") -> 
 
 
 def _seed_fragment(root: Path, session_key: str) -> None:
+    """寫入 pipeline `_read_fragment` 真的讀得動、且 frontmatter 屬於該 session
+    的 fragment（含 project / source_agent / source_session；沿用 pipeline 契約）。"""
     agent, _, session = session_key.partition(":")
     frag = root / "inbox" / "_slices" / "proj" / f"{agent}__{session}__000.md"
     frag.parent.mkdir(parents=True, exist_ok=True)
-    frag.write_text("---\nfragment_index: 0\n---\nbody\n", encoding="utf-8")
+    frag.write_text(
+        "---\n"
+        "memory_layer: inbox\n"
+        "project: proj\n"
+        f"source_agent: {agent}\n"
+        f"source_session: {session}\n"
+        "fragment_index: 0\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
 
 
 class RequeueCoreTests(unittest.TestCase):
@@ -118,7 +130,7 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(summary["requeued"], [])
             self.assertEqual(
                 summary["skipped"],
-                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
             )
             # ledger 不得出現任何 split 事件（gate 在提交前）
             self.assertEqual(
@@ -139,7 +151,7 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(
                 summary["skipped"],
-                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
             )
 
     def test_requeue_unreadable_fragment_counts_as_missing(self):
@@ -157,7 +169,56 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(
                 summary["skipped"],
-                [{"session_key": "claude:s1", "reason": "no-fragments"}],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
+            )
+
+    def test_requeue_gated_when_fragment_belongs_to_other_session(self):
+        # 檔名對得上（claude__s1__000.md）但 frontmatter 的 source_session 指向
+        # 別的 session——內容不屬於本 session。早前 gate 只 glob 檔名＋讀 1 char
+        # 會誤放行，把別 session 的內容錯 promote／卡非終態；必須擋下。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            frag = root / "inbox" / "_slices" / "proj" / "claude__s1__000.md"
+            frag.parent.mkdir(parents=True, exist_ok=True)
+            frag.write_text(
+                "---\nmemory_layer: inbox\nproject: proj\n"
+                "source_agent: claude\nsource_session: other\n"
+                "fragment_index: 0\n---\nbody\n",
+                encoding="utf-8",
+            )
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
+            )
+
+    def test_requeue_gated_when_fragment_frontmatter_unreadable(self):
+        # 檔名對得上但 frontmatter 缺 pipeline `_read_fragment` 必要欄位（只有
+        # fragment_index，無 project／source_session）——pipeline 讀不出；送回
+        # split 只會每輪警告、永久卡非終態。gate 必須擋下（早前讀 1 char 會誤放）。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            frag = root / "inbox" / "_slices" / "proj" / "claude__s1__000.md"
+            frag.parent.mkdir(parents=True, exist_ok=True)
+            frag.write_text("---\nfragment_index: 0\n---\nbody\n", encoding="utf-8")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
             )
 
     def test_requeue_all_parked_gates_only_zero_fragment_sessions(self):
@@ -178,7 +239,7 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "codex:p2"), "parked")
             self.assertEqual(
                 summary["skipped"],
-                [{"session_key": "codex:p2", "reason": "no-fragments"}],
+                [{"session_key": "codex:p2", "reason": "no-valid-fragments"}],
             )
 
 
@@ -245,7 +306,7 @@ class RequeueCliTests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             payload = json.loads(out)
             self.assertEqual(payload["requeued"], [])
-            self.assertEqual(payload["skipped"][0]["reason"], "no-fragments")
+            self.assertEqual(payload["skipped"][0]["reason"], "no-valid-fragments")
             self.assertIn("claude:s1", err)
             self.assertIn("fragment", err)
             self.assertIn("parked", err)

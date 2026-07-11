@@ -853,19 +853,22 @@ def _requeue(args: argparse.Namespace) -> int:
         reason=args.reason,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
-    # Codex 複驗 B2：zero-fragment 的 parked session 被 gate 擋下（維持 parked）
-    # 時必須非零 exit＋stderr 說明——早前 exit 0 會把「沒東西可重走」誤報成功。
-    no_fragment_entries = [
-        entry for entry in summary["skipped"] if entry.get("reason") == "no-fragments"
+    # Codex 複驗 B2：無「有效且屬於該 session」fragment 的 parked session 被 gate
+    # 擋下（維持 parked）時必須非零 exit＋stderr 說明——早前 exit 0 會把「沒東西
+    # 可重走」誤報成功。有效 = pipeline `_read_fragment` 讀得動且 frontmatter 相符。
+    no_valid_entries = [
+        entry
+        for entry in summary["skipped"]
+        if entry.get("reason") == "no-valid-fragments"
     ]
-    for entry in no_fragment_entries:
+    for entry in no_valid_entries:
         print(
-            f"error: {entry['session_key']} 無可讀 fragment（inbox 的 _slices 下"
-            "無屬於該 session 的 slice 檔）——維持 parked 未 requeue；"
-            "zero-fragment session 送回 split 會永久卡非終態",
+            f"error: {entry['session_key']} 無有效 fragment（inbox 的 _slices 下"
+            "無 frontmatter 完整（project／source_session）且屬於該 session 的 "
+            "fragment 檔）——維持 parked 未 requeue；送回 split 會永久卡非終態",
             file=sys.stderr,
         )
-    if no_fragment_entries:
+    if no_valid_entries:
         return 1
     if not summary["requeued"] and summary["skipped"]:
         return 1
