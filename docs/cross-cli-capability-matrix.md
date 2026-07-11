@@ -10,13 +10,20 @@
 | session-start 注入 | supported（SessionStart，既有佈署） | inconclusive（文件列 `SessionStart`；headless probe 對照組未 fire） | supported（文件列 `sessionStart`/`SessionStart`；probe FIRED） |
 | prompt-time shortlist（自動） | supported（UserPromptSubmit，既有佈署） | inconclusive（文件列 `UserPromptSubmit`；headless probe 未能 fire） | supported（文件列 `userPromptSubmitted`；官方 key probe FIRED＋additionalContext 注入實測；已接線 `copilot_user_prompt_submit.py`） |
 | read attribution | supported（PostToolUse(Read)，既有佈署） | not-supported（`PostToolUse` 僅涵蓋 Bash / `apply_patch` / MCP；非 `Read` 等價） | supported（`postToolUse` payload 實測 `toolName:"view"`＝Read file contents；已接線 `copilot_post_tool_use.py`，view 過濾在腳本內做） |
-| 顯式 recall（`hippo recall`） | supported | supported（session-start 指引注入，PR-F） | supported（CLI 可用；自動 shortlist 接線後 session-start 還原預設提示） |
+| 顯式 recall（`hippo recall`） | supported | inconclusive（`hippo recall` CLI 可執行，但 agent 需靠 session-start 指引注入才會呼叫——該送達管道本機未實測，見 session-start 列與證據區） | supported（CLI 可用；自動 shortlist 接線後 session-start 還原預設提示） |
 | applied 顯式訊號（`hippo usage mark-applied`） | supported（PR-F，含實證） | 介面可用（無平台注入實證） | supported（PR-F，含實證——live 漏斗 applied OK） |
-| 總評 | full | recall-capable | full |
+| 總評 | full | inconclusive | full |
 
 > 總評語意：`full`＝自動 shortlist＋read attribution 全鏈；`recall-capable`＝無 prompt-time hook，
-> 但 agent 可依 session-start 指引顯式呼叫 `hippo recall`；`produce-only`＝連 recall 都不可行
->（該平台 agent 無 shell 工具）。**不假裝 SessionStart orientation 等同 task retrieval。**
+> 但 agent 可依 session-start 指引顯式呼叫 `hippo recall`（**須先實證 session-start 指引確有送達模型**）；
+> `produce-only`＝連 recall 都不可行（該平台 agent 無 shell 工具）；`inconclusive`＝端到端 recall 能力未實測、
+> 保守不宣稱。**不假裝 SessionStart orientation 等同 task retrieval。**
+>
+> **codex 為何 `inconclusive`（不宣稱 recall-capable）**：`hippo recall` CLI 本身在 codex 可執行（有 shell），
+> 但要成為可用的 recall 能力，agent 得先被 session-start 指引注入告知去呼叫它。而 codex 的 session-start
+> 送達本機 probe 未 fire（見 session-start 列與證據區，headless 因 permission denied 未證實），亦無已實測的
+> 替代送達管道證據——送達未證實則整條 recall 鏈未證實。待真實 codex host 證明 SessionStart FIRED 且
+> additionalContext 實際進入模型後，再升為 `recall-capable`。此處以誠實為準，不因 CLI 可跑就宣稱能力成立。
 
 ## 證據
 
@@ -41,6 +48,7 @@ ok
 ```
 
 - follow-up：依 Step 2 註記補做 headless trust/approval 排除 rerun（`codex exec --dangerously-bypass-hook-trust`；再加 `--ask-for-approval never`）仍回 `Permission denied and could not request permission from user`，故最終維持 `inconclusive`。
+- **顯式 recall／總評判定（誠實下修）**：`hippo recall` CLI 在 codex 可執行（有 shell），但「agent 會去呼叫 recall」建立在 session-start 指引注入實際送達模型之上——而該送達正是本表上一項標為 `inconclusive`（headless probe 因 permission denied 未 fire）、且無已實測的替代送達管道證據。送達未證實 → 端到端 recall 鏈未證實，故「顯式 recall」與「總評」皆下修為 `inconclusive`（不以 CLI 可跑即宣稱 recall-capable）。**升級條件**：於真實 codex host 證明 `SessionStart` FIRED 且注入的 additionalContext 確進入模型 context（比照 copilot 證據區的 MEMO-TOKEN 行為級驗證），或補一條已實測的替代送達管道證據——屆時再升 `recall-capable`。
 
 ### copilot-cli
 - CLI 版本：`GitHub Copilot CLI 1.0.70`

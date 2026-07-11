@@ -281,3 +281,53 @@ def test_record_offered_concurrent_writers_leave_no_tmp_residue(tmp_path):
     wakeup = tmp_path / "runtime" / "wakeup"
     residue = sorted(p.name for p in wakeup.iterdir() if p.name.endswith(".tmp"))
     assert residue == []
+
+
+def _pipeline_worker(root: str, tool: str, session_id: str, prompt: str,
+                     barrier, queue) -> None:
+    """multiprocessing worker：同步起跑後跑完整 build_shortlist_and_record，回報是否注入。
+
+    模擬兩個 prompt-time 路徑（Claude prompt hook 與顯式 recall）對同一
+    (tool, session_id) 同 prompt 併發跑完整管線——seen 去重與 claim 必須原子。
+    """
+    from paulsha_hippo.hooks import _shortlist_common as sc
+    barrier.wait()
+    out = sc.build_shortlist_and_record(Path(root), tool, session_id, cwd="/x", prompt=prompt)
+    queue.put(1 if out else 0)
+
+
+def test_build_shortlist_concurrent_same_session_claims_slice_once(tmp_path, monkeypatch):
+    # 迴歸（#17 Codex gate [high]）：seen 讀取＋hits 篩選過去發生在任何鎖之外，
+    # 只有 _record_offered 內的 map RMW 被 per-session flock 保護。兩個進程對同一
+    # (tool, session_id) 同 prompt 併發跑完整 build_shortlist_and_record()：兩邊都
+    # 讀到空 seen → 都回傳非空 shortlist、都向 offered.jsonl 追加同一 slice（重複
+    # 曝光＋offered_count 膨脹）。修正後「重讀 seen → claim → ledger append → map
+    # commit」整段併入同一把 per-session flock：恰一次非空回傳、offered.jsonl 對該
+    # slice 僅一筆、後續 read 判定 offered:true。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)  # 單一命中 slice sl-aaaaaaaaaaaaaaaa
+
+    ctx = multiprocessing.get_context("fork")
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+    procs = [
+        ctx.Process(target=_pipeline_worker,
+                    args=(str(tmp_path), "claude-code", "sidRACE", "SerialWrap 執行",
+                          barrier, queue))
+        for _ in range(2)
+    ]
+    for p in procs:
+        p.start()
+    results = sorted(queue.get(timeout=120) for _ in range(2))
+    for p in procs:
+        p.join(timeout=120)
+    assert all(p.exitcode == 0 for p in procs)
+
+    assert results == [0, 1]  # 恰一次非空注入；另一路 seen 已含該 slice → 去重成空
+
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert [item["sl_id"] for item in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+
+    # 後續 read 判定：該 slice 一定 offered:true（map 已 commit）
+    assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRACE")
