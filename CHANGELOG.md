@@ -18,7 +18,7 @@
 - `hippo doctor --probe-live`（或 env `HIPPO_DOCTOR_LIVE_PROBE=1`）：對 configured backend 實際送一次 bounded smoke prompt（真實喚起、60s timeout、可能產生 API 成本）；未帶時裸 doctor 僅做解析級檢查。
 - `paulsha_hippo/dream/lock.py`：global dream lock（`dream_lock_path`／`acquire_dream_lock`），PR-C doctor 引用同一路徑。
 - `paulsha_hippo/ops.py`：`resolve_backend_argv` + `BackendUnavailableError`（PR-D preset registry 重用）。
-- `hippo locks cleanup-legacy --memory-root <root> [--apply]`：legacy per-session lock 檔一次性清理；預設 dry-run，apply 受雙層安全閘保護（偵測到其他 hippo 進程即拒絕＋逐檔 flock 探測跳過 busy），僅供恢復序列維護窗口使用（#19）
+- `hippo locks cleanup-legacy --memory-root <root> [--apply]`：legacy per-session lock 檔一次性清理；預設 dry-run，apply 受三層安全閘保護——(1) 路徑閘：`runtime/locks` 逐層 `O_NOFOLLOW` 驗證＋dir_fd 相對列舉／unlink，locks 為 symlink 時拒絕（`unsafe_locks_dir`），杜絕經 symlink 刪到 memory_root 外部檔案；(2) 進程閘：`/proc` 掃描回傳 `scan_ok`，掃描失敗（proc 無法列舉、非 Linux、hidepid 的 EACCES）或偵測到其他 hippo 進程即拒絕（fail-closed，不把空清單當已淨空）；(3) 名稱閘：正向辨識歷史 per-session 命名（由 idempotency key 公式反推）才歸 legacy，未知命名 `.lock` 一律歸 `unknown`、保留並拒絕 --apply。通過後逐檔 flock 探測跳過 busy。僅供恢復序列維護窗口使用（#19）
 
 ### Changed
 - dream systemd timer 排程改為 `OnCalendar=hourly`，並保留 `Persistent=true`。

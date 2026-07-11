@@ -897,7 +897,8 @@ def _locks_cleanup_legacy(args: argparse.Namespace) -> int:
 
     result = ops.cleanup_legacy_locks(Path(args.memory_root), apply=args.apply)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    if result.get("blocked") or result.get("busy"):
+    if (result.get("blocked") or result.get("busy")
+            or result.get("unknown") or result.get("unsafe_locks_dir")):
         return 1
     return 0
 

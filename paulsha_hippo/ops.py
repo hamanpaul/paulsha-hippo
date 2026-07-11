@@ -9,6 +9,7 @@ import fcntl
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -690,17 +691,19 @@ _KEEP_LOCK_NAMES = {"import-ledger.lock", "dream.lock"}
 
 
 def _iter_pids(proc_root: Path) -> list[int]:
-    try:
-        entries = os.listdir(proc_root)
-    except OSError:
-        return []
+    """列 proc_root 下的 PID。listdir 失敗（proc_root 不存在／非 Linux／權限）會 raise
+    OSError——由呼叫端決定 fail-open（診斷）或 fail-closed（清理閘）。"""
+    entries = os.listdir(proc_root)
     return sorted(int(name) for name in entries if name.isdigit())
 
 
 def _read_cmdline(proc_root: Path, pid: int) -> list[str]:
+    """讀 /proc/<pid>/cmdline。PID 讀取途中消失（ENOENT）→ 回空清單（已確認不在，
+    可忽略）；其餘 OSError（hidepid 的 EACCES 等「身分無法確認」）向上拋，由清理閘
+    判為掃描不完整、拒絕 --apply。空 cmdline（kernel thread）為正常讀取成功、回空清單。"""
     try:
         raw = (proc_root / str(pid) / "cmdline").read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return []
     return [part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part]
 
@@ -734,17 +737,30 @@ def _read_cwd(proc_root: Path, pid: int) -> str | None:
         return None
 
 
-def scan_hippo_processes(*, proc_root: str | Path = "/proc") -> list[dict[str, object]]:
-    """列出 cmdline 涉及 paulsha_hippo（或 argv[0] 為 hippo）的其他進程。
+def _scan_hippo_processes(*, proc_root: str | Path = "/proc"
+                          ) -> tuple[bool, list[dict[str, object]]]:
+    """列出涉及 paulsha_hippo（或 argv[0] 為 hippo）的其他進程，附掃描完整度旗標。
 
+    回 ``(scan_ok, records)``。``scan_ok=False`` 代表無法證實維護窗口已淨空——/proc
+    列舉本身失敗（proc_root 不存在、非 Linux），或某 PID 身分無法確認（hidepid 下
+    cmdline EACCES 等）；只有「PID 讀取途中 ENOENT 消失」算已確認不在、可忽略。
     只讀 /proc、不發任何 signal；排除自身 PID。proc_root 可注入假目錄供測試。
     """
     root = Path(proc_root)
+    try:
+        pids = _iter_pids(root)
+    except OSError:
+        return False, []  # 連 PID 都列不出 → 掃描失敗，不得當成「已淨空」
+    scan_ok = True
     records: list[dict[str, object]] = []
-    for pid in _iter_pids(root):
+    for pid in pids:
         if pid == os.getpid():
             continue
-        argv = _read_cmdline(root, pid)
+        try:
+            argv = _read_cmdline(root, pid)
+        except OSError:
+            scan_ok = False  # 此 PID 身分無法確認（hidepid/EACCES 等）→ 掃描不完整
+            continue
         if not argv:
             continue
         is_hippo = any("paulsha_hippo" in token for token in argv) or Path(argv[0]).name == "hippo"
@@ -757,7 +773,16 @@ def scan_hippo_processes(*, proc_root: str | Path = "/proc") -> list[dict[str, o
             "started_at": _read_started_at(root, pid),
             "cwd": _read_cwd(root, pid),
         })
-    return records
+    return scan_ok, records
+
+
+def scan_hippo_processes(*, proc_root: str | Path = "/proc") -> list[dict[str, object]]:
+    """診斷面進程清單（fail-open：掃描失敗回空清單）。
+
+    只讀 /proc、不發任何 signal；排除自身 PID。破壞性維運（cleanup_legacy_locks）
+    須改用 ``_scan_hippo_processes`` 取得 scan_ok，不得把空清單當「維護窗口已淨空」。
+    """
+    return _scan_hippo_processes(proc_root=proc_root)[1]
 
 
 def dream_process_report(*, proc_root: str | Path = "/proc",
@@ -845,69 +870,189 @@ def _print_runtime_health(memory_root: Path, *,
               f"cwd={report['cwd']} cmdline={report['cmdline']}")
 
 
+# legacy per-session lock 命名 == safe_key(idempotency_key(session)) + ".lock"，
+# idempotency_key == f"{tool}:{session_id}"，safe_key 把 ':' 與 '/'、'\\' 一律換 '__'。
+# tool 由 adapter 固定為以下三者（claude.py/codex.py/copilot.py），故 legacy 檔名必以
+# "{tool}__" 起頭。正向辨識（由 idempotency key 公式反推）：只有認得出的舊命名才歸
+# legacy，其餘一律 unknown、保留並阻擋 --apply——版本 skew 下寧留勿誤刪（#19 Codex）。
+_LEGACY_LOCK_TOOLS = ("claude-code", "codex", "copilot-cli")
+
+
+def _legacy_lock_prefixes() -> tuple[str, ...]:
+    """由 safe_key + 歷史 tool 集反推 legacy lock 檔名前綴（避免字面字串漂移）。"""
+    from paulsha_hippo.importer.pipeline import safe_key
+    return tuple(safe_key(f"{tool}:") for tool in _LEGACY_LOCK_TOOLS)
+
+
+def _is_legacy_session_lock_name(name: str, prefixes: tuple[str, ...]) -> bool:
+    """正向辨識歷史 per-session lock 檔名——``{tool}__{session_id}.lock``。"""
+    if not name.endswith(".lock"):
+        return False
+    stem = name[: -len(".lock")]
+    return any(stem.startswith(p) and len(stem) > len(p) for p in prefixes)
+
+
+def _open_locks_dir(memory_root: Path) -> tuple[int | None, str]:
+    """安全開啟 runtime/locks 目錄 fd，杜絕經 symlink 逃逸列舉／刪檔（#19 Codex）。
+
+    回 ``(fd, status)``：
+      status=="ok"     —— fd 為經 O_NOFOLLOW 驗證、確為目錄的 locks fd（呼叫端負責 close）
+      status=="absent" —— runtime 或 locks 不存在（乾淨 no-op），fd 為 None
+      status=="unsafe" —— 路徑含 symlink 元件或無法安全開啟（拒絕），fd 為 None
+    memory_root 為信任錨（操作者指名，其上游 symlink 不設限）；工具自行接上的 runtime/
+    locks 逐層 O_NOFOLLOW，任一層為 symlink → ELOOP（OSError）→ unsafe。杜絕把
+    locks 指向外部目錄後 iterdir()+unlink() 刪到 memory_root 外部檔案、破壞其他元件
+    仰賴的 flock rendezvous inode。ENOENT → absent；其餘 OSError 保守判 unsafe。
+    """
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    sub_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec
+    try:
+        anchor = os.open(memory_root, os.O_RDONLY | os.O_DIRECTORY | cloexec)
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError:
+        return None, "unsafe"
+    try:
+        try:
+            runtime_fd = os.open("runtime", sub_flags, dir_fd=anchor)
+        except FileNotFoundError:
+            return None, "absent"
+        except OSError:
+            return None, "unsafe"
+        try:
+            try:
+                locks_fd = os.open("locks", sub_flags, dir_fd=runtime_fd)
+            except FileNotFoundError:
+                return None, "absent"
+            except OSError:
+                return None, "unsafe"
+            return locks_fd, "ok"
+        finally:
+            os.close(runtime_fd)
+    finally:
+        os.close(anchor)
+
+
+def _iter_lock_files(locks_fd: int) -> list[tuple[str, bool]]:
+    """dir_fd 相對列舉 locks 目錄；回 ``(name, is_regular_file)``，不跟任何 symlink。"""
+    entries: list[tuple[str, bool]] = []
+    for name in sorted(os.listdir(locks_fd)):
+        try:
+            st = os.stat(name, dir_fd=locks_fd, follow_symlinks=False)  # lstat 語意
+        except OSError:
+            continue  # 列舉瞬間消失
+        entries.append((name, stat.S_ISREG(st.st_mode)))
+    return entries
+
+
 def cleanup_legacy_locks(memory_root: Path, *, apply: bool = False,
                          proc_root: str | Path = "/proc") -> dict[str, object]:
     """#19：legacy per-session lock 檔一次性清理（僅維護窗口執行）。
 
     #19 教訓：執行中直接 unlink lock 檔會破壞 flock 互斥（新開者 rendezvous 到新
-    inode）。因此雙層安全閘：
-      1. 進程閘：偵測到其他 paulsha_hippo/hippo 進程（可能是尚未升版的 importer）
-         → apply 直接拒絕（result["blocked"]），一檔不刪。
-      2. flock 閘：逐檔 LOCK_EX|LOCK_NB 探測，busy 檔跳過（result["busy"]）。
-    keep-set：import-ledger.lock、dream.lock（契約 3）、index-rebuild.lock（MOC
-    重建互斥鎖，與本 PR 的 per-session lock 無關，永久 flock rendezvous inode——
-    名稱由 search.index_lock_path 唯一定義、import 派生避免字面字串漂移）、
-    lock_shard_XX.lock（契約 4）。非 .lock 檔一律不碰。預設 dry-run（apply=False）只列清單。
+    inode）。三層安全閘，任一未過即拒絕 --apply（result["blocked"]），一檔不刪：
+      1. 路徑閘：runtime/locks 逐層 O_NOFOLLOW 驗證、以 dir_fd 相對列舉／unlink；locks
+         為 symlink（指向外部）時 result["unsafe_locks_dir"]、拒絕，杜絕刪到 memory_root
+         外部檔案（Codex 實測逃逸）。
+      2. 進程閘：_scan_hippo_processes 回 scan_ok。掃描不完整（/proc 無法列舉、非
+         Linux、hidepid 的 EACCES 等「無法證實已淨空」）→ 拒絕（result["scan_ok"]=False）；
+         確認有其他 paulsha_hippo/hippo 進程（可能是尚未升版的 importer）→ 拒絕。
+      3. 名稱閘：正向辨識歷史 per-session 命名（由 idempotency key 公式反推）才歸
+         legacy；既非現行共享鎖亦非 legacy 命名者一律歸 unknown、保留並拒絕——版本
+         skew 下寧留勿誤刪（Codex：future-global-writer.lock 不得被誤判為 legacy）。
+    通過三閘後逐檔 LOCK_EX|LOCK_NB 探測，busy 檔跳過（result["busy"]）。keep-set：
+    import-ledger.lock、dream.lock（契約 3）、index-rebuild.lock（MOC 重建鎖，名稱由
+    search.index_lock_path 派生避免漂移）、lock_shard_XX.lock（契約 4）。非 .lock 檔
+    一律不碰；.lock 但非現行/非 legacy 命名者歸 unknown。預設 dry-run 只列清單。
     """
     from paulsha_hippo.importer.pipeline import is_shard_lock_name
     from paulsha_hippo.moc.search import index_lock_path
 
-    locks_dir = Path(memory_root) / "runtime" / "locks"
-    keep_names = _KEEP_LOCK_NAMES | {index_lock_path(Path(memory_root)).name}
-    others = scan_hippo_processes(proc_root=proc_root)
+    root = Path(memory_root)
+    locks_dir = root / "runtime" / "locks"
+    keep_names = _KEEP_LOCK_NAMES | {index_lock_path(root).name}
+    legacy_prefixes = _legacy_lock_prefixes()
+    scan_ok, others = _scan_hippo_processes(proc_root=proc_root)
+
     legacy: list[str] = []
     kept: list[str] = []
-    if locks_dir.is_dir():
-        for path in sorted(locks_dir.iterdir()):
-            if not path.is_file() or path.suffix != ".lock":
+    unknown: list[str] = []
+    locks_fd, dir_status = _open_locks_dir(root)
+    try:
+        if dir_status == "ok" and locks_fd is not None:
+            for name, is_regular in _iter_lock_files(locks_fd):
+                if not name.endswith(".lock"):
+                    continue  # 非 .lock 檔一律不碰
+                if not is_regular:
+                    unknown.append(name)  # symlink/子目錄假冒 .lock → 可疑，保留＋阻擋
+                elif name in keep_names or is_shard_lock_name(name):
+                    kept.append(name)
+                elif _is_legacy_session_lock_name(name, legacy_prefixes):
+                    legacy.append(name)
+                else:
+                    unknown.append(name)  # 未知命名 → 保留＋阻擋 --apply
+
+        result: dict[str, object] = {
+            "locks_dir": str(locks_dir),
+            "legacy": legacy,
+            "kept": kept,
+            "unknown": unknown,
+            "other_processes": [{"pid": r["pid"], "cmdline": r["cmdline"]} for r in others],
+            "scan_ok": scan_ok,
+            "applied": False,
+            "deleted": [],
+            "busy": [],
+        }
+        if dir_status == "unsafe":
+            result["unsafe_locks_dir"] = True
+        if not apply:
+            return result
+        if dir_status == "unsafe":
+            result["blocked"] = "locks 路徑含 symlink 元件（拒絕經 symlink 刪檔）；拒絕清理"
+            return result
+        if not scan_ok:
+            result["blocked"] = ("進程掃描不完整（/proc 無法列舉或存取受限），"
+                                 "維護窗口無法確立；拒絕清理")
+            return result
+        if others:
+            result["blocked"] = "偵測到其他 hippo 進程，維護窗口未確立；拒絕清理"
+            return result
+        if unknown:
+            result["blocked"] = ("偵測到無法辨識的 lock 檔（既非現行共享鎖亦非 legacy "
+                                 "per-session 命名）；拒絕清理")
+            return result
+
+        deleted: list[str] = []
+        busy: list[str] = []
+        for name in legacy:
+            try:
+                entry_fd = os.open(
+                    name, os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=locks_fd)
+            except FileNotFoundError:
+                continue  # 已不在（別的維護窗口已清）——視同完成
+            except OSError:
+                busy.append(name)  # 例如被換成 symlink（ELOOP）→ 不刪、標 busy
                 continue
-            if path.name in keep_names or is_shard_lock_name(path.name):
-                kept.append(path.name)
-            else:
-                legacy.append(path.name)
-    result: dict[str, object] = {
-        "locks_dir": str(locks_dir),
-        "legacy": legacy,
-        "kept": kept,
-        "other_processes": [{"pid": r["pid"], "cmdline": r["cmdline"]} for r in others],
-        "applied": False,
-        "deleted": [],
-        "busy": [],
-    }
-    if not apply:
-        return result
-    if others:
-        result["blocked"] = "偵測到其他 hippo 進程，維護窗口未確立；拒絕清理"
-        return result
-    deleted: list[str] = []
-    busy: list[str] = []
-    for name in legacy:
-        path = locks_dir / name
-        try:
-            with path.open("a+", encoding="utf-8") as handle:
+            try:
                 try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(entry_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError:
                     busy.append(name)
                     continue
                 try:
-                    path.unlink()
+                    os.unlink(name, dir_fd=locks_fd)
                     deleted.append(name)
+                except OSError:
+                    busy.append(name)
                 finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
-        except OSError:
-            busy.append(name)
-    result["applied"] = True
-    result["deleted"] = deleted
-    result["busy"] = busy
-    return result
+                    fcntl.flock(entry_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(entry_fd)
+        result["applied"] = True
+        result["deleted"] = deleted
+        result["busy"] = busy
+        return result
+    finally:
+        if locks_fd is not None:
+            os.close(locks_fd)
