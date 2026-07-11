@@ -256,7 +256,48 @@ def test_offered_map_path_rejects_non_path_safe_tool(tmp_path, evil):
 def test_offered_map_path_valid_tool_stays_under_wakeup(tmp_path):
     p = SC._offered_map_path(tmp_path, "claude-code", "sid/1")
     assert p.parent == tmp_path / "runtime" / "wakeup"
-    assert p.name == "claude-code__sid__1.offered.json"
+    # '/' 單射 percent-encode 成 %2F（非舊 sanitize 的 '__' 折疊），仍為單一檔名分量。
+    assert p.name == "claude-code__sid%2F1.offered.json"
+
+
+def test_offered_map_path_injective_tool_session_boundary(tmp_path):
+    # 迴歸（#17）：舊 `{tool}__{sanitize_id(sid)}` 編碼非單射——validate_tool 允許 tool
+    # 含 '_'，故 (tool="a", session="b__c") 與 (tool="a__b", session="c") 舊制同映到
+    # `a__b__c.offered.json` → 跨 session/tool offered 汙染（`hippo recall --tool/
+    # --session-id` 為本 PR 新的外部入口）。單射編碼後兩者必須落不同檔。
+    p1 = SC._offered_map_path(tmp_path, "a", "b__c")
+    p2 = SC._offered_map_path(tmp_path, "a__b", "c")
+    assert p1 != p2
+    assert p1.parent == p2.parent == tmp_path / "runtime" / "wakeup"
+
+
+def test_offered_map_path_injective_sanitize_family(tmp_path):
+    # 迴歸（#17）：舊 sanitize_id 把 '/'、':'、'\\' 全折成 '__'，故 session
+    # "a/b"、"a:b"、"a\\b"、"a__b" 四者撞同一檔名。單射 percent-encode 後全異，
+    # 且每個檔名皆為 runtime/wakeup 下單一分量（%2F 非真正路徑分隔符）。
+    sessions = ["a/b", "a:b", "a\\b", "a__b"]
+    paths = [SC._offered_map_path(tmp_path, "claude-code", s) for s in sessions]
+    assert len({p.name for p in paths}) == len(sessions)
+    assert all(p.parent == tmp_path / "runtime" / "wakeup" for p in paths)
+
+
+def test_offered_map_path_backward_compat_common_case(tmp_path):
+    # 相容性：無特殊字元的常見 (tool, session)（tool 無 '_'、session 為 UUID/英數-）
+    # 檔名與舊 `{tool}__{sanitize_id(sid)}` 方案逐 byte 相同——既有 offered map cache
+    # 不因本次改動被孤兒化（僅曾撞名/含特殊字元者改名，由 ledger reconcile 重建）。
+    p = SC._offered_map_path(tmp_path, "claude-code",
+                             "01234567-89ab-cdef-0123-456789abcdef")
+    assert p.name == "claude-code__01234567-89ab-cdef-0123-456789abcdef.offered.json"
+
+
+def test_offered_map_path_single_construction_point():
+    # 迴歸（#17）：writer（_shortlist_common）與 post-tool readers（claude/copilot
+    # post_tool_use）過去各自以 f"{TOOL}__{sanitize_id(sid)}.offered.json" 獨立構檔名。
+    # 改單射編碼時三者若不同步，special-char session 的 read attribution 會靜默錯配
+    # （writer 寫 %XX、reader 找舊 '__' → 檔案找不到 → offered 永遠 False）。收斂為
+    # _wakeup_common.offered_map_path 單一構點；shortlist writer 即引用該同一函式。
+    from paulsha_hippo.hooks import _wakeup_common as WC
+    assert SC._offered_map_path is WC.offered_map_path
 
 
 def test_shortlist_traversal_tool_fails_closed_writes_nothing(tmp_path, monkeypatch):

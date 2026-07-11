@@ -180,6 +180,39 @@ def test_funnel_copilot_offered_read_applied_full_chain(tmp_path, capsys):
     assert rep["by_tool"]["copilot-cli"] == {"offered": 1, "read": 1, "applied": 1}
 
 
+def test_funnel_special_char_session_read_attribution(tmp_path):
+    # 迴歸（#17）：offered map 檔名改單射 percent-encode 後，writer（prompt hook）與
+    # reader（post-tool hook）必須走同一構點。session 含特殊字元（':'——舊 sanitize 會
+    # 折成 '__'、且與 tool 的 '_' 撞名）時，若 reader 仍用舊編碼會找不到 writer 落的檔
+    # → offered 誤記 False。端到端斷言：special-char session 下 read 仍 offered=True。
+    note = _seed(tmp_path)
+    proj_cwd = tmp_path / "proj"
+    proj_cwd.mkdir(exist_ok=True)
+    sid = "it-funnel:colon/slash"  # 舊 sanitize_id 會把 ':' 與 '/' 全折成 '__'
+
+    out = _run_hook(
+        PROMPT_HOOK,
+        tmp_path,
+        {"hook_event_name": "UserPromptSubmit", "session_id": sid,
+         "cwd": str(proj_cwd), "prompt": "SerialWrap 執行"},
+    )
+    assert str(note) in out["hookSpecificOutput"]["additionalContext"]
+    offered = _events(tmp_path, "offered.jsonl")
+    assert len(offered) == 1 and offered[0]["session_id"] == sid
+
+    _run_hook(
+        READ_HOOK,
+        tmp_path,
+        {"hook_event_name": "PostToolUse", "session_id": sid, "tool_name": "Read",
+         "tool_input": {"file_path": str(note)}},
+    )
+    reads = [e for e in _events(tmp_path, "memory_usage.jsonl") if e.get("source") == "read"]
+    assert len(reads) == 1
+    # writer↔reader 檔名一致 → 命中 offered map → offered=True（reader 未同步時此處為 False）
+    assert reads[0]["offered"] is True and reads[0]["session_id"] == sid
+    assert reads[0]["sl_id"] == "sl-aaaaaaaaaaaaaaaa"
+
+
 def test_funnel_forged_applied_rejected_end_to_end(tmp_path, capsys):
     # 全鏈情境下的偽造拒絕：真的 offer 過的 session，換一個未 offer 的 slice -> 拒寫
     _seed(tmp_path)

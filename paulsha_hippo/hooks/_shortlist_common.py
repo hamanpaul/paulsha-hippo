@@ -15,7 +15,7 @@ from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
 from paulsha_hippo.retrieval import format_shortlist, to_fts_query
 from paulsha_hippo.hooks._wakeup_common import (
-    hippo_invocation, log_warn, sanitize_id, validate_tool,
+    hippo_invocation, log_warn, offered_map_path as _offered_map_path, validate_tool,
 )
 
 SHORTLIST_K = 3
@@ -68,20 +68,6 @@ def _redact(root: Path, tool: str, project: str, session_ref: str, text: str) ->
     except Exception as exc:
         log_warn(root, tool, f"shortlist redaction failed; suppressing shortlist: {exc}")
         return ""
-
-
-def _offered_map_path(root: Path, tool: str, session_id: str) -> Path:
-    """Per-session offered map path（唯一構點）。
-
-    tool 可能來自外部輸入（`hippo recall --tool`）：先驗證為 path-safe token，
-    再 resolve 確認落點 parent 仍是 runtime/wakeup（防 sanitizer 迴歸與 symlink
-    偷渡）——否則 `--tool ../../x` 會讓後續原子 replace 把檔案寫出 memory root。
-    """
-    wk_dir = root / "runtime" / "wakeup"
-    path = wk_dir / f"{validate_tool(tool)}__{sanitize_id(session_id)}.offered.json"
-    if path.resolve().parent != wk_dir.resolve():
-        raise ValueError(f"offered map path escapes runtime/wakeup: {path}")
-    return path
 
 
 def _offered_pairs_from_ledger(root: Path, tool: str, session_id: str) -> list[tuple[str, str]]:

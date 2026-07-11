@@ -36,7 +36,7 @@ def _match(text: str, pattern: re.Pattern) -> str:
 def main() -> int:
     from paulsha_hippo import policy  # memory-consumer: boundary-aware
     from paulsha_hippo.hooks._wakeup_common import (
-        log_warn, memory_root, read_payload, sanitize_id,
+        log_warn, memory_root, offered_map_path, read_payload,
     )
 
     root = memory_root()
@@ -67,7 +67,9 @@ def main() -> int:
             return 0
 
         session_id = str(payload.get("session_id") or payload.get("sessionId") or "unknown")
-        mpath = root / "runtime" / "wakeup" / f"{TOOL}__{sanitize_id(session_id)}.offered.json"
+        # writer（_shortlist_common）與本 reader 共用同一單射構點，special-char session
+        # 下檔名仍一致——否則 read attribution 靜默錯配（offered 誤記 False）。
+        mpath = offered_map_path(root, TOOL, session_id)
         by_path: dict = {}
         if mpath.exists():
             try:

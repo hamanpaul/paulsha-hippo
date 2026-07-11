@@ -105,6 +105,51 @@ def validate_tool(value: str) -> str:
     return value
 
 
+# offered-map 檔名的單欄位編碼安全直通集：英數＋'.'＋'-'。刻意排除 '_'，使編碼後的
+# 欄位不含任何 '_'——如此 '__' 可作為 tool⟷session_id 的「不可能出現在任一欄位內」的
+# 無歧義分隔符（見 offered_map_path 的單射論證）。
+_OFFERED_TOKEN_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-"
+)
+
+
+def _enc_offered_token(value: str) -> str:
+    """單射、path-safe、且不含 '_' 的單欄位（tool 或 session_id）編碼。
+
+    對不在 [A-Za-z0-9.-] 的字元逐 UTF-8 byte percent-encode（含 '_'→%5F、路徑分隔符、
+    ':'、'%' 本身→%25），故輸出零 '_'、亦無 '/'、'\\'、':'（path-safe）。percent-encoding
+    可逆 ⇒ 對每個欄位單射。常見 token（純英數＋'.'＋'-'，如 UUID／`claude-code`）原樣直通，
+    使無特殊字元的 (tool, session) 檔名與舊 `{tool}__{sanitize_id(sid)}` 方案逐 byte 相容。
+    """
+    out: list[str] = []
+    for ch in value:
+        if ch in _OFFERED_TOKEN_SAFE:
+            out.append(ch)
+        else:
+            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
+def offered_map_path(root: Path, tool: str, session_id: str) -> Path:
+    """Per-session offered-map 路徑——writer 與 post-tool readers 共用的唯一構點。
+
+    tool 可能來自外部輸入（`hippo recall --tool`）：先 validate_tool 為 path-safe token。
+    tool 與 session_id 各自以 _enc_offered_token 單射編碼後以 '__' 銜接。因編碼後兩欄位皆
+    不含 '_'，'__' 為無歧義分隔符 ⇒ (tool, session_id) → 檔名為**單射**：杜絕舊
+    `{tool}__{sanitize_id(sid)}` 的非單射撞名——tool 含 '_'（`a`+`b__c` 與 `a__b`+`c` 舊制
+    同映 `a__b__c`）或 session 經舊 sanitize 折疊（`a/b`、`a:b`、`a\\b`、`a__b` 舊制同映
+    `a__b`）造成的跨 session/tool offered 汙染。resolve 後再確認落點 parent 仍是
+    runtime/wakeup（防 symlink 偷渡與 sanitizer 迴歸；編碼已消除路徑分隔符，此為第二層防護）。
+    """
+    wk_dir = root / "runtime" / "wakeup"
+    fname = (f"{_enc_offered_token(validate_tool(tool))}__"
+             f"{_enc_offered_token(session_id)}.offered.json")
+    path = wk_dir / fname
+    if path.resolve().parent != wk_dir.resolve():
+        raise ValueError(f"offered map path escapes runtime/wakeup: {path}")
+    return path
+
+
 def hippo_invocation(root: Path) -> list[str]:
     """Return an argv prefix that can invoke the hippo CLI in this deployment."""
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
