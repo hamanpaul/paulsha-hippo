@@ -39,6 +39,7 @@ class CleanupLegacyLocksTest(unittest.TestCase):
         # 現行命名（必須保留）
         (self.locks_dir / "import-ledger.lock").touch()
         (self.locks_dir / "dream.lock").touch()          # 契約 3（PR-A）
+        (self.locks_dir / "index-rebuild.lock").touch()  # MOC 重建鎖（origin/main 既有）
         (self.locks_dir / "lock_shard_08.lock").touch()  # 契約 4（本 PR）
         # legacy per-session 命名（清理對象）
         (self.locks_dir / "copilot-cli__sid-001.lock").touch()
@@ -58,8 +59,10 @@ class CleanupLegacyLocksTest(unittest.TestCase):
 
         self.assertEqual(result["legacy"],
                          ["claude-code__abc123.lock", "copilot-cli__sid-001.lock"])
-        self.assertEqual(result["kept"],
-                         ["dream.lock", "import-ledger.lock", "lock_shard_08.lock"])
+        self.assertEqual(
+            result["kept"],
+            ["dream.lock", "import-ledger.lock", "index-rebuild.lock",
+             "lock_shard_08.lock"])
         self.assertFalse(result["applied"])
         self.assertEqual(result["deleted"], [])
         # dry-run 完全不動檔案
@@ -76,7 +79,8 @@ class CleanupLegacyLocksTest(unittest.TestCase):
         self.assertEqual(result["busy"], [])
         self.assertEqual(
             self.all_names(),
-            {"import-ledger.lock", "dream.lock", "lock_shard_08.lock", "README.txt"})
+            {"import-ledger.lock", "dream.lock", "index-rebuild.lock",
+             "lock_shard_08.lock", "README.txt"})
 
     def test_apply_is_blocked_when_other_hippo_process_running(self):
         """安全閘第 1 層：偵測到其他 hippo 進程（舊 importer 可能執行中）→ 拒絕清理。"""
@@ -104,6 +108,31 @@ class CleanupLegacyLocksTest(unittest.TestCase):
         self.assertEqual(result["busy"], ["copilot-cli__sid-001.lock"])
         self.assertEqual(result["deleted"], ["claude-code__abc123.lock"])
         self.assertIn("copilot-cli__sid-001.lock", self.all_names())
+
+    def test_all_known_shared_lock_names_are_kept_not_legacy(self):
+        """回歸：所有已知非 shard 共享鎖（import-ledger.lock／dream.lock／
+        index-rebuild.lock）逐一落在 kept、不得被歸為 legacy。
+
+        index-rebuild.lock 是 MOC 重建互斥鎖（moc.search.index_lock_path），與本
+        PR 的 importer per-session lock 無關；漏掉會在 --apply 時誤刪仍在用的鎖。
+        """
+        from paulsha_hippo.moc import search
+
+        known_shared = {
+            "import-ledger.lock",
+            "dream.lock",
+            search.index_lock_path(self.memory_root).name,  # 錨定 == index-rebuild.lock
+        }
+        self.assertIn("index-rebuild.lock", known_shared)  # 名稱契約未漂移
+
+        result = ops.cleanup_legacy_locks(self.memory_root, apply=False,
+                                          proc_root=self.proc)
+
+        kept = set(result["kept"])
+        legacy = set(result["legacy"])
+        for name in known_shared:
+            self.assertIn(name, kept, f"{name} 應保留卻被歸為 legacy")
+            self.assertNotIn(name, legacy, f"{name} 不得被歸為 legacy")
 
     def test_missing_locks_dir_is_a_clean_noop(self):
         empty_root = self.base / "empty-memory"

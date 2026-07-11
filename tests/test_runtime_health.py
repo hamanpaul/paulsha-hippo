@@ -153,6 +153,66 @@ class DreamProcessReportTest(unittest.TestCase):
         self.assertTrue(reports[0]["non_canonical"])
         self.assertIn("cwd-temp-worktree", reports[0]["reasons"])
 
+    def test_sibling_venv_sharing_base_interpreter_is_interpreter_mismatch(self):
+        """回歸（#19）：兩個獨立 venv 共用同一 base interpreter 時，各自 bin/python3
+        都 symlink 到同一真實檔——對整條 argv[0] 做 resolve 會收斂成同一 parent、
+        interpreter-mismatch 永不觸發（venv-symlink 最常見情境）。判定必須落在 venv
+        的 bin 目錄層：canonical 與孤兒各在不同 venv → 標記 interpreter-mismatch。
+
+        cwd 指向存在且非暫存的目錄，隔離出「唯一 reason 只能來自 interpreter 比對」
+        （不存在的假路徑 fixture 因 resolve 不收斂而覆蓋不到本情境）。
+        """
+        base_python = self.base / "base-python" / "bin" / "python3"
+        base_python.parent.mkdir(parents=True)
+        base_python.touch()
+        canonical_bin = self.base / "venv-canonical" / "bin"
+        orphan_bin = self.base / "venv-orphan" / "bin"
+        canonical_bin.mkdir(parents=True)
+        orphan_bin.mkdir(parents=True)
+        os.symlink(base_python, canonical_bin / "python3")
+        os.symlink(base_python, orphan_bin / "python3")
+        # sanity：兩個 venv 的 python3 對整條路徑 resolve 後確實收斂到同一 parent
+        self.assertEqual(
+            (canonical_bin / "python3").resolve().parent,
+            (orphan_bin / "python3").resolve().parent)
+
+        # cwd 用 Path.home()：存在且非暫存區，隔離出唯一 reason 只能來自 interpreter
+        # 比對（self.base 在 tempdir 下會另外觸發 cwd-temp-worktree）。
+        add_fake_process(
+            self.proc, 4242,
+            [str(orphan_bin / "python3"), "-m", "paulsha_hippo.cli", "dream", "run"],
+            cwd_target=Path.home())
+
+        reports = ops.dream_process_report(
+            proc_root=self.proc,
+            canonical_interpreter=str(canonical_bin / "python3"))
+
+        self.assertEqual(len(reports), 1)
+        self.assertTrue(reports[0]["non_canonical"])
+        self.assertEqual(reports[0]["reasons"], ["interpreter-mismatch"])
+
+    def test_same_venv_interpreter_is_canonical(self):
+        """對照：孤兒與 canonical 同一 venv（同一 bin/python3）→ 不標記 mismatch。"""
+        venv_bin = self.base / "venv-shared" / "bin"
+        venv_bin.mkdir(parents=True)
+        (self.base / "base-python").mkdir()
+        base_python = self.base / "base-python" / "python3"
+        base_python.touch()
+        os.symlink(base_python, venv_bin / "python3")
+
+        add_fake_process(
+            self.proc, 4242,
+            [str(venv_bin / "python3"), "-m", "paulsha_hippo.cli", "dream", "run"],
+            cwd_target=Path.home())
+
+        reports = ops.dream_process_report(
+            proc_root=self.proc,
+            canonical_interpreter=str(venv_bin / "python3"))
+
+        self.assertEqual(len(reports), 1)
+        self.assertFalse(reports[0]["non_canonical"])
+        self.assertEqual(reports[0]["reasons"], [])
+
 
 class DreamLockStatusTest(unittest.TestCase):
     def test_absent_free_held(self):

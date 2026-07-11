@@ -1,2 +1,2 @@
 ### Changed
-- importer ingest（#19）改用 64-shard session lock，`runtime/locks/` 不再產生 legacy per-session `{safe_key(key)}.lock`，僅保留 shard lock 與既有 shared locks。
+- importer per-session lock 改為固定 64 個 hash-sharded locks（`lock_shard_{h:02x}.lock`，`h = crc32(safe_key(key)) % 64`）：`runtime/locks/` 檔案數收斂為常數上界，碰撞只降低並行度、不影響互斥正確性（#19）

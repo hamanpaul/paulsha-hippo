@@ -766,11 +766,16 @@ def dream_process_report(*, proc_root: str | Path = "/proc",
     """dream/supervise 進程健康報告素材：附 non_canonical 標記與 reasons。
 
     只報告，不自動 kill（#19）。reason tokens：
-      interpreter-mismatch —— argv[0]（絕對路徑時）不在本安裝環境的 interpreter 目錄
+      interpreter-mismatch —— argv[0]（絕對路徑時）的 bin 目錄與本安裝環境的
+                              interpreter 目錄不同（比目錄層、不跟 python symlink）
       cwd-missing          —— 進程 cwd 已不存在（多半是被清掉的暫存 worktree）
       cwd-temp-worktree    —— 進程 cwd 位於暫存區（.psc_tmp / .test-work / tempdir）
     """
-    canonical = Path(canonical_interpreter or sys.executable).resolve(strict=False)
+    # 只 resolve 目錄層、不對最終 python 檔跟 symlink：venv 的 bin/python3 多半是
+    # 指向共用 base interpreter 的 symlink，若對整條 argv[0] 做 resolve，兩個不同
+    # venv 會收斂成同一真實路徑、同一 parent，interpreter-mismatch 永不觸發——正是
+    # 暫存 worktree 各自 .venv 共用同一 base Python 的最常見情境（#19 回歸）。
+    canonical_bin = Path(canonical_interpreter or sys.executable).parent.resolve(strict=False)
     reports: list[dict[str, object]] = []
     for record in scan_hippo_processes(proc_root=proc_root):
         argv_value = record.get("argv")
@@ -781,8 +786,8 @@ def dream_process_report(*, proc_root: str | Path = "/proc",
             continue
         reasons: list[str] = []
         if argv[0].startswith("/"):
-            argv0 = Path(argv[0]).resolve(strict=False)
-            if argv0.parent != canonical.parent:
+            argv0_bin = Path(argv[0]).parent.resolve(strict=False)
+            if argv0_bin != canonical_bin:
                 reasons.append("interpreter-mismatch")
         cwd = record.get("cwd")
         if isinstance(cwd, str):
@@ -849,12 +854,16 @@ def cleanup_legacy_locks(memory_root: Path, *, apply: bool = False,
       1. 進程閘：偵測到其他 paulsha_hippo/hippo 進程（可能是尚未升版的 importer）
          → apply 直接拒絕（result["blocked"]），一檔不刪。
       2. flock 閘：逐檔 LOCK_EX|LOCK_NB 探測，busy 檔跳過（result["busy"]）。
-    keep-set：import-ledger.lock、dream.lock（契約 3）、lock_shard_XX.lock（契約 4）。
-    非 .lock 檔一律不碰。預設 dry-run（apply=False）只列清單。
+    keep-set：import-ledger.lock、dream.lock（契約 3）、index-rebuild.lock（MOC
+    重建互斥鎖，與本 PR 的 per-session lock 無關，永久 flock rendezvous inode——
+    名稱由 search.index_lock_path 唯一定義、import 派生避免字面字串漂移）、
+    lock_shard_XX.lock（契約 4）。非 .lock 檔一律不碰。預設 dry-run（apply=False）只列清單。
     """
     from paulsha_hippo.importer.pipeline import is_shard_lock_name
+    from paulsha_hippo.moc.search import index_lock_path
 
     locks_dir = Path(memory_root) / "runtime" / "locks"
+    keep_names = _KEEP_LOCK_NAMES | {index_lock_path(Path(memory_root)).name}
     others = scan_hippo_processes(proc_root=proc_root)
     legacy: list[str] = []
     kept: list[str] = []
@@ -862,7 +871,7 @@ def cleanup_legacy_locks(memory_root: Path, *, apply: bool = False,
         for path in sorted(locks_dir.iterdir()):
             if not path.is_file() or path.suffix != ".lock":
                 continue
-            if path.name in _KEEP_LOCK_NAMES or is_shard_lock_name(path.name):
+            if path.name in keep_names or is_shard_lock_name(path.name):
                 kept.append(path.name)
             else:
                 legacy.append(path.name)
