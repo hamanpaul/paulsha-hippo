@@ -156,20 +156,89 @@ def _commit_offered_map(mpath: Path, offered: list[tuple[str, str]]) -> None:
         raise
 
 
+def _read_map_snapshot(mpath: Path) -> bytes | None:
+    """Commit 前的 per-session map 原始 bytes（回滾用）；None＝檔案不存在。呼叫端持 flock。
+
+    讀不到（不存在／IO 錯誤）一律視為「無前態」→ 回滾時直接移除本次寫入的 map
+    （獨佔鎖下無其他 writer 的狀態可丟）。
+    """
+    try:
+        return mpath.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def _restore_offered_map(mpath: Path, snapshot: bytes | None) -> None:
+    """把 per-session map 原子回滾到 commit 前的 snapshot。呼叫端持 per-session flock。
+
+    snapshot 為 commit 前擷取的原始 bytes，或 None（map 原本不存在→移除本次寫入）。
+    沿用與 _commit_offered_map 相同的 tmp＋原子 replace，並發 reader 不會看到半寫檔。
+    """
+    if snapshot is None:
+        with contextlib.suppress(FileNotFoundError):
+            mpath.unlink()
+        return
+    tmp = mpath.with_name(f".{mpath.name}.{os.getpid()}-{secrets.token_hex(4)}.rollback")
+    try:
+        tmp.write_bytes(snapshot)
+        tmp.replace(mpath)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _publish_offered(root: Path, tool: str, session_id: str, project: str,
+                     mpath: Path, offered: list[tuple[str, str]]) -> None:
+    """原子發布一筆 offered 事件——per-session map 與 offered ledger 全有或全無。呼叫端持 flock。
+
+    兩產物的可逆性不對稱：per-session map 是「tmp＋原子 replace」可逆；offered ledger
+    是 append-only 不可逆，且被**跨 session 共用**（per-session flock 不序列化不同 session
+    對同一 offered.jsonl 的 append）→ 絕不能事後改寫 ledger 回滾。因此排序為：
+
+      1. 先 commit 可逆的 map（失敗→ledger 完全未動，直接 raise）；
+      2. 後 append 不可逆的 ledger 作為 commit point（失敗→把 map 回滾到 snapshot 再 raise）。
+
+    任一階段失敗都不會單邊發布：
+      - map commit 失敗 → 無幽靈 ledger 事件（不灌 offered/never-read 指標、不讓
+        mark-applied 的參照驗證接受從未實際送達的 slice）；
+      - ledger append 失敗 → map 還原到前態（不留幽靈 seen-id 去無聲壓掉未來的真實 offer）。
+
+    失敗時例外往外拋、shortlist pipeline 外層 fail-closed 回 ''；因兩產物皆未發布，相同
+    輸入的重試會乾淨地重新嘗試（無重複 ledger 事件、無 map 汙染）。若回滾亦失敗（雙重
+    故障：map 已含該 slice、ledger 未寫），ledger（漏斗真值）仍保持乾淨、不重現本 finding
+    的指標膨脹，僅使該 slice 本 session 不再被 offer——記 loud warning 供恢復診斷。
+    """
+    snapshot = _read_map_snapshot(mpath)
+    _commit_offered_map(mpath, offered)
+    try:
+        _append_offered_ledger(root, tool, session_id, project, offered)
+    except BaseException as append_exc:
+        try:
+            _restore_offered_map(mpath, snapshot)
+        except BaseException as rollback_exc:
+            log_warn(root, tool,
+                     f"offered ledger append failed AND map rollback failed; per-session "
+                     f"map may retain un-published slice(s) while ledger stays clean: "
+                     f"append={append_exc!r} rollback={rollback_exc!r}")
+        raise
+
+
 def _record_offered(root: Path, tool: str, session_id: str, project: str,
                     offered: list[tuple[str, str]]) -> None:
-    """Append offered ledger + commit per-session map，全程持 per-session flock。Best-effort。
+    """原子發布 offered（map commit＋ledger append），全程持 per-session flock。Best-effort。
 
-    保留給直接呼叫端（顯式 recall 只記帳、既有並發測試）。完整 shortlist 管線
-    改由 build_shortlist_and_record 在同一把鎖內連同「重讀 seen → claim」一起
-    持有（見該函式），使去重判定與 claim 對同一 session 原子。ledger append 與
-    map commit 併入同一臨界區——兩者對外一致發布。
+    保留給直接呼叫端（顯式 recall 只記帳、既有並發測試）。完整 shortlist 管線改由
+    build_shortlist_and_record 在同一把鎖內連同「重讀 seen → claim」一起持有（見該函式），
+    使去重判定與 claim 對同一 session 原子。兩者皆委由 _publish_offered 原子發布——map
+    commit 與 ledger append 全有或全無，任一階段失敗不單邊發布。
     """
     try:
         mpath = _offered_map_path(root, tool, session_id)
         with _session_lock(mpath):
-            _append_offered_ledger(root, tool, session_id, project, offered)
-            _commit_offered_map(mpath, offered)
+            _publish_offered(root, tool, session_id, project, mpath, offered)
     except Exception as exc:
         log_warn(root, tool, f"failed to record offered: {exc}")
 
@@ -211,7 +280,7 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             return ""
         # tool 已於函式頂端驗證；建 offered-map 路徑（_offered_map_path 內含第二層
         # traversal 防護）並持 per-session flock，把「重讀 seen → claim hits → redact →
-        # ledger append → map commit」整段併入同一原子臨界區——兩個進程對同一
+        # 原子發布（map commit + ledger append）」整段併入同一原子臨界區——兩個進程對同一
         # (tool, session_id) 併發時不會各讀空 seen 而重複 claim／重複曝光同一 slice。
         # search 屬只讀且不需序列化，留在鎖外。
         mpath = _offered_map_path(root, tool, session_id)
@@ -229,8 +298,10 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                 # NOT record offered (nothing was surfaced to the agent).
                 return ""
             offered = [(h["slice_id"], h["path"]) for h in claim if h.get("path")]
-            _append_offered_ledger(root, tool, session_id, project, offered)
-            _commit_offered_map(mpath, offered)
+            # 原子發布：map commit 與 ledger append 全有或全無。任一階段失敗會 raise，
+            # 由下方外層 fail-closed 回 ''——不會出現「ledger 已記 offered 但 agent 收不到
+            # shortlist」的單邊發布（膨脹 offered/never-read、污染 mark-applied 參照驗證）。
+            _publish_offered(root, tool, session_id, project, mpath, offered)
         return block + "\n" + _applied_hint(root, tool, session_id)
     except Exception as exc:
         log_warn(root, tool, f"shortlist failed: {exc}")

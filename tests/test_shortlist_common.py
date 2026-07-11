@@ -331,3 +331,100 @@ def test_build_shortlist_concurrent_same_session_claims_slice_once(tmp_path, mon
 
     # 後續 read 判定：該 slice 一定 offered:true（map 已 commit）
     assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRACE")
+
+
+def _boom_oserror(*a, **k):
+    raise OSError("disk full")
+
+
+def test_publish_offered_map_commit_failure_writes_no_ledger(tmp_path, monkeypatch):
+    # 迴歸（#17 Codex gate [high]）：offered ledger 與 per-session map 過去非原子雙寫——
+    # 先 append 不可逆的 ledger、才 commit map。map commit 因磁碟滿／權限／IO 失敗時，
+    # 外層 fail-closed 回 ''（agent 收不到 shortlist），但 ledger 已寫入該 offered 事件
+    # （膨脹 offered/never-read、讓 mark-applied 參照驗證接受從未送達的 slice）。修正後
+    # map commit 先行、失敗即 raise，ledger 完全未動。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    monkeypatch.setattr(SC, "_commit_offered_map", _boom_oserror)
+
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidMC", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out == ""
+    # KEY：ledger 不得有任何 offered 事件（修正前此處會有一筆從未送達的 offer）
+    assert _offered_events(tmp_path) == []
+    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidMC.offered.json").exists()
+
+
+def test_publish_offered_ledger_failure_rolls_back_map(tmp_path, monkeypatch):
+    # ledger append 失敗（disk full）：map 必須回滾到前態（此處前態＝不存在），外層回
+    # ''，兩產物皆未發布，且不留 .tmp / .rollback 殘留。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    monkeypatch.setattr(SC, "_append_offered_ledger", _boom_oserror)
+
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidLA", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out == ""
+    assert _offered_events(tmp_path) == []
+    # map commit 已寫入又被回滾移除（前態為不存在）
+    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidLA.offered.json").exists()
+    wakeup = tmp_path / "runtime" / "wakeup"
+    if wakeup.exists():
+        residue = [p.name for p in wakeup.iterdir() if p.name.endswith((".tmp", ".rollback"))]
+        assert residue == []
+
+
+def test_publish_offered_ledger_failure_restores_prior_nonempty_map(tmp_path, monkeypatch):
+    # 前態非空的回滾：先成功 offer A（map={A}、ledger=[A]），第二筆 B 於 ledger append
+    # 失敗——map 必須還原成 {A}（B 被回滾）、ledger 仍只有 A（不會落入 map 有 B、ledger
+    # 無 B 的單邊態）。以 _record_offered 直呼，精準控制 offered 清單。
+    note_a = str(tmp_path / "knowledge" / "proj" / "a.md")
+    note_b = str(tmp_path / "knowledge" / "proj" / "b.md")
+    SC._record_offered(tmp_path, "claude-code", "sidRB", "proj",
+                       [("sl-aaaaaaaaaaaaaaaa", note_a)])
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidRB.offered.json"
+    before = mpath.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(SC, "_append_offered_ledger", _boom_oserror)
+    SC._record_offered(tmp_path, "claude-code", "sidRB", "proj",
+                       [("sl-bbbbbbbbbbbbbbbb", note_b)])  # _record_offered 內部吞例外
+
+    assert mpath.read_text(encoding="utf-8") == before  # 逐 byte 還原
+    m = json.loads(mpath.read_text(encoding="utf-8"))
+    assert m["by_id"] == {"sl-aaaaaaaaaaaaaaaa": note_a}
+    assert "sl-bbbbbbbbbbbbbbbb" not in m["by_id"]
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+
+
+def test_publish_offered_retry_after_failure_is_clean(tmp_path, monkeypatch):
+    # 失敗的發布不留半發布狀態 → 相同輸入重試乾淨成功：恰一筆 offered（首次失敗的嘗試
+    # 未污染 seen／未重複記帳）。_commit_offered_map 首呼失敗、次呼委派真實實作。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    real_commit = SC._commit_offered_map
+    calls = {"n": 0}
+
+    def _flaky_commit(mpath, offered):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_commit(mpath, offered)
+
+    monkeypatch.setattr(SC, "_commit_offered_map", _flaky_commit)
+
+    # 第一次：map commit 失敗 → '' 且無 ledger、無 map
+    assert SC.build_shortlist_and_record(tmp_path, "claude-code", "sidRT", cwd="/x",
+                                         prompt="SerialWrap 執行") == ""
+    assert _offered_events(tmp_path) == []
+    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidRT.offered.json").exists()
+
+    # 第二次（相同輸入、磁碟恢復）：乾淨成功、恰一筆 offered
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidRT", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out != ""
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+    assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRT")

@@ -24,6 +24,25 @@
 > 送達本機 probe 未 fire（見 session-start 列與證據區，headless 因 permission denied 未證實），亦無已實測的
 > 替代送達管道證據——送達未證實則整條 recall 鏈未證實。待真實 codex host 證明 SessionStart FIRED 且
 > additionalContext 實際進入模型後，再升為 `recall-capable`。此處以誠實為準，不因 CLI 可跑就宣稱能力成立。
+>
+> **交付邊界（#17 codex，回應 Codex review [high]）**：本分支**不宣稱** codex 端到端送達成立，
+> 亦**不以 codex 端到端為由帶 `Closes #17`**——如上，codex 的 orientation 送達（SessionStart）本機未證實
+> （headless permission denied）。為免把「未證實的 live 送達」與「已證實的 recall 路徑」混為一談，交付面切分如下：
+>
+> 1. **spec §3.6 fixture 級驗收（recall 路徑）已達成、且為 deterministic 實測**：
+>    `tests/test_recall_cli.py::test_recall_prints_shortlist_and_records_offered_with_tool` 以
+>    `hippo recall --tool codex` 驅動整條「檢索 → shortlist → `offered.jsonl` 記帳」，斷言
+>    `offered` 事件 `tool == "codex"`、`session_id` 正確、per-session map（`codex__<sid>.offered.json`）
+>    對齊——即 spec 驗收所述「codex session fixture 經 recall 路徑取得 shortlist 且 offered.jsonl 記錄
+>    正確 tool」。此段不依賴任何 live host，CI 常駐。
+> 2. **已測的送達管道＝tool-agnostic recall consumer API**：`hippo recall`（凡有 shell 的平台皆可呼叫）
+>    是送達無關的消費入口——agent 一旦以任務 prompt 呼叫即取得 shortlist 並落 offered；此段已 fixture 實證
+>    （見上）。codex 有 shell，故此管道對 codex **可用且已測**。**未**證實的僅剩「如何在 codex 端讓 agent
+>    知道去呼叫 recall」這層 orientation 送達（SessionStart hook 注入指引），此層維持 `inconclusive`，故
+>    codex 總評保守維持 `inconclusive`（不因 recall CLI 已測就上修端到端）。
+> 3. **升級條件（不變）**：於真實 codex host 證明 `SessionStart` FIRED 且注入的 additionalContext 確進入
+>    模型 context（比照 copilot 證據區 MEMO-TOKEN 行為級驗證）→ 屆時 codex 端到端方成立、`Closes #17` 方
+>    涵蓋 codex 端到端；在此之前 codex 端到端列為未完成、僅交付上述已測的 recall consumer API。
 
 ## 證據
 
