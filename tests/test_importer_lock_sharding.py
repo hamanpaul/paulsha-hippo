@@ -1,9 +1,13 @@
 """#19 PR-C：importer lock sharding（契約 4）與並發互斥。"""
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 from paulsha_hippo.importer import pipeline
 from paulsha_hippo.importer.pipeline import is_shard_lock_name, shard_lock_path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ShardLockPathTest(unittest.TestCase):
@@ -46,6 +50,73 @@ class ShardLockPathTest(unittest.TestCase):
         self.assertFalse(is_shard_lock_name("copilot-cli__sid-001.lock"))  # legacy 命名
         self.assertFalse(is_shard_lock_name("import-ledger.lock"))
         self.assertFalse(is_shard_lock_name("dream.lock"))
+
+
+def _stress_payload(*, session_id: str, cwd: str, turns: int = 1) -> dict:
+    return {
+        "tool": "copilot-cli",
+        "session_id": session_id,
+        "capture_scope": "turn",
+        "ended_at": "2026-07-10T10:00:00+00:00",
+        "cwd": cwd,
+        "repo": "hamanpaul/paulsha-hippo",
+        "commit": "0000000",
+        "turn_count": turns,
+        "user_prompts": ["stress"],
+        "assistant_summary": "summary",
+        "touched_files": ["a.py"],
+        "referenced_artifacts": [],
+    }
+
+
+class _ScratchCase(unittest.TestCase):
+    """沿 tests/test_idempotency.py 慣例：scratch 開在 repo 內 .test-work。"""
+
+    def setUp(self):
+        self.scratch = REPO_ROOT / ".test-work"
+        self.scratch.mkdir(exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=self.scratch)
+        self.root = Path(self.tmp.name) / "memory"
+        self.queue = self.root / "runtime" / "queue"
+        self.queue.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        try:
+            self.scratch.rmdir()
+        except OSError:
+            pass
+
+    def write_queue_item(self, name: str, payload: dict) -> Path:
+        path = self.queue / f"{name}.json"
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        return path
+
+    def lock_names(self) -> set[str]:
+        locks_dir = self.root / "runtime" / "locks"
+        if not locks_dir.is_dir():
+            return set()
+        return {p.name for p in locks_dir.iterdir() if p.is_file()}
+
+
+class LegacyLockRetirementTest(_ScratchCase):
+    def test_ingest_creates_shard_lock_and_no_legacy_per_session_lock(self):
+        payload = _stress_payload(session_id="sid-001", cwd=str(self.root))
+        queue_item = self.write_queue_item("one", payload)
+
+        decision = pipeline.ingest_queue_item(queue_item, memory_root=self.root)
+
+        self.assertEqual(decision["status"], "written")
+        names = self.lock_names()
+        # 契約 4：sid-001 落在 shard 0x34（Task 1 鎖定的常數）
+        self.assertIn("lock_shard_34.lock", names)
+        # 停產 legacy 命名：不得再出現 {safe_key(key)}.lock
+        self.assertNotIn("copilot-cli__sid-001.lock", names)
+        for name in names:
+            self.assertTrue(
+                is_shard_lock_name(name) or name == "import-ledger.lock",
+                f"unexpected lock file: {name}",
+            )
 
 
 if __name__ == "__main__":

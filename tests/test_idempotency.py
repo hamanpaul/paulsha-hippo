@@ -315,7 +315,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
         first_holding_lock = Event()
         second_attempted_lock = Event()
         release_first = Event()
-        lock_path = self.root / "runtime" / "locks" / "copilot-cli__sid-001.lock"
+        lock_path = pipeline.shard_lock_path(self.root, "copilot-cli:sid-001")
         real_archive_queue = pipeline._archive_queue
         real_flock = pipeline.fcntl.flock
 

@@ -495,9 +495,8 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
         return decision
 
     key = decision["idempotency_key"]
-    lock_dir = root / "runtime" / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{safe_key(key)}.lock"
+    lock_path = shard_lock_path(root, key)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         try:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
