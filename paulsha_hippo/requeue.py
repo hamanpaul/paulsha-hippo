@@ -38,9 +38,12 @@ def _valid_fragment_count(memory_root: Path, session_key: str) -> int:
     for path in slices_dir.rglob(f"{agent}__{session}__*.md"):
         try:
             fragment = atomizer_pipeline._read_fragment(path)
-        except (OSError, UnicodeError, ValueError):
-            # glob 命中但讀不了（權限、同名目錄、編碼壞檔，或 frontmatter 欄位
-            # 型別壞到 _read_fragment 自身 raise）——pipeline 也會卡，一律不計。
+        except (OSError, UnicodeError, ValueError, TypeError):
+            # glob 命中但讀不了（權限、同名目錄、編碼壞檔），或 frontmatter 欄位
+            # 型別壞到 _read_fragment 自身 raise——例如 fragment_index 為 null／
+            # 非純量令 int(None) 拋 TypeError、非數字字串令 int("x") 拋 ValueError——
+            # pipeline 也會在同一 fragment 上卡住，一律不計（落入 no-valid-fragments
+            # skip 路徑，維持 parked），不讓例外逃出整個 requeue() 連坐其他 session。
             continue
         if fragment is None:
             continue

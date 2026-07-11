@@ -39,6 +39,28 @@ def _seed_fragment(root: Path, session_key: str) -> None:
     )
 
 
+def _seed_fragment_bad_index(root: Path, session_key: str, *, index_value: str) -> None:
+    """frontmatter 前段合法（project／source_agent／source_session 齊備、路徑安全）
+    但 fragment_index 型別壞掉——pipeline `_read_fragment` 會一路讀到 `int(...)` 才
+    raise（null → TypeError、非純量如 list → TypeError、非數字字串 → ValueError）。
+    模擬 B2 gate 必須攔下的『讀到一半才炸』壞檔（`index_value` 直接接在 key 冒號後，
+    如 ``""`` 產生 null、``" [1]"`` 產生 list、``" nope"`` 產生非數字字串）。"""
+    agent, _, session = session_key.partition(":")
+    frag = root / "inbox" / "_slices" / "proj" / f"{agent}__{session}__000.md"
+    frag.parent.mkdir(parents=True, exist_ok=True)
+    frag.write_text(
+        "---\n"
+        "memory_layer: inbox\n"
+        "project: proj\n"
+        f"source_agent: {agent}\n"
+        f"source_session: {session}\n"
+        f"fragment_index:{index_value}\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+
 class RequeueCoreTests(unittest.TestCase):
     def test_requeue_single_parked_session_returns_to_split(self):
         with TemporaryDirectory() as tmp:
@@ -221,6 +243,49 @@ class RequeueCoreTests(unittest.TestCase):
                 [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
             )
 
+    def test_requeue_gated_when_fragment_index_is_null(self):
+        # 檔名對得上、frontmatter 前段合法（project／source_session 齊備）但
+        # fragment_index 為 null——pipeline `_read_fragment` 讀到 `int(None)` 拋
+        # TypeError。gate 必須把它與『讀不了』一視同仁不計，落入 no-valid-fragments
+        # skip、維持 parked，而非讓 TypeError 逃出整個 requeue()。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            _seed_fragment_bad_index(root, "claude:s1", index_value="")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
+            )
+            # gate 在 append_state 之前擋下：ledger 不得出現任何 split 事件
+            self.assertEqual(
+                [e for e in processing.read_events(root) if e["state"] == "split"], []
+            )
+
+    def test_requeue_gated_when_fragment_index_is_non_scalar(self):
+        # fragment_index 為非純量（list）——`int([1])` 亦拋 TypeError；同樣不得逃出。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:s1")
+            _seed_fragment_bad_index(root, "claude:s1", index_value=" [1, 2]")
+
+            summary = requeue.requeue(
+                root, session_key="claude:s1", now="2026-07-10T01:00:00Z",
+            )
+
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(summary["requeued"], [])
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:s1", "reason": "no-valid-fragments"}],
+            )
+
     def test_requeue_all_parked_gates_only_zero_fragment_sessions(self):
         # 混合情境：有 fragment 的照常 requeue，zero-fragment 的維持 parked
         with TemporaryDirectory() as tmp:
@@ -240,6 +305,32 @@ class RequeueCoreTests(unittest.TestCase):
             self.assertEqual(
                 summary["skipped"],
                 [{"session_key": "codex:p2", "reason": "no-valid-fragments"}],
+            )
+
+    def test_requeue_all_parked_type_broken_fragment_does_not_block_healthy(self):
+        # 回歸：型別壞掉的 fragment（fragment_index=null，`int(None)` 拋 TypeError）
+        # 不得讓整批 requeue 未捕捉地 crash 而連坐正常 session。刻意讓壞檔 session
+        # 排序在前（`claude:bad` < `claude:good`）——修法前 `claude:bad` 先被處理即
+        # 整批炸掉，`claude:good` 連本可正常 requeue 都被迫留在 parked。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _park(root, "claude:bad", category="invalid_output")
+            _seed_fragment_bad_index(root, "claude:bad", index_value="")
+            _park(root, "claude:good", category="transient")
+            _seed_fragment(root, "claude:good")
+
+            summary = requeue.requeue(root, all_parked=True, now="2026-07-10T01:00:00Z")
+
+            # 正常 session 仍被 requeue 回 split；壞檔 session 被 gate 擋下維持 parked
+            self.assertEqual(
+                [entry["session_key"] for entry in summary["requeued"]],
+                ["claude:good"],
+            )
+            self.assertEqual(processing.state_of(root, "claude:good"), "split")
+            self.assertEqual(processing.state_of(root, "claude:bad"), "parked")
+            self.assertEqual(
+                summary["skipped"],
+                [{"session_key": "claude:bad", "reason": "no-valid-fragments"}],
             )
 
 
