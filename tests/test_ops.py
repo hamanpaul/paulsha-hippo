@@ -137,7 +137,11 @@ class InitConcurrencyTests(unittest.TestCase):
             self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
             # 一致性：config 與 override 皆存在（B 成功寫入兩者），無「config 有／override 缺」
             self.assertTrue(override.exists(), "不得留 config/override 不一致（override 缺）")
-            self.assertIn("- /fake/bin/claude", override.read_text(encoding="utf-8"))
+            # PR-D Task 3：argv token 改以 json.dumps 加引號輸出（路徑含空白也安全），
+            # 以 yaml.safe_load 解析後比對結構，語意不變、不做未加引號的 substring 斷言。
+            import yaml
+            override_data = yaml.safe_load(override.read_text(encoding="utf-8"))
+            self.assertEqual(override_data["agent_exec"]["command"][0], "/fake/bin/claude")
             # 不殘留暫存檔
             self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
             self.assertEqual(
@@ -155,7 +159,8 @@ class InitTests(unittest.TestCase):
                 "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
             }
             with mock.patch.dict("os.environ", env), \
-                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=lambda argv: ["/fake/abs/claude"] + list(argv[1:])):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
                     base_url=None, api_key_env=None, model=None, assume_yes=True,
@@ -163,12 +168,72 @@ class InitTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
             self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
+            import yaml
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
-            body = override.read_text(encoding="utf-8")
-            # #15：argv[0] 絕對路徑化——systemd 環境沒有 NVM PATH，裸命令找不到
-            self.assertIn("- /fake/bin/claude", body)
-            self.assertIn("- -p", body)
-            self.assertNotIn("\n    - claude\n", body)
+            data = yaml.safe_load(override.read_text(encoding="utf-8"))
+            self.assertEqual(str(data["schema_version"]), "1")
+            self.assertEqual(data["agent_exec"]["command"], ["/fake/abs/claude", "-p"])
+
+    def test_init_each_argv_preset_writes_registry_template(self):
+        from paulsha_hippo import backends
+        for name in ("claude-headless", "codex-headless", "copilot-headless"):
+            with self.subTest(backend=name), TemporaryDirectory() as tmp:
+                env = {
+                    "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                    "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                    "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+                }
+                template = backends.PRESETS[name].argv_template
+                with mock.patch.dict("os.environ", env), \
+                     mock.patch.object(ops, "resolve_backend_argv",
+                                       side_effect=lambda argv: ["/fake/abs/" + argv[0]] + list(argv[1:])):
+                    rc = ops.run_init(memory_root=None, backend=name, base_url=None,
+                                      api_key_env=None, model=None, assume_yes=True)
+                self.assertEqual(rc, 0)
+                import yaml
+                data = yaml.safe_load(
+                    (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                     / "atomizer.override.yaml").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    data["agent_exec"]["command"],
+                    ["/fake/abs/" + template[0]] + list(template[1:]))
+
+    def test_init_argv_preset_includes_model_when_given(self):
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=lambda argv: ["/fake/abs/codex"] + list(argv[1:])):
+                rc = ops.run_init(memory_root=None, backend="codex-headless",
+                                  base_url=None, api_key_env=None,
+                                  model="gpt-5.4", assume_yes=True)
+            self.assertEqual(rc, 0)
+            import yaml
+            data = yaml.safe_load(
+                (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                 / "atomizer.override.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(data["agent_exec"]["model"], "gpt-5.4")
+
+    def test_init_argv_preset_backend_unavailable_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            env = {
+                "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
+                "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
+                "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
+            }
+            with mock.patch.dict("os.environ", env), \
+                 mock.patch.object(ops, "resolve_backend_argv",
+                                   side_effect=ops.BackendUnavailableError("codex not found")):
+                rc = ops.run_init(memory_root=None, backend="codex-headless",
+                                  base_url=None, api_key_env=None, model=None, assume_yes=True)
+            self.assertEqual(rc, 2)
+            self.assertFalse((Path(tmp) / "hippo-cfg" / "config.yaml").exists())
+            self.assertFalse((Path(tmp) / "legacy" / ".config" / "paulshaclaw"
+                              / "atomizer.override.yaml").exists())
 
     def test_init_claude_headless_fails_when_backend_missing(self):
         with TemporaryDirectory() as tmp:
@@ -340,6 +405,46 @@ class DoctorTests(unittest.TestCase):
              mock.patch.object(ops, "_probe_backend_service_effective",
                                return_value=self._PROBE_OK):
             self.assertEqual(ops.run_doctor(), 0)
+
+    def test_doctor_reports_backend_preset_matrix(self):
+        from paulsha_hippo import backends
+
+        def fake_probe(preset, *, env=None, timeout=30, live=False):
+            if preset.name == "claude-headless":
+                return backends.ProbeResult(preset.name, True, "/abs/claude", True,
+                                            "2.1.206 (Claude Code)")
+            if preset.name == "codex-headless":
+                return backends.ProbeResult(preset.name, True, "/abs/codex", False,
+                                            "probe rc=127：node not found")
+            if not preset.available:
+                return backends.ProbeResult(preset.name, False, None, None,
+                                            "unavailable（命令契約未確認，選單不可選）")
+            if preset.required_executable is not None:
+                return backends.ProbeResult(preset.name, True, None, False,
+                                            "executable 未安裝")
+            return backends.ProbeResult(preset.name, True, None, None,
+                                        "config 驅動（無本機執行檔需求）")
+
+        env = {"HIPPO_MEMORY_ROOT": "/a", "PSC_MEMORY_ROOT": "/a"}
+        buf = io.StringIO()
+        # 比照本 class 既有測試的 _PROBE_OK 手法：patch 掉 PR-A 的
+        # _probe_backend_service_effective，隔離 configured-backend probe 的環境依賴
+        # （否則 CI 無 backend → probe FAIL → rc=1，下方 rc==0 斷言必紅）。
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(ops, "_probe_backend_service_effective",
+                               return_value=("- distiller backend：✓ mocked", False)), \
+             mock.patch.object(ops.backends, "probe_preset", side_effect=fake_probe), \
+             redirect_stdout(buf):
+            rc = ops.run_doctor()
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("- backend presets（service-effective probe）:", out)
+        self.assertIn("  - claude-headless: ✓ /abs/claude（2.1.206 (Claude Code)）", out)
+        self.assertIn("  - codex-headless: ✗ probe rc=127：node not found", out)
+        self.assertIn("  - copilot-headless: ✗ executable 未安裝", out)
+        self.assertIn("  - gemini-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
+        self.assertIn("  - antigravity-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
+        self.assertIn("  - openai-compatible: - config 驅動（無本機執行檔需求）", out)
 
 
 class DoctorBackendProbeTests(unittest.TestCase):
@@ -724,6 +829,58 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
                          return_value=("- distiller backend：✓ mocked", False)) as probe:
                     self.assertEqual(ops.run_doctor(**doctor_kwargs), 0)
                 probe.assert_called_once_with(live=expected_live)
+
+    @staticmethod
+    def _stub_preset_bins(tmp: str) -> dict[str, str]:
+        # 三家 argv preset 執行檔的 stub（內容無關——resolution 只需存在＋X_OK，
+        # 且 live 分支下 subprocess.run 已被 spy 攔截、stub 不會真跑）；回傳可餵給
+        # backends.service_effective_env 的 env（PATH 命中 tmpdir，模擬本機裝有
+        # claude/codex/copilot 三家 CLI）。
+        bin_dir = Path(tmp)
+        for name in ("claude", "codex", "copilot"):
+            exe = bin_dir / name
+            exe.write_text("#!/bin/sh\necho stub\n", encoding="utf-8")
+            exe.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}
+
+    def test_bare_doctor_preset_matrix_never_execs_subprocess(self):
+        # blocking 回歸：裸 doctor 的 preset 矩陣必須解析級——即使每個 preset 執行檔
+        # 都解析得到（stub 命中 service_effective_env，模擬同時裝有 claude/codex/
+        # copilot 的開發機，正是本 blocking 的重現環境），也不得對任何 preset 觸發
+        # 真實 `<exe> --version` 子程序（無 backend 喚起／潛在網路存取）。CI 因 CLI
+        # 未安裝、which 落空而 subprocess 分支走不到，故此處強制解析命中，鎖住既有
+        # 測試套件測不到的路徑。
+        # 註：backends.subprocess 與 ops.subprocess 是同一 module 物件，故一併把
+        # _systemd_user_available 收斂為 False，避免 systemctl 探測誤觸 spy。
+        with TemporaryDirectory() as tmp:
+            fake_env = self._stub_preset_bins(tmp)
+            with mock.patch.object(ops, "_systemd_user_available", return_value=False), \
+                 mock.patch.object(ops.backends, "service_effective_env",
+                                   return_value=fake_env), \
+                 mock.patch.object(
+                     ops.backends.subprocess, "run",
+                     side_effect=AssertionError(
+                         "裸 doctor 不得對 preset 觸發真實 subprocess exec")) as spy:
+                self.assertEqual(self._doctor(self._fake_cfg()), 0)
+            spy.assert_not_called()
+
+    def test_live_probe_preset_matrix_execs_resolved_presets(self):
+        # 對照組：gate 開啟時，preset 矩陣確實對解析得到的 preset exec
+        # `<exe> --version`——證明上面的 no-exec 斷言非因解析落空而 vacuous，且
+        # preset 矩陣與 configured-backend probe 共用同一 opt-in 閘門。
+        completed = SimpleNamespace(returncode=0, stdout="1.0 fake", stderr="")
+        with TemporaryDirectory() as tmp:
+            fake_env = self._stub_preset_bins(tmp)
+            with mock.patch.object(ops, "_systemd_user_available", return_value=False), \
+                 mock.patch.object(ops.backends, "service_effective_env",
+                                   return_value=fake_env), \
+                 mock.patch.object(ops.backends.subprocess, "run",
+                                   return_value=completed) as spy, \
+                 mock.patch.object(ops, "_probe_backend_service_effective",
+                                   return_value=("- distiller backend：✓ mocked", False)):
+                self.assertEqual(
+                    self._doctor(self._fake_cfg(), live_probe=True), 0)
+            self.assertTrue(spy.called)
 
 
 class ServiceManagerEnvironmentTests(unittest.TestCase):
@@ -1120,3 +1277,60 @@ class FixBackendMigrationTests(unittest.TestCase):
                                    return_value={"PATH": "/usr/bin:/bin"}), \
                  mock.patch.object(ops.shutil, "which", return_value=None):
                 self.assertEqual(ops.run_doctor(fix_backend=True), 1)
+
+
+class BackendRegistryWiringTests(unittest.TestCase):
+    def test_backends_tuple_derived_from_registry(self):
+        from paulsha_hippo import backends
+        self.assertEqual(ops._BACKENDS, tuple(backends.PRESETS))
+
+    def test_init_rejects_unknown_backend(self):
+        rc = ops.run_init(memory_root=None, backend="definitely-not-a-backend",
+                          base_url=None, api_key_env=None, model=None, assume_yes=True)
+        self.assertEqual(rc, 2)
+
+    def test_init_rejects_unavailable_presets(self):
+        for name in ("gemini-headless", "antigravity-headless"):
+            with self.subTest(backend=name):
+                rc = ops.run_init(memory_root=None, backend=name, base_url=None,
+                                  api_key_env=None, model=None, assume_yes=True)
+                self.assertEqual(rc, 2)
+
+
+class InitBackendChoicesTests(unittest.TestCase):
+    def test_parser_accepts_all_registry_presets(self):
+        from paulsha_hippo import backends
+        from paulsha_hippo.cli import _build_parser
+        parser = _build_parser()
+        for name in backends.PRESETS:
+            with self.subTest(backend=name):
+                args = parser.parse_args(["init", "--backend", name])
+                self.assertEqual(args.backend, name)
+
+    def test_parser_rejects_non_registry_backend(self):
+        from paulsha_hippo.cli import _build_parser
+        with self.assertRaises(SystemExit):
+            _build_parser().parse_args(["init", "--backend", "definitely-not-a-backend"])
+
+
+class SuperviseCliWiringTests(unittest.TestCase):
+    def test_supervise_cli_forwards_once_and_overrides(self):
+        from paulsha_hippo import cli as memory_cli
+        captured: dict = {}
+
+        def fake_supervise(*, interval, extra_argv=None, once=False, runner=None):
+            captured.update(interval=interval, extra_argv=list(extra_argv or []), once=once)
+            return 0
+
+        with mock.patch.object(ops, "run_dream_supervise", side_effect=fake_supervise):
+            rc = memory_cli.main([
+                "dream", "supervise", "--interval", "5", "--once",
+                "--memory-root", "/mr", "--max-load", "99.5",
+                "--promoter", "identity", "--agent-command", "python x.py",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured["once"])
+        self.assertEqual(captured["interval"], 5)
+        self.assertEqual(captured["extra_argv"], [
+            "--memory-root", "/mr", "--max-load", "99.5",
+            "--promoter", "identity", "--agent-command", "python x.py"])

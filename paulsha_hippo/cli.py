@@ -63,10 +63,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"hippo {__version__}")
     memory_subparsers = parser.add_subparsers(dest="command", required=True)
 
+    from paulsha_hippo import backends as hippo_backends
+
     init_p = memory_subparsers.add_parser("init", help="初始化 config 與蒸餾 backend")
     init_p.add_argument("--memory-root")
+    _backend_help = "蒸餾 backend preset：" + "、".join(
+        name + ("（尚不可用）" if not preset.available else "")
+        for name, preset in hippo_backends.PRESETS.items()
+    )
     init_p.add_argument("--backend", default="claude-headless",
-                        choices=["claude-headless", "openai-compatible", "custom-argv"])
+                        choices=list(hippo_backends.PRESETS), help=_backend_help)
     init_p.add_argument("--base-url")
     init_p.add_argument("--api-key-env")
     init_p.add_argument("--model")
@@ -154,6 +160,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dream_supervise.add_argument("--interval", type=int, default=3600)
     dream_supervise.add_argument("--memory-root")
+    dream_supervise.add_argument("--once", action="store_true",
+                                 help="只跑一輪就結束（無 systemd 主機的單輪驗收，#10）")
+    dream_supervise.add_argument("--max-load", type=float, default=None,
+                                 help="透傳 dream run --max-load（覆蓋內建 1.0）")
+    dream_supervise.add_argument("--promoter", choices=["identity", "llm"], default=None,
+                                 help="透傳 dream run --promoter（覆蓋內建 llm）")
+    dream_supervise.add_argument("--agent-command", default=None,
+                                 help="透傳 dream run --agent-command")
     dream_supervise.set_defaults(func=_dream_supervise)
 
     dream_status = dream_subparsers.add_parser("status")
@@ -1015,7 +1029,15 @@ def _dream_supervise(args) -> int:
     from paulsha_hippo import ops
 
     extra = ["--memory-root", args.memory_root] if args.memory_root else []
-    return ops.run_dream_supervise(interval=args.interval, extra_argv=extra)
+    if args.max_load is not None:
+        extra += ["--max-load", str(args.max_load)]
+    if args.promoter:
+        extra += ["--promoter", args.promoter]
+    if args.agent_command:
+        extra += ["--agent-command", args.agent_command]
+    # dream run 的 argparse 對重複旗標 last-wins：extra 的 --promoter/--max-load
+    # 覆蓋 run_dream_supervise 內建的 --require-idle --promoter llm 基底。
+    return ops.run_dream_supervise(interval=args.interval, extra_argv=extra, once=args.once)
 
 
 def _locks_cleanup_legacy(args: argparse.Namespace) -> int:

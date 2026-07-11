@@ -5,7 +5,7 @@
 
 **狀態：✅ v0.1.0 上線。** 已從 [paulshaclaw](https://github.com/hamanpaul/paulshaclaw) 完整拆出、可單獨安裝運轉（953 tests；WSL2+systemd 全鏈實測：截取→蒸餾→回灌）。
 設計見[拆包執行設計 spec](https://github.com/hamanpaul/paulshaclaw/blob/main/docs/superpowers/specs/2026-07-06-memory-extraction-hippo-design.md)。
-> 已驗環境：WSL2＋systemd＋claude-headless。其他 backend（codex/copilot/openai-compatible headless）與無 systemd 主機為 opt-in，見 [#10](https://github.com/hamanpaul/paulsha-hippo/issues/10)。
+> 已驗環境：WSL2＋systemd＋claude-headless。backend preset 矩陣（codex/copilot headless、openai-compatible；gemini/antigravity 尚不可用）見 `docs/backend-matrix.md` 與 `hippo doctor` 的 preset probe；無 systemd 主機用 `hippo dream supervise`（追蹤 [#10](https://github.com/hamanpaul/paulsha-hippo/issues/10)）。
 
 ## Quickstart
 
@@ -19,7 +19,7 @@
 ## Install
 
 - 支援 host：claude / codex / copilot（session hooks 隨包出貨）
-- 常駐：systemd user units 自動偵測；不可用時 `hippo dream supervise` 前景模式
+- 常駐：systemd user units 自動偵測；不可用時 `hippo dream supervise` 前景模式（`--once` 可單輪驗收）
 - WSL 注意：`loginctl enable-linger` 才能開機自起
 
 ## Usage
@@ -31,7 +31,7 @@
 
 設定：單一檔 `~/.config/paulsha-hippo/config.yaml` + `HIPPO_*` env 覆寫；密鑰一律 `secret.env`（0600）。
 Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。
-蒸餾 LLM 三檔位：`claude-headless`（預設，零 key 管理）／`openai-compatible`（ollama、vLLM、內網端點）／`custom-argv`。
+蒸餾 backend presets：`claude-headless`（預設，零 key 管理）／`codex-headless`／`copilot-headless`／`openai-compatible`（ollama、vLLM、內網端點）／`custom-argv`；`gemini-headless`（無 round-trip 實證）與 `antigravity-headless`（命令契約未確認）尚不可用。矩陣、前置條件與升級前提見 `docs/backend-matrix.md`。
 
 ## 架構
 

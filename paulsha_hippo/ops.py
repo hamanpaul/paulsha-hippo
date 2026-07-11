@@ -6,6 +6,7 @@ fallback 指引而非硬錯（G3「先驗證再選路」）。
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shutil
@@ -17,13 +18,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from paulsha_hippo import paths
+from paulsha_hippo import backends, paths
 from paulsha_hippo.dream.lock import dream_lock_path as _dream_lock_path
 
 _PKG_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_ROOT.parent
 
-_BACKENDS = ("claude-headless", "openai-compatible", "custom-argv")
+# 契約 7：_BACKENDS 改由 preset registry 導出（向後相容）。
+_BACKENDS = tuple(backends.PRESETS)
 
 
 class BackendUnavailableError(ValueError):
@@ -146,8 +148,12 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     設定檔——避免留下「宣告 claude-headless 卻缺 override」的半初始化不一致設定，
     使後續 doctor/dream 失敗或誤 park。通過後才以暫存檔＋atomic replace 一次性提交。
     """
-    if backend not in _BACKENDS:
+    preset = backends.PRESETS.get(backend)
+    if preset is None:
         print(f"init: 不支援的 backend: {backend}（可選 {', '.join(_BACKENDS)}）", file=sys.stderr)
+        return 2
+    if not preset.available:
+        print(f"init: backend {backend} 尚不可用（命令契約未確認，見 issue #10）", file=sys.stderr)
         return 2
     root = memory_root or str(paths.memory_root())
 
@@ -161,31 +167,39 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
         + (f"  model: {model}\n" if model else "")
     )
 
-    # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）
-    if backend == "claude-headless":
-        try:
-            argv = resolve_backend_argv(["claude", "-p"])
-        except BackendUnavailableError as exc:
-            print(f"init: {exc}（請先安裝 claude CLI，或改用 --backend openai-compatible/custom-argv）",
-                  file=sys.stderr)
-            return 2
-        override_body: str | None = (
-            "schema_version: \"1\"\n"
-            "agent_exec:\n"
-            "  command:\n"
-            + "".join(f"    - {token}\n" for token in argv)
-            + (f"  model: {model}\n" if model else "")
-        )
-    elif backend == "openai-compatible":
+    # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）。
+    # PR-D Task 3：泛化舊版僅 claude-headless 特判的絕對路徑化——任何 registry
+    # preset 只要有非空 argv_template（claude/codex/copilot-headless……）都走同一條
+    # resolve_backend_argv 路徑，取代先前 codex/copilot-headless 誤落 custom-argv
+    # 分支、init 不寫 override 的缺口。argv token 以 json.dumps 加引號輸出（合法
+    # YAML double-quoted scalar），路徑含空白也安全。
+    if backend == "openai-compatible":
         if not base_url:
             print("init: openai-compatible 需要 --base-url", file=sys.stderr)
             return 2
-        override_body = (
+        override_body: str | None = (
             "schema_version: \"1\"\n"
             "agent_exec:\n"
             "  backend: openai-compatible\n"
             f"  base_url: {base_url}\n"
             + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
+            + (f"  model: {model}\n" if model else "")
+        )
+    elif preset.argv_template:
+        try:
+            argv = resolve_backend_argv(list(preset.argv_template))
+        except BackendUnavailableError as exc:
+            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend openai-compatible/custom-argv）",
+                  file=sys.stderr)
+            return 2
+        command_lines = "".join(
+            f"    - {json.dumps(token, ensure_ascii=False)}\n" for token in argv
+        )
+        override_body = (
+            "schema_version: \"1\"\n"
+            "agent_exec:\n"
+            "  command:\n"
+            f"{command_lines}"
             + (f"  model: {model}\n" if model else "")
         )
     else:  # custom-argv：不動 override（沿 atomizer.yaml 或既有 override）
@@ -247,10 +261,29 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     else:
         print("- systemd --user 不可用（fallback：hippo dream supervise）")
 
-    agent = shutil.which("claude")
-    print(f"- claude CLI：{'✓ ' + agent if agent else '未找到（claude-headless 檔位需要）'}")
-
+    # backend preset 矩陣（spec §3.5.4）：service-effective 環境逐 preset probe。
+    # 只報告、不影響 doctor exit code——configured backend 的 gate 檢查另見下方
+    # _probe_backend_service_effective（PR-A/PR-C 既有）。取代舊版僅檢查單一
+    # `claude` 執行檔的兩行（PR-D Task 4：擴到全 registry preset）。
+    #
+    # live 閘門（--fix-backend／--probe-live／HIPPO_DOCTOR_LIVE_PROBE=1）同時管轄
+    # preset 矩陣與下方 configured-backend probe：裸 `hippo doctor` 一律解析級、
+    # 不喚起任何 backend（跨批次共享契約 6）。故 live 必須在 preset 迴圈之前算出
+    # 並傳入 probe_preset——否則矩陣會繞過閘門，對每個已安裝 preset 真跑
+    # `<exe> --version`（有 CLI 的開發機每次裸 doctor 都產生副作用／潛在網路存取）。
     live = fix_backend or live_probe or _live_probe_env_enabled()
+    print("- backend presets（service-effective probe）:")
+    for preset in backends.PRESETS.values():
+        result = backends.probe_preset(preset, live=live)
+        if not result.available:
+            print(f"  - {result.preset}: ✗ {result.detail}")
+        elif result.ok is None:
+            print(f"  - {result.preset}: - {result.detail}")
+        elif result.ok:
+            print(f"  - {result.preset}: ✓ {result.executable}（{result.detail}）")
+        else:
+            print(f"  - {result.preset}: ✗ {result.detail}")
+
     probe_line, probe_failed = _probe_backend_service_effective(live=live)
     if probe_failed:
         print(probe_line, file=sys.stderr)
