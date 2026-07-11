@@ -317,8 +317,19 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
             return result
 
 
-def build_orientation(memory_root, project: str) -> str:
-    """Concise SessionStart orientation (no MOC dump). '' when project has no notes."""
+_ORIENTATION_RETRIEVAL_HINT = (
+    "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
+    "用 Read 開啟清單中列出的絕對路徑即取全文。"
+)
+
+
+def build_orientation(memory_root, project: str, *, retrieval_hint: str | None = None) -> str:
+    """Concise SessionStart orientation (no MOC dump). '' when project has no notes.
+
+    retrieval_hint：檢索方式說明句。None → 預設「prompt 後自動浮現」（Claude 的
+    prompt-time hook 行為）；無 prompt-time hook 的平台傳入顯式 recall 指引，
+    不假裝 orientation 等同 task retrieval。
+    """
     from pathlib import Path as _Path
     from ..atomizer.config import sanitize_project_component
     safe = sanitize_project_component(project)
@@ -329,6 +340,6 @@ def build_orientation(memory_root, project: str) -> str:
         n = sum(1 for p in pdir.rglob("*.md") if not p.name.endswith("-moc.md"))
     if n == 0:
         return ""
+    hint = retrieval_hint if retrieval_hint is not None else _ORIENTATION_RETRIEVAL_HINT
     return (f"# 記憶 — {project}\n\n"
-            f"記憶系統已啟用（本專案約 {n} 筆 knowledge）。與當前任務相關的記憶會在每次 "
-            f"prompt 後以短清單浮現；用 Read 開啟清單中列出的絕對路徑即取全文。")
+            f"記憶系統已啟用（本專案約 {n} 筆 knowledge）。{hint}")

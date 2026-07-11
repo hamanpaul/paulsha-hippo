@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Claude Code PostToolUse(Read) hook: record read-based memory usage attribution.
+"""GitHub Copilot CLI postToolUse(view) hook: record read-based memory usage attribution.
 
-memory-consumer: when a Read targets a path under the memory knowledge layer, append
-a `used` event (source="read", offered=bool) to memory_usage.jsonl. The slice content
-read is passed through policy.check_boundary (best-effort). Any error -> no event, exit 0.
+memory-consumer: when a `view`（Read file contents）targets a path under the memory
+knowledge layer, append a `used` event (source="read", offered=bool) to
+memory_usage.jsonl —— claude_post_tool_use.py 的 copilot 對稱面。
+
+實測 payload（2026-07-11 payload probe；官方 hooks reference 同形）：
+  {"sessionId": ..., "cwd": ..., "toolName": "view",
+   "toolArgs": "{\"path\": \"...\", \"view_range\": [1, 5]}", "toolResult": {...}}
+注意 `toolArgs` 是 JSON 字串。工具過濾在腳本內做（toolName != "view" 即早退），
+不依賴平台 matcher。Any error -> no event, exit 0.
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ import _bootstrap  # sibling module; hooks dir is on sys.path[0]
 
 _bootstrap.ensure_repo_on_path()
 
-TOOL = "claude-code"
+TOOL = "copilot-cli"
 _SLICE_FM = re.compile(r"^slice_id:\s*(\S+)", re.MULTILINE)
 _PROJECT_FM = re.compile(r"^project:\s*(\S+)", re.MULTILINE)
 
@@ -36,17 +42,31 @@ def main() -> int:
     root = memory_root()
     payload = read_payload(root, TOOL)
     try:
-        if payload.get("tool_name") != "Read":
+        if payload.get("toolName") != "view":
             return 0
-        fp = (payload.get("tool_input") or {}).get("file_path")
+        raw_args = payload.get("toolArgs")
+        if isinstance(raw_args, str):
+            try:
+                tool_args = json.loads(raw_args)
+            except Exception:
+                return 0
+        elif isinstance(raw_args, dict):  # 防禦：未來若改為物件形
+            tool_args = raw_args
+        else:
+            return 0
+        fp = tool_args.get("path") if isinstance(tool_args, dict) else None
         if not fp:
             return 0
         p = Path(fp).resolve()
         knowledge = (root / "knowledge").resolve()
         if knowledge not in p.parents:
             return 0
+        # copilot 的 view 也能列目錄（Claude 的 Read 不會）：目錄不構成 slice read，
+        # 記了只會產生空 attribution 噪音事件。
+        if not p.is_file():
+            return 0
 
-        session_id = str(payload.get("session_id") or "unknown")
+        session_id = str(payload.get("session_id") or payload.get("sessionId") or "unknown")
         # writer（_shortlist_common）與本 reader 共用同一單射構點，special-char session
         # 下檔名仍一致——否則 read attribution 靜默錯配（offered 誤記 False）。
         mpath = offered_map_path(root, TOOL, session_id)
@@ -57,10 +77,9 @@ def main() -> int:
             except Exception:
                 by_path = {}
 
-        # Offered-map keys are the verbatim shortlist paths (as build_index stored them,
-        # i.e. the un-resolved memory_root path). The agent Reads that exact string, but a
-        # symlinked memory root means str(p) (resolved) differs — so match raw / normalized
-        # / resolved candidates, else genuinely-offered reads mis-record offered=False.
+        # Offered-map keys are the verbatim shortlist paths (un-resolved memory_root
+        # path)。symlinked memory root 下 str(p)（resolved）會不同——比對 raw /
+        # normalized / resolved 三個候選，避免真 offered 的 read 記成 offered=False。
         candidates = [str(fp), str(Path(fp)), str(p)]
         sl_id_offered = next((by_path[c] for c in candidates if c in by_path), "")
         offered = bool(sl_id_offered)

@@ -33,7 +33,10 @@ def main() -> int:
 
     try:
         session_id = str(payload.get("session_id") or "unknown")
-        brief = compute_brief_and_record(root, TOOL, session_id, payload.get("cwd"))
+        # capability matrix（docs/cross-cli-capability-matrix.md）：codex 無 prompt-time
+        # hook → 注入顯式 recall 指引。若日後實測轉為 supported，改回 False 並走接線。
+        brief = compute_brief_and_record(root, TOOL, session_id, payload.get("cwd"),
+                                         recall_guidance=True)
 
         output = {
             "hookSpecificOutput": {

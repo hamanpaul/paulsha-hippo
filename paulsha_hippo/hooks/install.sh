@@ -182,7 +182,8 @@ for script in install.sh uninstall.sh \
   claude_session_end.py codex_session_end.py copilot_session_end.py \
   _wakeup_common.py _bootstrap.py claude_session_start.py codex_session_start.py \
   copilot_session_start.py claude_precompact.py copilot_precompact.py \
-  claude_user_prompt_submit.py claude_post_tool_use.py _shortlist_common.py; do
+  claude_user_prompt_submit.py claude_post_tool_use.py _shortlist_common.py \
+  copilot_user_prompt_submit.py copilot_post_tool_use.py; do
   src="${hooks_src_dir}/${script}"
   dst="${memory_root}/hooks/${script}"
   if [[ -f "$src" ]]; then
@@ -457,15 +458,20 @@ install -d -m 700 "$(dirname "$copilot_hook")"
 copilot_session_end_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/copilot_session_end.py"
 copilot_session_start_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/copilot_session_start.py"
 copilot_precompact_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/copilot_precompact.py"
+copilot_user_prompt_submit_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/copilot_user_prompt_submit.py"
+copilot_post_tool_use_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/copilot_post_tool_use.py"
 
 python3 - "$copilot_hook" \
-  "$copilot_session_end_cmd" "$copilot_session_start_cmd" "$copilot_precompact_cmd" <<'PYEOF'
+  "$copilot_session_end_cmd" "$copilot_session_start_cmd" "$copilot_precompact_cmd" \
+  "$copilot_user_prompt_submit_cmd" "$copilot_post_tool_use_cmd" <<'PYEOF'
 import json, sys
 
 hook_path = sys.argv[1]
 session_end_cmd = sys.argv[2]
 session_start_cmd = sys.argv[3]
 precompact_cmd = sys.argv[4]
+user_prompt_submit_cmd = sys.argv[5]
+post_tool_use_cmd = sys.argv[6]
 
 config = {
     "version": 1,
@@ -490,6 +496,25 @@ config = {
             {
                 "type": "command",
                 "bash": precompact_cmd,
+                "powershell": "Write-Host 'paulsha-memory: powershell path not supported in MVP'",
+                "timeoutSec": 10,
+            }
+        ],
+        # 官方事件 key（hooks reference）：userPromptSubmitted / postToolUse。
+        # capability matrix 2026-07-11 復測：probe FIRED + additionalContext 注入實測。
+        "userPromptSubmitted": [
+            {
+                "type": "command",
+                "bash": user_prompt_submit_cmd,
+                "powershell": "Write-Host 'paulsha-memory: powershell path not supported in MVP'",
+                "timeoutSec": 10,
+            }
+        ],
+        # view（Read file contents）過濾在 hook 腳本內做，不依賴平台 matcher。
+        "postToolUse": [
+            {
+                "type": "command",
+                "bash": post_tool_use_cmd,
                 "powershell": "Write-Host 'paulsha-memory: powershell path not supported in MVP'",
                 "timeoutSec": 10,
             }

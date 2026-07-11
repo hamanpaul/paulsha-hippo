@@ -30,6 +30,16 @@ def _pct_arg(s):
     return v
 
 
+def _tool_arg(s: str) -> str:
+    """`--tool` 會嵌入 runtime/wakeup 檔名：argparse 層即拒絕非 path-safe token（防 traversal）。"""
+    from .hooks._wakeup_common import validate_tool
+
+    try:
+        return validate_tool(s)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -255,10 +265,21 @@ def _build_parser() -> argparse.ArgumentParser:
     rekey_p.set_defaults(func=_rekey)
 
     usage_p = memory_subparsers.add_parser("usage")
-    usage_p.add_argument("--memory-root", required=True)
+    # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
+    # still errors with exit 2 when the flag is omitted.
+    usage_p.add_argument("--memory-root", default=None)
     usage_p.add_argument("--since", default=None)
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
+    usage_sub = usage_p.add_subparsers(dest="usage_command")
+    mark_applied_p = usage_sub.add_parser(
+        "mark-applied", help="記錄 applied 顯式訊號（agent structured acknowledgement，契約 8）"
+    )
+    mark_applied_p.add_argument("--memory-root", required=True)
+    mark_applied_p.add_argument("--session-id", required=True)
+    mark_applied_p.add_argument("--slice-id", required=True)
+    mark_applied_p.add_argument("--tool", required=True)
+    mark_applied_p.set_defaults(func=_usage_mark_applied)
 
     locks_p = memory_subparsers.add_parser("locks", help="runtime lock 維運")
     locks_sub = locks_p.add_subparsers(dest="locks_command", required=True)
@@ -282,6 +303,15 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="requeue 原因（記入 ledger requeue_reason）")
     requeue_p.add_argument("--now", default=None)
     requeue_p.set_defaults(func=_requeue)
+
+    recall_p = memory_subparsers.add_parser(
+        "recall", help="任務相關記憶 shortlist（跨 CLI consumer API；記 offered，含 tool 歸因）")
+    recall_p.add_argument("--memory-root", default=str(paths.memory_root()))
+    recall_p.add_argument("--cwd", default=None)
+    recall_p.add_argument("--prompt", required=True)
+    recall_p.add_argument("--tool", required=True, type=_tool_arg)
+    recall_p.add_argument("--session-id", required=True)
+    recall_p.set_defaults(func=_recall)
 
     return parser
 
@@ -631,6 +661,10 @@ def _rekey(args: argparse.Namespace) -> int:
 def _memory_usage(args: argparse.Namespace) -> int:
     from collections import defaultdict
 
+    if not args.memory_root:
+        print("hippo usage: error: --memory-root is required", file=sys.stderr)
+        return 2
+
     root = Path(args.memory_root)
     led = root / "runtime" / "ledger"
 
@@ -651,7 +685,9 @@ def _memory_usage(args: argparse.Namespace) -> int:
         return out
 
     offered_rows = _read_jsonl(led / "offered.jsonl")
-    used_rows = [e for e in _read_jsonl(led / "memory_usage.jsonl") if e.get("source") == "read"]
+    usage_rows = _read_jsonl(led / "memory_usage.jsonl")
+    used_rows = [e for e in usage_rows if e.get("source") == "read"]
+    applied_rows = [e for e in usage_rows if e.get("kind") == "applied"]
 
     agg = defaultdict(lambda: {"offered_count": 0, "read_count": 0, "last_read": ""})
     sessions = set()
@@ -671,6 +707,25 @@ def _memory_usage(args: argparse.Namespace) -> int:
         if ts > agg[sid]["last_read"]:
             agg[sid]["last_read"] = ts
 
+    def _tool_key(e) -> str:
+        return str(e.get("tool") or "(unknown)")
+
+    by_tool: dict[str, dict] = {}
+    for e in offered_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["offered"] += len(e.get("offered", []))
+    for e in used_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["read"] += 1
+    applied_tools: set[str] = set()
+    for e in applied_rows:
+        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["applied"] += 1
+        applied_tools.add(_tool_key(e))
+    for name, t in by_tool.items():
+        if name not in applied_tools:
+            t["applied"] = None  # 該 tool 無任何 applied 訊號 → n/a（不以內容猜測補值）
+
     slices = [{"slice_id": sid, **v} for sid, v in agg.items()]
     slices.sort(key=lambda s: (s["read_count"], s["offered_count"]), reverse=True)
     never_read = sum(1 for s in slices if s["offered_count"] > 0 and s["read_count"] == 0)
@@ -681,7 +736,9 @@ def _memory_usage(args: argparse.Namespace) -> int:
         "total_reads": total_reads,
         "avg_reads_per_session": round(total_reads / n, 3) if n else 0.0,
     }
-    report = {"summary": summary, "slices": slices}
+    report = {"summary": summary,
+              "by_tool": {k: by_tool[k] for k in sorted(by_tool)},
+              "slices": slices}
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
@@ -689,9 +746,78 @@ def _memory_usage(args: argparse.Namespace) -> int:
         print(f"sessions={summary['sessions']} slices={summary['slices']} "
               f"never_read={summary['never_read']} total_reads={summary['total_reads']} "
               f"avg_reads/session={summary['avg_reads_per_session']}")
+        for name in sorted(by_tool):
+            t = by_tool[name]
+            applied_disp = "n/a" if t["applied"] is None else str(t["applied"])
+            print(f"  tool={name} offered={t['offered']} read={t['read']} applied={applied_disp}")
         for s in slices[:30]:
             print(f"  {s['slice_id']}  offered={s['offered_count']} "
                   f"read={s['read_count']} last_read={s['last_read']}")
+    return 0
+
+
+def _recall(args: argparse.Namespace) -> int:
+    """跨 CLI consumer API：重用 prompt-time shortlist 管線（best-effort，恆 exit 0）。"""
+    from .hooks._shortlist_common import build_shortlist_and_record
+
+    block = build_shortlist_and_record(
+        Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt)
+    if block:
+        print(block)
+    return 0
+
+
+def _usage_mark_applied(args: argparse.Namespace) -> int:
+    """applied 顯式訊號（契約 8）：agent 主動回報某條記憶實際影響了做法。
+
+    寫入前反查 offered.jsonl：同 (session_id, tool) 必須存在先行 offered 記錄，且
+    slice_id 必須屬於那些 offered slices，否則 exit 1 並拒絕寫入偽造事件。
+    """
+    led_dir = Path(args.memory_root) / "runtime" / "ledger"
+    session_seen = False
+    offered_slices: set[str] = set()
+    offered_path = led_dir / "offered.jsonl"
+    if offered_path.exists():
+        for line in offered_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("session_id") != args.session_id or e.get("tool") != args.tool:
+                continue
+            session_seen = True
+            for offered in e.get("offered", []):
+                sid = offered.get("sl_id") if isinstance(offered, dict) else offered
+                if sid:
+                    offered_slices.add(str(sid))
+    if not session_seen:
+        print(
+            f"hippo usage mark-applied: error: 查無 (session_id={args.session_id}, "
+            f"tool={args.tool}) 的先行 offered 記錄——拒絕寫入（applied 只能回報真實被 offer 的記憶）",
+            file=sys.stderr,
+        )
+        return 1
+    if args.slice_id not in offered_slices:
+        print(
+            f"hippo usage mark-applied: error: slice_id={args.slice_id} 不在 "
+            f"(session_id={args.session_id}, tool={args.tool}) 的 offered slice 集合內——拒絕寫入",
+            file=sys.stderr,
+        )
+        return 1
+    ev = {
+        "kind": "applied",
+        "session_id": args.session_id,
+        "slice_id": args.slice_id,
+        "tool": args.tool,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    led_dir.mkdir(parents=True, exist_ok=True)
+    with (led_dir / "memory_usage.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    print(json.dumps(ev, ensure_ascii=False))
     return 0
 
 
