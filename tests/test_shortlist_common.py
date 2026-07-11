@@ -519,3 +519,40 @@ def test_reconcile_from_ledger_rebuilds_missing_map(tmp_path):
     # reconcile 幂等：ledger 已全在 map 中 → 不重複寫、內容不變
     SC._reconcile_offered_map(tmp_path, "claude-code", "sidLO", mpath)
     assert json.loads(mpath.read_text(encoding="utf-8")) == m
+
+
+def test_reconcile_map_write_failure_does_not_block_new_slice(tmp_path, monkeypatch):
+    # 迴歸：恢復窗口「offered ledger 有事件（slice A）、per-session map 尚未反映」下，下一輪
+    # build_shortlist_and_record 會先跑 _reconcile_offered_map 以 ledger 補齊 map。若補寫
+    # （_commit_offered_map）因儲存層故障（磁碟滿／權限／IO——正是 _publish_offered 明文容忍的
+    # 同一類故障）持續失敗，過去例外會從 reconcile 傳出、經 _session_lock 區塊被 build_shortlist_
+    # and_record 最外層 except 攔成 fail-closed 回 ''——即使本輪要 claim 的是全新、從未 offer 過、
+    # 確實命中的 slice B 也被吞掉。修正後 reconcile 的補寫降為 best-effort（比照 _publish_offered）：
+    # 只 log_warn 不 raise，B 照常送達；ledger 為單一真值、_load_offered_ids 已聯集 ledger，去重不受影響。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed_two(tmp_path)  # a.md=sl-aaaa（預置為 offered）、b.md=sl-bbbb（本輪全新命中）
+    note_a = str(tmp_path / "knowledge" / "proj" / "a.md")
+    note_b = str(tmp_path / "knowledge" / "proj" / "b.md")
+
+    # 恢復窗口：ledger 有 A，但 per-session map 檔尚不存在（硬中止／前輪 map 補寫失敗殘留態）
+    SC._append_offered_ledger(tmp_path, "claude-code", "sidRW", "proj",
+                              [("sl-aaaaaaaaaaaaaaaa", note_a)])
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidRW.offered.json"
+    assert not mpath.exists()
+
+    # 持續性補寫失敗：reconcile 與其下游 _publish_offered 的 _commit_offered_map 均會拋
+    monkeypatch.setattr(SC, "_commit_offered_map", _boom_oserror)
+
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidRW", cwd="/x",
+                                        prompt="SerialWrap 執行")
+
+    # reconcile 補寫失敗不再 fail-closed：全新命中 slice B 仍正常送達 shortlist
+    assert out != ""
+    assert note_b in out
+    # A 已於 ledger → seen 命中去重、不重複送達；B 為本輪新 offer（ledger 為準，不依賴 map 補寫）
+    seen = SC._load_offered_ids(tmp_path, "claude-code", "sidRW")
+    assert "sl-aaaaaaaaaaaaaaaa" in seen and "sl-bbbbbbbbbbbbbbbb" in seen
+    events = _offered_events(tmp_path)
+    assert len(events) == 2  # 預置的 A + 本輪的 B（reconcile／publish 的 map 補寫失敗不影響 ledger）
+    assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+    assert [i["sl_id"] for i in events[1]["offered"]] == ["sl-bbbbbbbbbbbbbbbb"]

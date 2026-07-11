@@ -213,6 +213,11 @@ def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) 
     把 ledger 的 offered slice 補回 map，使 (a) 去重判定回到 ledger 真值、(b) post-tool 讀取端
     直接讀 map by_path 時拿到的即 ledger 可重建的真值。無缺漏時不寫檔（省去多餘的原子 replace，
     維持既有 map 冪等）。map 讀取失敗（壞檔）視為空 → 由 _commit_offered_map 以 ledger 重建。
+
+    補寫（_commit_offered_map）為 **best-effort**：ledger 才是單一真值、_load_offered_ids 已無
+    條件聯集 ledger sl_id，去重正確性不依賴這次快取健化是否成功。補寫失敗（磁碟滿／權限／IO——
+    正是 _publish_offered 明文容忍的同一類故障）僅 log_warn、不 raise，避免無關的儲存層故障讓整輪
+    claim/redact/publish fail-closed 而吞掉全新、從未 offer 過的命中 slice；下一輪仍會以 ledger 重試。
     """
     pairs = _offered_pairs_from_ledger(root, tool, session_id)
     if not pairs:
@@ -226,7 +231,15 @@ def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) 
         by_id = {}
     missing = [(sid, p) for sid, p in pairs if by_id.get(sid) != p]
     if missing:
-        _commit_offered_map(mpath, missing)
+        # best-effort cache 健化（比照 _publish_offered 對同一 _commit_offered_map 的容忍）：
+        # 補寫失敗只 log_warn、不 raise，讓本輪 claim/redact/publish 照常進行——ledger 為單一
+        # 真值，_load_offered_ids 已聯集 ledger，去重正確性不依賴這次補寫；下輪仍以 ledger 重試。
+        try:
+            _commit_offered_map(mpath, missing)
+        except Exception as exc:
+            log_warn(root, tool,
+                     f"offered map reconcile write failed; ledger remains authoritative "
+                     f"and map will be retried from ledger next round: {exc}")
 
 
 def _publish_offered(root: Path, tool: str, session_id: str, project: str,
