@@ -556,3 +556,67 @@ def test_reconcile_map_write_failure_does_not_block_new_slice(tmp_path, monkeypa
     assert len(events) == 2  # 預置的 A + 本輪的 B（reconcile／publish 的 map 補寫失敗不影響 ledger）
     assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
     assert [i["sl_id"] for i in events[1]["offered"]] == ["sl-bbbbbbbbbbbbbbbb"]
+
+
+def test_applied_hint_failure_before_commit_publishes_nothing(tmp_path, monkeypatch):
+    # 迴歸：applied-hint 計算（_applied_hint → hippo_invocation → Path.exists() stat
+    # hooks/.venv/bin/python）遇 PermissionError(EACCES)／NFS ESTALE/EIO 等（皆不在
+    # Path.exists() 內部吞掉的 errno {ENOENT,ENOTDIR,EBADF,ELOOP} 之列）會原樣往外拋。此計算
+    # 已移到不可逆 commit point（_publish_offered fsync）之前，故一旦拋出時尚無任何產物發布：
+    # 外層 fail-closed 回 '' 為乾淨失敗，offered ledger／per-session map 皆未落檔、無 .tmp 殘留
+    # （相同輸入可乾淨重試，slice 未被判 seen）。修正前此計算排在 publish 之後，例外被最外層
+    # except 吞成 '' 但 slice 已記 offered → 後續呼叫永久去重、slice 再也不進 shortlist。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+
+    def _boom_hint(*a, **k):
+        raise PermissionError("stat venv python denied")
+
+    monkeypatch.setattr(SC, "_applied_hint", _boom_hint)
+
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidAH", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out == ""  # hint 失敗仍 fail-closed 回 ''
+    # 關鍵差異（修正前此處 offered.jsonl 已含該 slice）：commit point 未達 → 兩產物皆未落檔
+    assert _offered_events(tmp_path) == []
+    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidAH.offered.json").exists()
+    wakeup = tmp_path / "runtime" / "wakeup"
+    if wakeup.exists():
+        assert [p.name for p in wakeup.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_applied_hint_failure_then_retry_delivers_slice_no_permanent_loss(tmp_path, monkeypatch):
+    # 迴歸（核心不變量：既不永久遺漏也不重複送達）：首呼 applied-hint 計算拋例外（模擬 stat
+    # hooks/.venv/bin/python 遇 EACCES/ESTALE）→ 回 '' 且無 ledger／map（commit point 之前失敗）；
+    # 還原後次呼以相同 session/tool/prompt → slice 未被判 seen，照常送達 shortlist、恰一筆 offered。
+    # 修正前：首呼在 publish 之後才拋 → offered.jsonl 已含該 slice、回 ''；次呼因 slice 已 seen
+    # 仍回 '' → slice 永久不再出現在 shortlist（本 finding 已用重現腳本驗證的永久遺漏）。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    real_hint = SC._applied_hint
+    calls = {"n": 0}
+
+    def _flaky_hint(root, tool, session_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError("stat venv python denied")
+        return real_hint(root, tool, session_id)
+
+    monkeypatch.setattr(SC, "_applied_hint", _flaky_hint)
+
+    # 首呼：hint 計算失敗（commit point 之前）→ '' 且無 ledger／map
+    assert SC.build_shortlist_and_record(tmp_path, "claude-code", "sidAR", cwd="/x",
+                                         prompt="SerialWrap 執行") == ""
+    assert _offered_events(tmp_path) == []
+    assert not (tmp_path / "runtime" / "wakeup" / "claude-code__sidAR.offered.json").exists()
+
+    # 次呼（相同輸入、hint 恢復）：slice 未被判 seen → 照常送達、恰一筆 offered（不永久遺漏）
+    note = str(tmp_path / "knowledge" / "proj" / "a.md")
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidAR", cwd="/x",
+                                        prompt="SerialWrap 執行")
+    assert out != "" and note in out
+    assert "usage mark-applied" in out  # 成功路徑照常附上 applied-hint
+    events = _offered_events(tmp_path)
+    assert len(events) == 1
+    assert [i["sl_id"] for i in events[0]["offered"]] == ["sl-aaaaaaaaaaaaaaaa"]
+    assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidAR")

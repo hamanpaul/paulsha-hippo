@@ -346,12 +346,23 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                 # NOT record offered (nothing was surfaced to the agent).
                 return ""
             offered = [(h["slice_id"], h["path"]) for h in claim if h.get("path")]
+            # applied-hint 於不可逆 commit point 之前算好：_applied_hint 只需 root/tool/
+            # session_id、不依賴 _publish_offered 的回傳，故可在 commit 前算。它會呼叫
+            # hippo_invocation() → Path.exists() stat hooks/.venv/bin/python；該 stat 遇
+            # PermissionError(EACCES)／NFS ESTALE/EIO 等（皆不在 Path.exists() 內部吞掉的
+            # errno {ENOENT,ENOTDIR,EBADF,ELOOP} 之列）會原樣往外拋。放在 publish 之前，
+            # 一旦拋出時尚無任何產物發布 → 外層 fail-closed 回 '' 為乾淨失敗，相同輸入可重試
+            # （slice 尚未進 seen）。若排在 _publish_offered（durable、不可逆）之後才算，該例外
+            # 會被最外層 except 吞成 ''，但 offered.jsonl／map 已把 slice 記成 offered →
+            # 後續呼叫 _load_offered_ids 永久去重、該 slice 再也不會出現在 shortlist（永久遺漏）。
+            hint = _applied_hint(root, tool, session_id)
             # 發布：先 fsync offered ledger（單一真值＋commit point）後更新 map cache。ledger
             # append 失敗會 raise，由下方外層 fail-closed 回 ''——不出現「ledger 已記但 agent 收不到
             # shortlist」的膨脹；ledger 成功後的硬中止只落在「ledger 有、map 無」安全側，由 reconcile
-            # 重建（見 _publish_offered）。
+            # 重建（見 _publish_offered）。commit point 之後僅剩兩個既有 str 的串接（不會拋），故
+            # 不存在「offer 已 durable 落盤但回傳被吞成 ''」的永久遺漏窗口。
             _publish_offered(root, tool, session_id, project, mpath, offered)
-        return block + "\n" + _applied_hint(root, tool, session_id)
+        return block + "\n" + hint
     except Exception as exc:
         log_warn(root, tool, f"shortlist failed: {exc}")
         return ""
