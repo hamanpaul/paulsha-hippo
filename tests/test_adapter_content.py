@@ -17,7 +17,12 @@ def test_read_claude_transcript_extracts_prompts_summary_touched():
 
 def test_read_claude_transcript_missing_file_is_empty():
     out = base.read_claude_transcript(FIX / "does_not_exist.jsonl")
-    assert out == {"user_prompts": [], "assistant_summary": "", "touched_files": []}
+    assert out == {
+        "user_prompts": [],
+        "assistant_messages": [],
+        "assistant_summary": "",
+        "touched_files": [],
+    }
 
 
 def test_read_copilot_history_extracts_from_chatmessages(tmp_path):
@@ -42,12 +47,11 @@ def test_read_copilot_history_accepts_contract_config_root(tmp_path):
     assert out["assistant_summary"] == "已整理 PON HLAPI 對照表。"
 
 
-def test_read_codex_rollout_extracts_prompts_only():
+def test_read_codex_rollout_extracts_prompts_and_empty_assistant_contract():
     out = base.read_codex_rollout(FIX / "codex_rollout.jsonl")
     assert out["user_prompts"] == ["請幫我產生 codex 範例"]
-    # assistant summary comes from the queue payload's last_assistant_message,
-    # not from the rollout file — read_codex_rollout returns prompts only.
-    assert "assistant_summary" not in out
+    assert out["assistant_messages"] == []
+    assert out["assistant_summary"] == ""
 
 
 def test_claude_adapter_enriches_from_transcript(tmp_path):
@@ -110,6 +114,7 @@ def test_end_to_end_inbox_has_content_and_title(tmp_path, monkeypatch):
     pipeline.ingest_queue_item(qp, memory_root=tmp_path, dry_run=False)
     md = list((tmp_path / "inbox").rglob("*.md"))[0].read_text(encoding="utf-8")
     assert "title: 端到端標題" in md
-    assert "## Summary\n端到端標題" in md
+    assert "## Summary\n已修好 UART 升級流程並加上重試。" in md
+    assert "## Conversation\n1. 已修好 UART 升級流程並加上重試。" in md
     assert "1. 幫我修 UART 升級流程" in md
     assert "- /repo/uart.py" in md

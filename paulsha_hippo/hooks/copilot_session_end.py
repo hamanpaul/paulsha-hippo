@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 TOOL = "copilot-cli"
@@ -78,13 +79,15 @@ def _supplement_from_history(payload: dict, session_id: str, config_root: Path) 
 
 def _fire_importer(root: Path, queue_path: Path) -> None:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        _log_warn(root, f"venv not found at {venv_python}; queue written but importer not triggered")
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    importer_python = venv_python if venv_python.exists() else configured_python
+    if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
+        _log_warn(root, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
     try:
         subprocess.Popen(
             [
-                str(venv_python), "-m", "paulsha_hippo.importer.cli",
+                str(importer_python), "-m", "paulsha_hippo.importer.cli",
                 "ingest", "--queue-item", str(queue_path),
                 "--memory-root", str(root),
             ],
@@ -134,11 +137,13 @@ def main() -> int:
         # capture_scope: prefer explicit, else session_end
         if not queue_payload.get("capture_scope"):
             queue_payload["capture_scope"] = "session_end"
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
 
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{TOOL}__{_sanitize_id(session_id)}.json"
+        filename = f"{TOOL}__{_sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(

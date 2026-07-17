@@ -21,7 +21,8 @@ jobs:
       - name: Detect test suite
         id: detect
         run: |
-          if [ -d tests ] && ls tests/test_*.py tests/*_test.py >/dev/null 2>&1; then
+          first_test="$(find tests -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit 2>/dev/null || true)"
+          if [ -n "$first_test" ]; then
             echo "has_tests=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_tests=false" >> "$GITHUB_OUTPUT"
@@ -38,9 +39,30 @@ jobs:
         if: steps.detect.outputs.has_tests == 'true'
         run: |
           python -m pip install --upgrade pip pytest
-          if [ -f pyproject.toml ]; then python -m pip install -e ".[test]" || python -m pip install -e . || true; fi
+          if [ -f pyproject.toml ]; then python -m pip install -e ".[test]"; fi
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
 
       - name: Run test suite
         if: steps.detect.outputs.has_tests == 'true'
         run: python -m pytest tests/ -q
+
+      - name: Build and smoke clean wheel install
+        if: steps.detect.outputs.has_tests == 'true'
+        run: |
+          rm -rf dist .wheel-smoke
+          python -m pip wheel . --wheel-dir dist
+          python -m venv .wheel-smoke
+          .wheel-smoke/bin/pip install dist/paulsha_hippo-*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" --version
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" recovery --help >/dev/null
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/python" -c 'from paulsha_hippo.atomizer.config import load_config; c, _ = load_config(override_path=None); assert c.context_window == 32768 and c.max_input_tokens == 12000'
+          export HOME="$RUNNER_TEMP/hippo-wheel-home"
+          mkdir -p "$HOME"
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" install hooks --memory-root "$RUNNER_TEMP/hippo-wheel-memory"
+          test -f "$RUNNER_TEMP/hippo-wheel-memory/hooks/codex_session_end.py"
+          grep -F "$GITHUB_WORKSPACE/.wheel-smoke/bin/python" "$HOME/.codex/hooks.json"
+          doctor_rc=0
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" doctor >"$RUNNER_TEMP/hippo-doctor.log" 2>&1 || doctor_rc=$?
+          test "$doctor_rc" -le 1
+          ! grep -Eq 'Traceback|TypeError' "$RUNNER_TEMP/hippo-doctor.log"

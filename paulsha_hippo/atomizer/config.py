@@ -11,14 +11,25 @@ from typing import Any
 
 from paulsha_hippo import paths
 
+from .limits import MIN_CONTEXT_WINDOW
+
 # Default config directory is package location
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_AGENT_EXEC_COMMAND = ("scripts/claude-gemma4",)
-DEFAULT_AGENT_EXEC_TIMEOUT = 600
-DEFAULT_AGENT_EXEC_MODEL = "unknown"
-DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS = 8192
-DEFAULT_AGENT_EXEC_UPSTREAM_URL = "http://192.0.2.10:8001"
+DEFAULT_AGENT_EXEC_COMMAND = (
+    "/bin/bash",
+    "-c",
+    'set -eu; export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v22.20.0/bin:$PATH"; prompt=$(cat); exec "$HOME/.local/bin/co-gem" -s --no-color --available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export -p "$prompt"',
+)
+DEFAULT_AGENT_EXEC_TIMEOUT = 300
+DEFAULT_AGENT_EXEC_MODEL = "gem"
+DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_AGENT_EXEC_UPSTREAM_URL = "http://127.0.0.1:8080"
+DEFAULT_CONTEXT_WINDOW = MIN_CONTEXT_WINDOW
+DEFAULT_MAX_INPUT_TOKENS = 12000
+DEFAULT_MAX_PROMPT_ARGV_BYTES = 48 * 1024
+DEFAULT_CHUNK_RETRIES = 2
+DEFAULT_PARALLELISM = 1
 
 # Supported schema version
 _SUPPORTED_SCHEMA = "1"
@@ -50,6 +61,11 @@ class AtomizerConfig:
     agent_exec_backend: str = "custom-argv"
     agent_exec_base_url: str = ""
     agent_exec_api_key_env: str = ""
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
+    max_prompt_argv_bytes: int = DEFAULT_MAX_PROMPT_ARGV_BYTES
+    chunk_retries: int = DEFAULT_CHUNK_RETRIES
+    parallelism: int = DEFAULT_PARALLELISM
     default_promoter: str = "identity"
     skill_path: str = "skills/atomize-knowledge-slice.md"
     known_projects_file: str = field(default_factory=lambda: str(paths.projects_config_path()))
@@ -79,7 +95,11 @@ def _read_mapping(path: Path) -> Mapping[str, Any]:
             data = yaml.safe_load(text)
         except Exception as e:
             raise AtomizerConfigError(f"Cannot parse YAML from {path}: {e}") from e
-    except ImportError:
+    except ImportError as exc:
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            raise AtomizerConfigError(
+                f"Cannot parse YAML from {path}: PyYAML dependency is not installed"
+            ) from exc
         try:
             data = json.loads(text)
         except Exception as e:
@@ -178,6 +198,16 @@ def is_safe_path_component(value: str) -> bool:
         and "]" not in value
         and "\x00" not in value
     )
+
+
+def is_valid_project_id(value: str) -> bool:
+    """Validate rich project metadata without imposing filesystem-token rules."""
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 512:
+        return False
+    if value.startswith(("/", "~")) or any(ord(char) < 32 for char in value):
+        return False
+    segments = value.replace("\\", "/").split("/")
+    return all(segment not in {"", ".", ".."} for segment in segments)
 
 
 def sanitize_project_component(value: str) -> str:
@@ -358,6 +388,42 @@ def load_config(
         config_data.get("known_projects_file", str(paths.projects_config_path())),
         "known_projects_file",
     )
+
+    context_window = _parse_positive_int(
+        config_data.get("context_window", DEFAULT_CONTEXT_WINDOW), "context_window"
+    )
+    if context_window < MIN_CONTEXT_WINDOW:
+        raise AtomizerConfigError(
+            "context_window must be at least "
+            f"{MIN_CONTEXT_WINDOW}, got {context_window}"
+        )
+    max_input_tokens = _parse_positive_int(
+        config_data.get("max_input_tokens", DEFAULT_MAX_INPUT_TOKENS), "max_input_tokens"
+    )
+    max_prompt_argv_bytes = _parse_positive_int(
+        config_data.get("max_prompt_argv_bytes", DEFAULT_MAX_PROMPT_ARGV_BYTES),
+        "max_prompt_argv_bytes",
+    )
+    chunk_retries = _parse_positive_int(
+        config_data.get("chunk_retries", DEFAULT_CHUNK_RETRIES), "chunk_retries"
+    )
+    parallelism = _parse_positive_int(
+        config_data.get("parallelism", DEFAULT_PARALLELISM), "parallelism"
+    )
+    fixed_values = {
+        "max_input_tokens": (max_input_tokens, DEFAULT_MAX_INPUT_TOKENS),
+        "max_prompt_argv_bytes": (max_prompt_argv_bytes, DEFAULT_MAX_PROMPT_ARGV_BYTES),
+        "chunk_retries": (chunk_retries, DEFAULT_CHUNK_RETRIES),
+        "parallelism": (parallelism, DEFAULT_PARALLELISM),
+        "agent_exec.timeout_seconds": (agent_exec_timeout, DEFAULT_AGENT_EXEC_TIMEOUT),
+        "agent_exec.max_output_tokens": (
+            agent_exec_max_output_tokens,
+            DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS,
+        ),
+    }
+    for field_name, (actual, expected) in fixed_values.items():
+        if actual != expected:
+            raise AtomizerConfigError(f"{field_name} is fixed at {expected}, got {actual}")
     
     agent_exec_backend = str(agent_exec_config.get("backend", "custom-argv"))
     if agent_exec_backend not in ("custom-argv", "openai-compatible", "claude-headless"):
@@ -384,6 +450,11 @@ def load_config(
         agent_exec_backend=agent_exec_backend,
         agent_exec_base_url=agent_exec_base_url,
         agent_exec_api_key_env=agent_exec_api_key_env,
+        context_window=context_window,
+        max_input_tokens=max_input_tokens,
+        max_prompt_argv_bytes=max_prompt_argv_bytes,
+        chunk_retries=chunk_retries,
+        parallelism=parallelism,
         default_promoter=default_promoter,
         skill_path=skill_path,
         known_projects_file=known_projects_file,

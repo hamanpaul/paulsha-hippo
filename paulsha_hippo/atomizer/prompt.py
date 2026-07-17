@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from .splitter import Fragment
 
+_CANONICAL_RESPONSE_SCHEMA = (
+    '{"schema_version":1,"disposition":"findings|no_findings",'
+    '"reason":null|string,"findings":[...]}'
+)
+
 
 def build_prompt(skill_text: str, fragments: list[Fragment], known_projects: list[str]) -> str:
     parts = [
@@ -19,17 +24,22 @@ def build_prompt(skill_text: str, fragments: list[Fragment], known_projects: lis
         parts.append("## This session's project")
         parts.append(
             f"This session was captured in project: {session_project}. "
-            "Prefer it for each slice unless the content clearly belongs to a different known project."
+            "Use this exact project for every finding; do not re-home the source session."
         )
         parts.append("")
     parts.append("## Session fragments to atomize")
     for fragment in fragments:
-        parts.append(f"[fragment {fragment.fragment_index}]")
+        label = f"fragment {fragment.fragment_index}"
+        if fragment.part_count > 1:
+            label += f" part {fragment.part_index}/{fragment.part_count}"
+        parts.append(f"[{label}]")
         parts.append(fragment.body)
         parts.append("")
     parts.append("## Output")
-    parts.append("Return ONLY an inline JSON array.")
-    parts.append("The first character of your response must be `[` and the last character must be `]`.")
+    parts.append(f"Return ONLY this canonical JSON object shape: {_CANONICAL_RESPONSE_SCHEMA}")
+    parts.append("Use disposition=findings with one or more findings and reason=null.")
+    parts.append("Use disposition=no_findings only with findings=[] and a non-empty reason.")
+    parts.append("The first character must be `{` and the last character must be `}`.")
     parts.append("Do NOT create files, write files, save files, or claim that you updated any file or index.")
-    parts.append("Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON array.")
+    parts.append("Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON object.")
     return "\n".join(parts)

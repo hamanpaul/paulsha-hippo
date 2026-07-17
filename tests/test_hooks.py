@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +85,13 @@ class HookQueueWriterTest(unittest.TestCase):
             e.update(extra)
         return e
 
+    def _queue_capture(self, tool: str, session_id: str) -> Path:
+        matches = sorted(
+            (self.memory_root / "runtime" / "queue").glob(f"{tool}__{session_id}__*.json")
+        )
+        self.assertEqual(len(matches), 1, f"expected one queue capture, got {matches}")
+        return matches[0]
+
     # ------------------------------------------------------------------
     # Claude hook
     # ------------------------------------------------------------------
@@ -94,12 +103,13 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / "claude-code__claude-session-end-001.json"
+        queue_file = self._queue_capture("claude-code", "claude-session-end-001")
         self.assertTrue(queue_file.exists(), f"queue file not found: {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "session_end")
         self.assertEqual(written["tool"], "claude-code")
         self.assertEqual(written["session_id"], "claude-session-end-001")
+        self.assertEqual(written["capture_id"], queue_file.stem.rsplit("__", 1)[-1])
 
     def test_claude_hook_always_sets_capture_scope_session_end(self):
         payload = {"session_id": "claude-plain-001", "cwd": "/repo"}
@@ -107,10 +117,11 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / "claude-code__claude-plain-001.json"
+        queue_file = self._queue_capture("claude-code", "claude-plain-001")
         self.assertTrue(queue_file.exists())
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "session_end")
+        self.assertTrue(written["capture_id"])
 
     def test_claude_hook_exits_zero_on_empty_stdin(self):
         result = _run_hook("claude_session_end.py", "", extra_env=self._env())
@@ -215,14 +226,13 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("copilot_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-session-end-001.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-session-end-001")
         self.assertTrue(queue_file.exists(), f"expected {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["session_id"], "copilot-session-end-001")
         self.assertEqual(written["tool"], "copilot-cli")
         self.assertEqual(written["capture_scope"], "session_end")
+        self.assertTrue(written["capture_id"])
 
     def test_copilot_hook_supplements_missing_fields_from_history_file(self):
         """If history file exists, copilot hook reads it to supplement missing fields."""
@@ -252,7 +262,7 @@ class HookQueueWriterTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / f"copilot-cli__{sid}.json"
+        queue_file = self._queue_capture("copilot-cli", sid)
         self.assertTrue(queue_file.exists(), f"expected {queue_file}")
         written = json.loads(queue_file.read_text())
         # Supplemented fields should appear
@@ -270,9 +280,7 @@ class HookQueueWriterTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-nohist-001.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-nohist-001")
         self.assertTrue(queue_file.exists())
 
     def test_copilot_hook_exits_zero_on_invalid_json(self):
@@ -290,10 +298,40 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
         self.assertEqual(result.returncode, 0)
         # Queue file still written
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "claude-code__claude-novenv-001.json"
-        )
+        queue_file = self._queue_capture("claude-code", "claude-novenv-001")
         self.assertTrue(queue_file.exists())
+
+    def test_installed_interpreter_drives_background_importer_without_nested_venv(self):
+        from paulsha_hippo.hooks import (
+            _wakeup_common,
+            claude_session_end,
+            codex_session_end,
+            copilot_session_end,
+        )
+
+        queue_path = self.memory_root / "runtime" / "queue" / "capture.json"
+        env = {"HIPPO_HOOK_PYTHON": sys.executable}
+        fire_calls = (
+            (claude_session_end._fire_importer, (self.memory_root, queue_path)),
+            (codex_session_end._fire_importer, (self.memory_root, queue_path)),
+            (copilot_session_end._fire_importer, (self.memory_root, queue_path)),
+            (_wakeup_common.fire_importer, (self.memory_root, "codex", queue_path)),
+        )
+        with mock.patch.dict(os.environ, env), mock.patch("subprocess.Popen") as popen:
+            for fire, args in fire_calls:
+                fire(*args)
+
+        self.assertEqual(popen.call_count, 4)
+        for call in popen.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[0], sys.executable)
+            self.assertEqual(argv[1:3], ["-m", "paulsha_hippo.importer.cli"])
+
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                _wakeup_common.hippo_invocation(self.memory_root),
+                [sys.executable, "-m", "paulsha_hippo"],
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +454,31 @@ class InstallerTest(unittest.TestCase):
         ):
             deployed = self.memory_root / "hooks" / script
             self.assertTrue(deployed.exists(), f"{script} not deployed")
+
+    def test_installed_interpreter_skips_nested_venv_and_is_written_to_hooks(self):
+        result = _run_install(
+            [
+                "--memory-root", str(self.memory_root),
+                "--config-root", str(self.config_root),
+                "--repo-root", self.repo_root,
+                "--python", sys.executable,
+            ]
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertFalse((self.memory_root / "hooks" / ".venv").exists())
+
+        settings = json.loads(
+            (self.config_root / ".codex" / "hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook.get("command", "")
+            for entries in settings.get("hooks", {}).values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+        ]
+        self.assertTrue(commands)
+        self.assertTrue(all(sys.executable in command for command in commands), commands)
+        self.assertTrue(all(f"HIPPO_HOOK_PYTHON={sys.executable}" in command for command in commands))
 
     # ------------------------------------------------------------------
     # Full install — Claude config

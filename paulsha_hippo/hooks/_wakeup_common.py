@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -155,6 +156,9 @@ def hippo_invocation(root: Path) -> list[str]:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
     if venv_python.exists():
         return [str(venv_python), "-m", "paulsha_hippo"]
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    if configured_python.is_absolute() and configured_python.is_file() and os.access(configured_python, os.X_OK):
+        return [str(configured_python), "-m", "paulsha_hippo"]
     return ["python3", "-m", "paulsha_hippo"]
 
 
@@ -192,7 +196,7 @@ def write_queue_payload(
     payload: dict,
     capture_scope: str,
 ) -> Path | None:
-    """Write an atomic queue payload to runtime/queue/<tool>__<sid>.json.
+    """Write one uniquely identified capture without overwriting the same session.
 
     Returns Path on success, or None on failure.
     """
@@ -201,11 +205,13 @@ def write_queue_payload(
         queue_payload["tool"] = tool
         queue_payload["session_id"] = session_id
         queue_payload["capture_scope"] = capture_scope
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
 
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{tool}__{sanitize_id(session_id)}.json"
+        filename = f"{tool}__{sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(
@@ -221,13 +227,15 @@ def write_queue_payload(
 def fire_importer(root: Path, tool: str, queue_path: Path) -> None:
     """Fire-and-forget trigger the importer in the background."""
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        log_warn(root, tool, f"venv not found at {venv_python}; queue written but importer not triggered")
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    importer_python = venv_python if venv_python.exists() else configured_python
+    if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
+        log_warn(root, tool, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
     try:
         subprocess.Popen(
             [
-                str(venv_python), "-m", "paulsha_hippo.importer.cli",
+                str(importer_python), "-m", "paulsha_hippo.importer.cli",
                 "ingest", "--queue-item", str(queue_path),
                 "--memory-root", str(root),
             ],

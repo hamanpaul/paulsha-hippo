@@ -24,6 +24,7 @@ from .classifier import classify_session
 from .frontmatter import render_markdown
 from .project_resolver import normalize_remote
 from .project_resolver import resolve_project
+from .sanitizer import SanitizationError, sanitize_session
 
 _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "watcher_final": 2}
 _TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip"}
@@ -42,14 +43,25 @@ def _canonical_json(value: object) -> str:
 
 
 def content_hash(session: NormalizedSession, capture_scope: str) -> str:
-    subset = (
-        session["session_id"],
-        capture_scope,
-        session["turn_count"],
-        session["ended_at"],
-        sorted(session["touched_files"]),
-        len(session["user_prompts"]),
-    )
+    messages = session.get("assistant_messages")
+    if not isinstance(messages, list):
+        messages = [session.get("assistant_summary", "")] if session.get("assistant_summary") else []
+    subset = {
+        "tool": session.get("tool", ""),
+        "session_id": session.get("session_id", ""),
+        "parent_session_id": session.get("parent_session_id"),
+        "capture_scope": capture_scope,
+        "started_at": session.get("started_at"),
+        "ended_at": session.get("ended_at"),
+        "cwd": session.get("cwd"),
+        "repo": session.get("repo"),
+        "commit": session.get("commit"),
+        "turn_count": session.get("turn_count", 0),
+        "user_prompts": list(session.get("user_prompts") or []),
+        "assistant_messages": list(messages),
+        "touched_files": sorted(session.get("touched_files") or []),
+        "referenced_artifacts": sorted(session.get("referenced_artifacts") or []),
+    }
     return sha256(_canonical_json(subset).encode("utf-8")).hexdigest()
 
 
@@ -59,6 +71,32 @@ def completeness(session: NormalizedSession, capture_scope: str) -> tuple[int, i
         session["turn_count"],
         len(session["touched_files"]),
         len(session["user_prompts"]),
+    )
+
+
+def _capture_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_older_capture(
+    *, incoming_at: str, incoming_scope: str, recorded: dict[str, Any]
+) -> bool:
+    incoming_time = _capture_timestamp(incoming_at)
+    recorded_time = _capture_timestamp(recorded.get("captured_at"))
+    if incoming_time is None or recorded_time is None:
+        return False
+    if incoming_time != recorded_time:
+        return incoming_time < recorded_time
+    return _SCOPE_RANK.get(incoming_scope, 0) < _SCOPE_RANK.get(
+        str(recorded.get("capture_scope") or ""), 0
     )
 
 
@@ -124,6 +162,12 @@ def _extract(queue_path: Path) -> AdapterResult:
 
 
 def idempotency_key(session: NormalizedSession) -> str:
+    logical_key = logical_session_key(session)
+    capture_id = str(session.get("capture_id") or "")
+    return f"{logical_key}:{capture_id}" if capture_id else logical_key
+
+
+def logical_session_key(session: NormalizedSession) -> str:
     return f"{session['tool']}:{session['session_id']}"
 
 
@@ -208,6 +252,33 @@ def _load_recorded(memory_root: Path, key: str) -> dict[str, Any] | None:
     return recorded
 
 
+def _logical_key_from_entry(entry: dict[str, Any]) -> str:
+    logical = entry.get("logical_session_key")
+    if isinstance(logical, str) and logical:
+        return logical
+    key = str(entry.get("idempotency_key") or "")
+    parts = key.split(":")
+    return ":".join(parts[:2]) if len(parts) >= 2 else key
+
+
+def _load_logical_records(memory_root: Path, logical_key: str) -> list[dict[str, Any]]:
+    ledger = _ledger_path(memory_root)
+    if not ledger.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with ledger.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if _logical_key_from_entry(entry) != logical_key:
+                continue
+            if entry.get("status") in {"written", "updated"}:
+                records.append(entry)
+    return records
+
+
 def _append_ledger(memory_root: Path, entry: dict[str, Any]) -> None:
     ledger = _ledger_path(memory_root)
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -258,22 +329,30 @@ def _decision_entry(
     *,
     status: str,
     key: str,
+    logical_key: str,
+    capture_id: str,
     queue_path: Path,
     inbox_path: Path,
     archive_path: Path,
     incoming_hash: str,
     incoming_completeness: tuple[int, int, int, int],
+    captured_at: str,
+    capture_scope: str,
     recorded: dict[str, Any] | None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "idempotency_key": key,
+        "logical_session_key": logical_key,
+        "capture_id": capture_id,
         "queue_path": str(queue_path),
         "inbox_path": str(inbox_path),
         "archive_path": str(archive_path),
         "content_hash": incoming_hash,
         "completeness": list(incoming_completeness),
+        "captured_at": captured_at,
+        "capture_scope": capture_scope,
     }
     if recorded is not None:
         entry["from_completeness"] = recorded.get("completeness")
@@ -373,11 +452,16 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     queue_path = Path(queue_item)
     root = Path(memory_root)
     result = _extract(queue_path)
-    session = title.apply(dict(result.session), memory_root=root)
+    try:
+        derived_session = sanitize_session(dict(result.session))
+    except SanitizationError as exc:
+        raise PipelineError(str(exc)) from exc
+    session = title.apply(derived_session, memory_root=root)
     remote_url = result.raw_payload.get("remote_url") or result.raw_payload.get("remote") or session.get("repo")
     if not isinstance(remote_url, str):
         remote_url = None
     key = idempotency_key(session)
+    logical_key = logical_session_key(session)
     incoming_hash = content_hash(session, result.capture_scope)
     incoming_completeness = completeness(session, result.capture_scope)
     captured_at, day, month = _date_parts(session)
@@ -393,12 +477,16 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         decision = _decision_entry(
             status=skip_status,
             key=key,
+            logical_key=logical_key,
+            capture_id=str(session.get("capture_id") or ""),
             queue_path=queue_path,
             inbox_path=root / "inbox" / "_skipped" / f"{safe_key(session['session_id'])}.md",
             archive_path=archive_path,
             incoming_hash=incoming_hash,
             incoming_completeness=incoming_completeness,
-            recorded=_load_recorded(root, key),
+            captured_at=captured_at,
+            capture_scope=result.capture_scope,
+            recorded=(_load_logical_records(root, logical_key) or [None])[-1],
         )
         decision["skip_reason"] = skip_status
         decision["rendered"] = ""
@@ -411,20 +499,30 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         memory_root=str(root),
     )
     inbox_path = root / "inbox" / bucket / session["tool"] / day / f"{safe_key(session['session_id'])}.md"
-    recorded = _load_recorded(root, key)
+    exact_recorded = _load_recorded(root, key)
+    logical_records = _load_logical_records(root, logical_key)
+    recorded = exact_recorded or (logical_records[-1] if logical_records else None)
     route_changed = recorded is not None and (
         recorded.get("inbox_path") != str(inbox_path) or recorded.get("project") != project
     )
+    semantic_duplicate = next(
+        (entry for entry in reversed(logical_records) if entry.get("content_hash") == incoming_hash),
+        None,
+    )
     if recorded is None:
         status = "written"
+    elif _is_older_capture(
+        incoming_at=captured_at,
+        incoming_scope=result.capture_scope,
+        recorded=recorded,
+    ):
+        status = "stale-skip"
     elif route_changed:
         status = "updated"
-    elif incoming_hash == recorded.get("content_hash"):
+    elif semantic_duplicate is not None:
         status = "hash-duplicate"
-    elif tuple(incoming_completeness) > tuple(recorded.get("completeness", [])):
-        status = "updated"
     else:
-        status = "stale-skip"
+        status = "updated"
     archive_path = _archive_path(root, month, key, status, incoming_hash)
     rendered_session = _persisted_session(session, raw_payload_pointer=str(archive_path))
     discovered_toplevel = _git.git_toplevel(session.get("cwd"))
@@ -453,11 +551,15 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     decision = _decision_entry(
         status=status,
         key=key,
+        logical_key=logical_key,
+        capture_id=str(session.get("capture_id") or ""),
         queue_path=queue_path,
         inbox_path=inbox_path,
         archive_path=archive_path,
         incoming_hash=incoming_hash,
         incoming_completeness=incoming_completeness,
+        captured_at=captured_at,
+        capture_scope=result.capture_scope,
         recorded=recorded,
     )
     decision["classifier_bucket"] = bucket
@@ -494,8 +596,7 @@ def ingest_queue_item(queue_item: str | Path, *, memory_root: str | Path, dry_ru
         decision["rendered"] = rendered
         return decision
 
-    key = decision["idempotency_key"]
-    lock_path = shard_lock_path(root, key)
+    lock_path = shard_lock_path(root, decision["logical_session_key"])
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         try:

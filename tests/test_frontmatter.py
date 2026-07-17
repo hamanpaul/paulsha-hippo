@@ -42,7 +42,7 @@ class FrontmatterRenderTest(unittest.TestCase):
             "source_agent: copilot-cli",
             "source_session: copilot-session-end-001",
             "source_artifact: session",
-            f"title: {result.session['assistant_summary']}",
+            "title: ",
             "title_source: fallback",
             "captured_at: 2026-05-24T12:00:00+00:00",
             "provenance:",

@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from paulsha_hippo.atomizer.config import (
@@ -25,6 +26,7 @@ class TestAtomizerConfig(unittest.TestCase):
         self.assertGreater(cfg.max_fragment_chars, 0)
         self.assertIsInstance(cfg.boundary_patterns, tuple)
         self.assertGreater(len(cfg.boundary_patterns), 0)
+        self.assertEqual(cfg.context_window, 32768)
         self.assertEqual(len(hash_value), 64)  # SHA-256 hex digest
 
     def test_override_merges_and_changes_hash(self):
@@ -69,6 +71,91 @@ class TestAtomizerConfig(unittest.TestCase):
         _, hash2 = load_config(override_path=None)
         
         self.assertEqual(hash1, hash2)
+
+    def test_context_window_below_minimum_fails_closed(self):
+        """Provider contexts below the shipped 32K baseline fail at config load."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            override_path = Path(f.name)
+            f.write("context_window: 32767\n")
+
+        try:
+            with self.assertRaisesRegex(
+                AtomizerConfigError,
+                r"context_window must be at least 32768, got 32767",
+            ):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_context_window_at_or_above_minimum_is_accepted(self):
+        """Operators may declare larger provider contexts without widening Hippo gates."""
+        for value in (32768, 32769, 262144):
+            with self.subTest(value=value):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                ) as f:
+                    override_path = Path(f.name)
+                    f.write(f"context_window: {value}\n")
+
+                try:
+                    cfg, _ = load_config(override_path=override_path)
+                    self.assertEqual(cfg.context_window, value)
+                finally:
+                    override_path.unlink()
+
+    def test_context_window_remains_in_config_hash(self):
+        """32K and 256K provider declarations remain provenance-distinguishable."""
+        hashes = []
+        for value in (32768, 262144):
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f:
+                override_path = Path(f.name)
+                f.write(f"context_window: {value}\n")
+
+            try:
+                _, hash_value = load_config(override_path=override_path)
+                hashes.append(hash_value)
+            finally:
+                override_path.unlink()
+
+        self.assertNotEqual(*hashes)
+
+    def test_larger_context_declaration_cannot_weaken_fixed_safety_limits(self):
+        """A 256K declaration does not make any execution safety limit tunable."""
+        unsafe_overrides = (
+            ("max_input_tokens: 12001\n", "max_input_tokens is fixed at 12000"),
+            (
+                "max_prompt_argv_bytes: 49153\n",
+                "max_prompt_argv_bytes is fixed at 49152",
+            ),
+            ("chunk_retries: 3\n", "chunk_retries is fixed at 2"),
+            ("parallelism: 2\n", "parallelism is fixed at 1"),
+            (
+                "agent_exec:\n  timeout_seconds: 301\n",
+                "agent_exec.timeout_seconds is fixed at 300",
+            ),
+            (
+                "agent_exec:\n  max_output_tokens: 2049\n",
+                "agent_exec.max_output_tokens is fixed at 2048",
+            ),
+        )
+        for override_body, expected_error in unsafe_overrides:
+            with self.subTest(override_body=override_body):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                ) as f:
+                    override_path = Path(f.name)
+                    f.write("context_window: 262144\n" + override_body)
+
+                try:
+                    with self.assertRaisesRegex(
+                        AtomizerConfigError,
+                        expected_error,
+                    ):
+                        load_config(override_path=override_path)
+                finally:
+                    override_path.unlink()
 
     def test_bool_as_int_rejected(self):
         """Boolean max_fragment_chars must fail closed instead of becoming 1 or 0."""
@@ -166,7 +253,7 @@ class AgentExecConfigTests(unittest.TestCase):
     def test_resolve_agent_exec_settings_prefers_env_upstream(self):
         from paulsha_hippo.atomizer import config as cfgmod
 
-        with unittest.mock.patch.dict(
+        with mock.patch.dict(
             "os.environ",
             {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": "http://10.0.0.9:9002"},
             clear=False,
@@ -182,7 +269,7 @@ class AgentExecConfigTests(unittest.TestCase):
             p = Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
             agents_root = p / "custom-agents"
-            with unittest.mock.patch.dict(
+            with mock.patch.dict(
                 "os.environ",
                 {"PSC_AGENTS_ROOT": str(agents_root)},
                 clear=False,
@@ -229,11 +316,10 @@ class AgentExecConfigTests(unittest.TestCase):
             p = pathlib.Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
             cfg_default, hash_default = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg_default.agent_exec_max_output_tokens, 8192)
+            self.assertEqual(cfg_default.agent_exec_max_output_tokens, 2048)
             (p / "atomizer.yaml").write_text(base + "agent_exec:\n  max_output_tokens: 16384\n", encoding="utf-8")
-            cfg_big, hash_big = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg_big.agent_exec_max_output_tokens, 16384)
-            self.assertNotEqual(hash_default, hash_big)
+            with self.assertRaises(cfgmod.AtomizerConfigError):
+                cfgmod.load_config(default_dir=p, override_path=None)
 
     def test_max_output_tokens_rejects_non_positive(self):
         import tempfile, pathlib

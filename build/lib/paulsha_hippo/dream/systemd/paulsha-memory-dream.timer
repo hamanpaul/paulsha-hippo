@@ -1,9 +1,0 @@
-[Unit]
-Description=Run PaulSha memory dream on workday mornings
-
-[Timer]
-OnCalendar=Mon..Fri 05:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

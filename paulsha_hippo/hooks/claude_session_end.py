@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 TOOL = "claude-code"
@@ -45,13 +46,15 @@ def _sanitize_id(value: str) -> str:
 
 def _fire_importer(root: Path, queue_path: Path) -> None:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        _log_warn(root, f"venv not found at {venv_python}; queue written but importer not triggered")
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    importer_python = venv_python if venv_python.exists() else configured_python
+    if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
+        _log_warn(root, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
     try:
         subprocess.Popen(
             [
-                str(venv_python), "-m", "paulsha_hippo.importer.cli",
+                str(importer_python), "-m", "paulsha_hippo.importer.cli",
                 "ingest", "--queue-item", str(queue_path),
                 "--memory-root", str(root),
             ],
@@ -87,6 +90,8 @@ def main() -> int:
         queue_payload = dict(payload)
         queue_payload["tool"] = TOOL
         queue_payload["capture_scope"] = "session_end"
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
         # ended_at: prefer explicit field, else timestamp
         if not queue_payload.get("ended_at"):
             ts = queue_payload.get("timestamp")
@@ -96,7 +101,7 @@ def main() -> int:
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{TOOL}__{_sanitize_id(session_id)}.json"
+        filename = f"{TOOL}__{_sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(

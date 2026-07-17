@@ -22,10 +22,12 @@ def _frag(index, body):
 def _expected_output_footer() -> list[str]:
     return [
         "## Output",
-        "Return ONLY an inline JSON array.",
-        "The first character of your response must be `[` and the last character must be `]`.",
+        'Return ONLY this canonical JSON object shape: {"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}',
+        "Use disposition=findings with one or more findings and reason=null.",
+        "Use disposition=no_findings only with findings=[] and a non-empty reason.",
+        "The first character must be `{` and the last character must be `}`.",
         "Do NOT create files, write files, save files, or claim that you updated any file or index.",
-        "Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON array.",
+        "Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON object.",
     ]
 
 
@@ -38,7 +40,7 @@ class PromptSessionHintTests(unittest.TestCase):
         )
         text = prompt_mod.build_prompt("SKILL", [frag], ["paulshaclaw", "PROJECT-0602"])
         self.assertIn("This session was captured in project: PROJECT-0602", text)
-        self.assertIn("unless the content clearly belongs to a different known project", text)
+        self.assertIn("Use this exact project for every finding", text)
 
     def test_omits_hint_when_session_project_not_in_known(self):
         frag = Fragment(
@@ -68,7 +70,7 @@ class PromptTests(unittest.TestCase):
                     "",
                     "## This session's project",
                     "This session was captured in project: paulshaclaw. "
-                    "Prefer it for each slice unless the content clearly belongs to a different known project.",
+                    "Use this exact project for every finding; do not re-home the source session.",
                     "",
                     "## Session fragments to atomize",
                     "[fragment 0]",
@@ -99,7 +101,7 @@ class PromptTests(unittest.TestCase):
                     "",
                     "## This session's project",
                     "This session was captured in project: paulshaclaw. "
-                    "Prefer it for each slice unless the content clearly belongs to a different known project.",
+                    "Use this exact project for every finding; do not re-home the source session.",
                     "",
                     "## Session fragments to atomize",
                     "[fragment 0]",

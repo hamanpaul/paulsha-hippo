@@ -81,6 +81,12 @@ def _prompt_list(items: list[str]) -> list[str]:
     return [f"{index}. {item}" for index, item in enumerate(items, start=1)]
 
 
+def _conversation_list(items: list[str]) -> list[str]:
+    if not items:
+        return ["- (none)"]
+    return [f"{index}. {item}" for index, item in enumerate(items, start=1)]
+
+
 def render_markdown(
     session: NormalizedSession,
     *,
@@ -100,7 +106,7 @@ def render_markdown(
         f"source_agent: {_frontmatter_value(session.get('tool'))}",
         f"source_session: {_frontmatter_value(session.get('session_id'))}",
         f"source_artifact: {_frontmatter_value(source_artifact)}",
-        f"title: {_frontmatter_value(session.get('assistant_summary'))}",
+        f"title: {_frontmatter_value(session.get('session_title'))}",
         f"title_source: {_frontmatter_value(session.get('title_source') or 'fallback')}",
         f"captured_at: {_frontmatter_value(captured)}",
         "provenance:",
@@ -113,6 +119,9 @@ def render_markdown(
         "",
         "## Summary",
         _value(session.get("assistant_summary")) or "(none)",
+        "",
+        "## Conversation",
+        *_conversation_list(session.get("assistant_messages", [])),
         "",
         "## Source",
         f"- Tool: {_value(session.get('tool'))}",
@@ -132,4 +141,7 @@ def render_markdown(
         *_prompt_list(session.get("user_prompts", [])),
         "",
     ]
+    if "atomization_replay" in session:
+        replay = "true" if session.get("atomization_replay") is True else "false"
+        lines.insert(9, f"atomization_replay: {replay}")
     return "\n".join(lines)

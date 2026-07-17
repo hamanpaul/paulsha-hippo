@@ -40,16 +40,16 @@ def _known_projects(path_str: str) -> list[str]:
         return [
             str(name)
             for name in projects.keys()
-            if isinstance(name, str) and atomizer_config.is_safe_path_component(name)
+            if isinstance(name, str) and atomizer_config.is_valid_project_id(name)
         ]
     if isinstance(projects, list):
         names: list[str] = []
         for item in projects:
-            if isinstance(item, str) and atomizer_config.is_safe_path_component(item):
+            if isinstance(item, str) and atomizer_config.is_valid_project_id(item):
                 names.append(item)
             elif isinstance(item, Mapping):
                 name = item.get("name")
-                if isinstance(name, str) and atomizer_config.is_safe_path_component(name):
+                if isinstance(name, str) and atomizer_config.is_valid_project_id(name):
                     names.append(name)
         return names
     return []

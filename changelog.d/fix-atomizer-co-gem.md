@@ -1,0 +1,14 @@
+### Changed
+- atomizer 預設改走本機 `co-gem`（Gemma `gem` profile），由 stdin 接收蒸餾 prompt；停用舊的 Claude Gemma4 upstream 設定，改指向本機 llama router `127.0.0.1:8080`。
+- importer 分離 `session_title` 與完整 assistant outcomes，新增 capture identity、semantic hash 及 fail-closed derived-field sanitizer；raw archive 保持原 bytes。
+- Gemma atomizer 以 32,768 為最低支援 context 與預設值；12K input、2,048 output、48 KiB argv、300 秒、2 次 bounded attempts、串行與 zero-tool flags 維持固定，較大的 provider context 不放寬這些界線；大 session 以穩定 paragraph parts 全覆蓋分塊，不截尾。
+- LLM response 改為 canonical disposition wrapper；空輸出不再產生 `promoted, slices=0`，只有附理由的 `no_findings` 可以 `no-findings` 終態結案。
+- 任一 malformed finding 使整份 LLM response fail-closed，known source project 不接受模型 re-home；parked evidence 只留 stdout bytes/hash，不保存可能回顯 private prompt 的原文。
+- knowledge publication 於全 chunks 成功後才 staging/fsync 並以 publication journal 提交；內容更正使用新 slice ID，僅在 source/project/canonical title 唯一吻合時自動連結 `supersedes`。
+- 新增 `hippo recovery plan|apply|resume|rollback`，以 code/config/registry/source/transcript hash pins、preimage、journal、`fsync` 與 `os.replace` 執行預設 5-session importer recovery batch，不自動重播 LLM 或改寫舊 JSONL。
+- canonical inbox 只接受有 timestamp 證據的新 capture 前進；晚到的舊 capture 仍 archive/ledger，但不覆蓋較新的 session。
+- CI 改用 `find` 偵測 tests、不再吞安裝失敗，並新增 wheel clean-install smoke。
+- 移除受版控的 stale `build/lib` mirror，setuptools 改用隔離且 forced 的 build base；installed hooks 直接綁定目前 wheel/pipx interpreter，CI clean-install smoke 會實跑 `install hooks` 與 `doctor`，避免新 CLI 混入舊 module。
+- Recovery plan 會把 verified transcript 凍結到 transaction root，重抽與 apply/resume 只驗 hash-pinned snapshot；外部仍在追加的 live transcript 不再讓整份 manifest 永久 drift，legacy capture ID 仍由原始 archive bytes 衍生。
+- Installed hook command 顯式傳遞 `HIPPO_HOOK_PYTHON`；SessionEnd／wakeup background importer 在沒有 legacy nested hook venv 時沿用該 wheel/pipx interpreter，修正 queue 寫入後無法自動 ingest 的 installed-only 斷鏈。
+- Recovery transaction root 改由 code/config/registry/source pins 與 batch size 共同定址；相同 source census 的新 candidate 不再覆寫或誤用舊 manifest、transcript snapshots、journal。

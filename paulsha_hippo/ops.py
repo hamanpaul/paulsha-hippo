@@ -613,7 +613,11 @@ def _fix_backend_override() -> tuple[int, str]:
 
 def run_install_hooks(*, memory_root: str | None, repo_root: str | None) -> int:
     script = _PKG_ROOT / "hooks" / "install.sh"
-    argv = ["bash", str(script), "--repo-root", repo_root or str(_REPO_ROOT)]
+    argv = [
+        "bash", str(script),
+        "--repo-root", repo_root or str(_REPO_ROOT),
+        "--python", sys.executable,
+    ]
     # 一律經單一權威 resolver（#2 對抗審查 F3）：未給旗標時用 paths.memory_root()，
     # 避免 install.sh 落回自身預設造成 doctor/CLI 與 hooks 寫入分家。
     argv += ["--memory-root", memory_root or str(paths.memory_root())]
@@ -695,12 +699,13 @@ def _dream_timer_active() -> bool:
 
 def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
                         once: bool = False, runner=None,
-                        timer_active=_dream_timer_active) -> int:
+                        timer_active=None) -> int:
     """前景常駐：每 interval 秒跑一次 dream run --require-idle。
 
     systemd dream timer 已接管時讓位（避免雙跑）；首輪延後一個 interval。
     """
-    if timer_active():
+    timer_probe = timer_active or _dream_timer_active
+    if timer_probe():
         print("systemd dream timer 已接管；supervise 讓位（不啟動前景 loop）")
         return 0
     from paulsha_hippo import cli as hippo_cli

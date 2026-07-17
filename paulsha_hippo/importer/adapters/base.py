@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -23,8 +24,12 @@ class NormalizedSession(TypedDict):
     commit: str | None
     turn_count: int
     user_prompts: list[str]
+    assistant_messages: list[str]
     assistant_summary: str
+    session_title: str
     title_source: str
+    capture_id: str
+    parent_session_id: str | None
     touched_files: list[str]
     referenced_artifacts: list[str]
     raw_payload_pointer: str
@@ -97,19 +102,31 @@ def extract_turn_count(payload: dict[str, Any], prompts: list[str]) -> int:
     return max(1, len(prompts))
 
 
-def extract_assistant_summary(payload: dict[str, Any]) -> str:
-    # check common keys and Copilot/Codex aliases
-    for key in ("assistant_summary", "summary", "last_assistant_message"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value[:2000]
+def extract_assistant_messages(payload: dict[str, Any]) -> list[str]:
+    explicit = string_list(payload.get("assistant_messages"))
+    if explicit:
+        return [message for message in explicit if message.strip()]
+
+    messages: list[str] = []
     for item in history_items(payload):
         if item.get("role") != "assistant":
             continue
         content = item.get("content") or item.get("text")
-        if isinstance(content, str) and content:
-            return content[:2000]
-    return ""
+        if isinstance(content, str) and content.strip():
+            messages.append(content)
+    if messages:
+        return messages
+
+    for key in ("assistant_summary", "summary", "last_assistant_message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return [value]
+    return []
+
+
+def extract_assistant_summary(payload: dict[str, Any]) -> str:
+    messages = extract_assistant_messages(payload)
+    return messages[-1] if messages else ""
 
 
 def build_session(
@@ -123,6 +140,12 @@ def build_session(
     raw_payload: dict[str, Any] | None = None,
 ) -> AdapterResult:
     prompts = extract_user_prompts(payload)
+    assistant_messages = extract_assistant_messages(payload)
+    explicit_capture_id = string_or_empty(payload.get("capture_id"))
+    if explicit_capture_id:
+        capture_id = explicit_capture_id
+    else:
+        capture_id = sha256(Path(queue_path).read_bytes()).hexdigest()
     session: NormalizedSession = {
         "session_id": session_id,
         "tool": tool,
@@ -133,8 +156,15 @@ def build_session(
         "commit": string_or_none(payload.get("commit")),
         "turn_count": extract_turn_count(payload, prompts),
         "user_prompts": prompts,
-        "assistant_summary": extract_assistant_summary(payload),
+        "assistant_messages": assistant_messages,
+        "assistant_summary": assistant_messages[-1] if assistant_messages else "",
+        "session_title": string_or_empty(payload.get("session_title")),
         "title_source": string_or_empty(payload.get("title_source")),
+        "capture_id": capture_id,
+        "parent_session_id": (
+            string_or_none(payload.get("parent_session_id"))
+            or string_or_none(payload.get("parentSessionId"))
+        ),
         "touched_files": string_list(payload.get("touched_files")),
         "referenced_artifacts": string_list(payload.get("referenced_artifacts")),
         "raw_payload_pointer": str(queue_path),
@@ -154,12 +184,17 @@ def _dedupe(items: list[str]) -> list[str]:
 
 def read_claude_transcript(path: str | Path) -> dict[str, Any]:
     p = Path(path)
-    empty = {"user_prompts": [], "assistant_summary": "", "touched_files": []}
+    empty = {
+        "user_prompts": [],
+        "assistant_messages": [],
+        "assistant_summary": "",
+        "touched_files": [],
+    }
     if not p.exists():
         return empty
     prompts: list[str] = []
     touched: list[str] = []
-    last_assistant = ""
+    assistant_messages: list[str] = []
     for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -173,15 +208,22 @@ def read_claude_transcript(path: str | Path) -> dict[str, Any]:
         if kind == "user" and isinstance(content, str) and content.strip():
             prompts.append(content)
         elif kind == "assistant" and isinstance(content, list):
+            text_blocks: list[str] = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                    last_assistant = block["text"]
+                    text_blocks.append(block["text"])
                 elif block.get("type") == "tool_use" and block.get("name") in ("Write", "Edit"):
                     fp = (block.get("input") or {}).get("file_path")
                     if isinstance(fp, str) and fp:
                         touched.append(fp)
-    return {"user_prompts": prompts, "assistant_summary": last_assistant, "touched_files": _dedupe(touched)}
-
+            if text_blocks:
+                assistant_messages.append("\n".join(text_blocks))
+    return {
+        "user_prompts": prompts,
+        "assistant_messages": assistant_messages,
+        "assistant_summary": assistant_messages[-1] if assistant_messages else "",
+        "touched_files": _dedupe(touched),
+    }
 

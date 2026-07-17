@@ -98,12 +98,36 @@ class LLMPromoterTests(unittest.TestCase):
         self.assertEqual(slices[0].relations, ({"type": "mentions", "entity": "MTK"},))
         self.assertEqual(slices[1].relations, ({"type": "relates_to", "target_title": "a"},))
 
+    def test_known_source_project_overrides_model_rehoming(self):
+        response = (
+            '[{"title":"a","artifact_kind":"report","project":"other-project",'
+            '"tags":[],"body":"body a","source_fragment_indices":[0],"relations":[]}]'
+        )
+        promoter = llm_promoter.LLMPromoter(
+            FakeAgentClient(response),
+            skill_text="SKILL",
+            known_projects=["paulshaclaw", "other-project"],
+        )
+
+        slices = promoter.promote([_frag(0)], CFG)
+
+        self.assertEqual(slices[0].frontmatter["project"], "paulshaclaw")
+
     def test_invalid_output_fails_closed(self):
         with self.assertRaises(llm_promoter.PromoteError):
             _promoter("garbage not json").promote([_frag(0)], CFG)
 
-    def test_empty_output_returns_no_slices(self):
-        self.assertEqual(_promoter("[]").promote([_frag(0)], CFG), [])
+    def test_empty_legacy_array_fails_closed(self):
+        with self.assertRaises(llm_promoter.PromoteError):
+            _promoter("[]").promote([_frag(0)], CFG)
+
+    def test_explicit_no_findings_returns_no_slices(self):
+        promoter = _promoter(
+            '{"schema_version":1,"disposition":"no_findings",'
+            '"reason":"only acknowledgements","findings":[]}'
+        )
+        self.assertEqual(promoter.promote([_frag(0)], CFG), [])
+        self.assertEqual(promoter.last_disposition, "no_findings")
 
     def test_bad_artifact_kind_fails_closed(self):
         bad = (
@@ -134,7 +158,7 @@ class LLMPromoterTests(unittest.TestCase):
         with self.assertRaises(llm_promoter.PromoteError):
             _promoter(_TWO).promote(fragments, CFG)
 
-    def test_cached_output_reuses_session_key_and_fragments_hash_across_prompt_changes(self):
+    def test_cached_output_is_bound_to_complete_prompt_contract(self):
         calls = {"n": 0}
 
         class Counting(agent_exec.AgentClient):
@@ -157,7 +181,7 @@ class LLMPromoterTests(unittest.TestCase):
                 known_projects=["paulshaclaw", "other-project"],
             ).promote(fragments, CFG)
 
-        self.assertEqual(calls["n"], 1)
+        self.assertEqual(calls["n"], 2)
 
     def test_cache_key_changes_when_fragment_index_mapping_changes(self):
         fragments_a = [
@@ -206,6 +230,29 @@ class LLMPromoterTests(unittest.TestCase):
         with self.assertRaises(llm_promoter.PromoteError) as ctx:
             _promoter("garbage not json").promote([_frag(0)], CFG)
         self.assertEqual(ctx.exception.category, "invalid_output")
+
+    def test_failed_chunk_clears_previous_raw_output_before_backend_call(self):
+        class Sequence(agent_exec.AgentClient):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, prompt: str) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return "private echoed prompt"
+                raise agent_exec.AgentUnavailableError("backend unavailable")
+
+        promoter = llm_promoter.LLMPromoter(
+            Sequence(), skill_text="SKILL", known_projects=["paulshaclaw"]
+        )
+        with self.assertRaises(llm_promoter.PromoteError):
+            promoter._run_chunk("first", [_frag(0)], 1)
+        self.assertEqual(promoter.last_raw_output, "private echoed prompt")
+
+        with self.assertRaises(llm_promoter.PromoteError):
+            promoter._run_chunk("second", [_frag(0)], 1)
+
+        self.assertEqual(promoter.last_raw_output, "")
 
 
 if __name__ == "__main__":

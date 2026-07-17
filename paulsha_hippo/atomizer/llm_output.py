@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from paulsha_hippo.lib.lifecycle.schema import ARTIFACT_KINDS
-from .config import is_safe_path_component
+from .config import is_valid_project_id
 
 _LOG = logging.getLogger("paulsha_hippo.atomizer")
 
@@ -43,6 +43,14 @@ class SliceProposal:
     body: str
     source_fragment_indices: tuple[int, ...]
     relations: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ParsedResponse:
+    disposition: str
+    reason: str | None
+    findings: tuple[SliceProposal, ...]
+    legacy: bool = False
 
 
 def _iter_json_arrays(raw: str):
@@ -203,7 +211,7 @@ def _validate_relation(relation: Any) -> dict[str, Any] | None:
 def _build_proposal(
     item: Any, index: int, allowed_projects: set[str], seen_titles: set[str]
 ) -> SliceProposal:
-    """Build one proposal. Hard-field violations raise (caller skips this proposal);
+    """Build one proposal. Hard-field violations fail the whole response;
     soft issues (unknown project, malformed relation) are repaired in place."""
     if not isinstance(item, dict):
         raise LlmOutputError(f"proposal {index} is not an object")
@@ -230,7 +238,11 @@ def _build_proposal(
 
     # Soft: coerce an unknown/unsafe project to _unknown rather than dropping the atom.
     project = item.get("project")
-    if not isinstance(project, str) or project not in allowed_projects or not is_safe_path_component(project):
+    if (
+        not isinstance(project, str)
+        or project not in allowed_projects
+        or not is_valid_project_id(project)
+    ):
         _LOG.warning("atomize: proposal %s project %r not allowed; coerced to _unknown", index, project)
         project = "_unknown"
 
@@ -264,17 +276,57 @@ def _parse_proposals(data: Any, known_projects: list[str]) -> list[SliceProposal
     allowed_projects = set(known_projects) | {"_unknown"}
     proposals: list[SliceProposal] = []
     seen_titles: set[str] = set()
-    dropped: list[str] = []
     for index, item in enumerate(data):
-        try:
-            proposals.append(_build_proposal(item, index, allowed_projects, seen_titles))
-        except LlmOutputError as exc:
-            dropped.append(str(exc))
-            _LOG.warning("atomize: dropped proposal %s: %s", index, exc)
-
-    if not proposals:
-        raise LlmOutputError("no salvageable proposals: " + "; ".join(dropped))
+        # A canonical response is one transaction.  Publishing only the valid
+        # subset would make retries non-deterministic and silently lose findings.
+        proposals.append(_build_proposal(item, index, allowed_projects, seen_titles))
     return proposals
+
+
+def parse_response(raw: str, known_projects: list[str]) -> ParsedResponse:
+    """Parse the strict v1 wrapper or one-version non-empty legacy array."""
+    stripped = raw.strip()
+    if not stripped:
+        raise LlmOutputError("agent output is empty")
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise LlmOutputError("agent output must be one JSON value without surrounding noise") from exc
+
+    if isinstance(data, list):
+        if not data:
+            raise LlmOutputError("legacy empty array is invalid; use explicit no_findings")
+        proposals = _parse_proposals(data, known_projects)
+        return ParsedResponse("findings", None, tuple(proposals), legacy=True)
+
+    if not isinstance(data, dict):
+        raise LlmOutputError("canonical agent output must be an object")
+    required = {"schema_version", "disposition", "reason", "findings"}
+    unknown = sorted(set(data) - required)
+    missing = sorted(required - set(data))
+    if unknown:
+        raise LlmOutputError(f"canonical response has unknown fields: {', '.join(unknown)}")
+    if missing:
+        raise LlmOutputError(f"canonical response missing fields: {', '.join(missing)}")
+    if isinstance(data["schema_version"], bool) or data["schema_version"] != 1:
+        raise LlmOutputError("canonical response schema_version must be 1")
+    disposition = data["disposition"]
+    findings = data["findings"]
+    reason = data["reason"]
+    if disposition == "findings":
+        if reason is not None:
+            raise LlmOutputError("findings response reason must be null")
+        proposals = _parse_proposals(findings, known_projects)
+        if not proposals:
+            raise LlmOutputError("findings response must contain at least one finding")
+        return ParsedResponse("findings", None, tuple(proposals))
+    if disposition == "no_findings":
+        if findings != []:
+            raise LlmOutputError("no_findings response findings must be an empty array")
+        if not isinstance(reason, str) or not reason.strip():
+            raise LlmOutputError("no_findings response requires a non-empty reason")
+        return ParsedResponse("no_findings", reason.strip(), ())
+    raise LlmOutputError("canonical response disposition must be findings or no_findings")
 
 
 def parse(raw: str, known_projects: list[str]) -> list[SliceProposal]:

@@ -1,4 +1,9 @@
 schema_version: 1
+context_window: 32768
+max_input_tokens: 12000
+max_prompt_argv_bytes: 49152
+chunk_retries: 2
+parallelism: 1
 split:
   boundary_patterns:
     - '^#{1,6}\s'
@@ -23,11 +28,15 @@ default_artifact_kind: report
 default_phase: review
 agent_exec:
   command:
-    - scripts/claude-gemma4
-  timeout_seconds: 600
-  model: gemma4-26b-a4b-nvfp4
-  max_output_tokens: 8192
-  upstream_url: http://192.0.2.10:8001
+    # Feed stdin to co-gem's non-interactive -p mode; systemd needs both user
+    # launchers and the pinned Node runtime added to PATH.
+    - /bin/bash
+    - -c
+    - 'set -eu; export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v22.20.0/bin:$PATH"; prompt=$(cat); exec "$HOME/.local/bin/co-gem" -s --no-color --available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export -p "$prompt"'
+  timeout_seconds: 300
+  model: gem
+  max_output_tokens: 2048
+  upstream_url: http://127.0.0.1:8080
 # #175: 預設 llm 蒸餾。identity 會把 importer 樣板 fragments 1:1 複製成
 # knowledge slices（樣板噪音），僅保留為顯式 --promoter identity（測試/離線）。
 promoter: llm
