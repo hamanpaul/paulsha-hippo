@@ -8,3 +8,4 @@
 - 新增 `hippo recovery plan|apply|resume|rollback`，以 code/config/registry/source/transcript hash pins、preimage、journal、`fsync` 與 `os.replace` 執行預設 5-session importer recovery batch，不自動重播 LLM 或改寫舊 JSONL。
 - canonical inbox 只接受有 timestamp 證據的新 capture 前進；晚到的舊 capture 仍 archive/ledger，但不覆蓋較新的 session。
 - CI 改用 `find` 偵測 tests、不再吞安裝失敗，並新增 wheel clean-install smoke。
+- 移除受版控的 stale `build/lib` mirror，setuptools 改用隔離且 forced 的 build base；installed hooks 直接綁定目前 wheel/pipx interpreter，CI clean-install smoke 會實跑 `install hooks` 與 `doctor`，避免新 CLI 混入舊 module。

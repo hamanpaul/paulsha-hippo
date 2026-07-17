@@ -57,3 +57,12 @@ jobs:
           "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" --version
           "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" recovery --help >/dev/null
           "$GITHUB_WORKSPACE/.wheel-smoke/bin/python" -c 'from paulsha_hippo.atomizer.config import load_config; c, _ = load_config(override_path=None); assert c.context_window == 32768 and c.max_input_tokens == 12000'
+          export HOME="$RUNNER_TEMP/hippo-wheel-home"
+          mkdir -p "$HOME"
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" install hooks --memory-root "$RUNNER_TEMP/hippo-wheel-memory"
+          test -f "$RUNNER_TEMP/hippo-wheel-memory/hooks/codex_session_end.py"
+          grep -F "$GITHUB_WORKSPACE/.wheel-smoke/bin/python" "$HOME/.codex/hooks.json"
+          doctor_rc=0
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" doctor >"$RUNNER_TEMP/hippo-doctor.log" 2>&1 || doctor_rc=$?
+          test "$doctor_rc" -le 1
+          ! grep -Eq 'Traceback|TypeError' "$RUNNER_TEMP/hippo-doctor.log"

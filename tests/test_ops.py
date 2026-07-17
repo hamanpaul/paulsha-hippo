@@ -1180,6 +1180,9 @@ class InstallHooksResolverTests(unittest.TestCase):
         argv = run.call_args[0][0]
         self.assertIn("--memory-root", argv)
         self.assertEqual(argv[argv.index("--memory-root") + 1], "/resolved/from/env")
+        self.assertIn("--python", argv)
+        self.assertEqual(argv[argv.index("--python") + 1], sys.executable)
+        run.assert_called_once()
 
 
 class FixBackendMigrationTests(unittest.TestCase):

@@ -21,3 +21,16 @@ def test_ci_clean_install_smoke_runs_outside_checkout():
     assert "python -m venv .wheel-smoke" in text
     assert "cd /tmp" in text
     assert '"$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" recovery --help' in text
+    assert '"$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" install hooks' in text
+    assert '"$GITHUB_WORKSPACE/.wheel-smoke/bin/hippo" doctor' in text
+    assert "Traceback|TypeError" in text
+
+
+def test_ci_wheel_build_uses_isolated_forced_build_base():
+    root = WORKFLOW.parents[2]
+    setup = (root / "setup.cfg").read_text(encoding="utf-8")
+    ignored = (root / ".gitignore").read_text(encoding="utf-8")
+    assert "build_base = .setuptools-build" in setup
+    assert "force = 1" in setup
+    assert "build/" in ignored
+    assert ".setuptools-build/" in ignored

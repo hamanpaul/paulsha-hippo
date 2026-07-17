@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -420,6 +421,30 @@ class InstallerTest(unittest.TestCase):
         ):
             deployed = self.memory_root / "hooks" / script
             self.assertTrue(deployed.exists(), f"{script} not deployed")
+
+    def test_installed_interpreter_skips_nested_venv_and_is_written_to_hooks(self):
+        result = _run_install(
+            [
+                "--memory-root", str(self.memory_root),
+                "--config-root", str(self.config_root),
+                "--repo-root", self.repo_root,
+                "--python", sys.executable,
+            ]
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertFalse((self.memory_root / "hooks" / ".venv").exists())
+
+        settings = json.loads(
+            (self.config_root / ".codex" / "hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook.get("command", "")
+            for entries in settings.get("hooks", {}).values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+        ]
+        self.assertTrue(commands)
+        self.assertTrue(all(sys.executable in command for command in commands), commands)
 
     # ------------------------------------------------------------------
     # Full install — Claude config

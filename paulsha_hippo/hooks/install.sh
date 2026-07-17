@@ -10,12 +10,14 @@
 #   --memory-root PATH    Override memory root (default: ~/.agents/memory)
 #   --config-root PATH    Override config root (default: ~); used for .claude / .codex / .copilot
 #   --repo-root   PATH    Override repo root (default: git rev-parse --show-toplevel)
+#   --python      PATH    Use this installed interpreter for hook commands (skip nested venv)
 #   --skip-venv           Skip venv creation and pip install (useful for tests)
 set -euo pipefail
 
 memory_root="${HOME}/.agents/memory"
 config_root="${HOME}"
 repo_root=""
+hook_python=""
 tree_only=false
 skip_venv=false
 
@@ -50,6 +52,14 @@ while (($#)); do
         exit 2
       fi
       repo_root="$2"
+      shift 2
+      ;;
+    --python)
+      if (($# < 2)); then
+        echo "install.sh: --python requires a path" >&2
+        exit 2
+      fi
+      hook_python="$2"
       shift 2
       ;;
     --skip-venv)
@@ -94,6 +104,21 @@ fi
 if [[ "$config_root" =~ [[:space:]] ]]; then
   echo "install.sh: --config-root must not contain whitespace" >&2
   exit 2
+fi
+
+if [[ -n "$hook_python" ]]; then
+  if [[ "$hook_python" != /* ]]; then
+    echo "install.sh: --python must be an absolute path" >&2
+    exit 2
+  fi
+  if [[ "$hook_python" =~ [[:space:]] ]]; then
+    echo "install.sh: --python must not contain whitespace" >&2
+    exit 2
+  fi
+  if [[ ! -x "$hook_python" ]]; then
+    echo "install.sh: --python must be executable: ${hook_python}" >&2
+    exit 2
+  fi
 fi
 
 # Resolve repo_root if not provided
@@ -146,11 +171,11 @@ if [[ "$tree_only" == true ]]; then
 fi
 
 # ------------------------------------------------------------------
-# Step 2: Venv + editable install (skip if --skip-venv)
+# Step 2: Venv + editable install (skip for an explicit installed interpreter)
 # ------------------------------------------------------------------
 venv_dir="${memory_root}/hooks/.venv"
 
-if [[ "$skip_venv" != true ]]; then
+if [[ -z "$hook_python" && "$skip_venv" != true ]]; then
   if python3 -m venv --help &>/dev/null 2>&1; then
     python3 -m venv "$venv_dir"
     if [[ -f "${repo_root}/pyproject.toml" ]]; then
@@ -194,10 +219,10 @@ for script in install.sh uninstall.sh \
 done
 
 # ------------------------------------------------------------------
-# Helper: determine venv python path for config templates
+# Helper: determine Python path for config templates
 # ------------------------------------------------------------------
-if [[ "$skip_venv" == true ]]; then
-  venv_python="${venv_dir}/bin/python"
+if [[ -n "$hook_python" ]]; then
+  venv_python="$hook_python"
 else
   venv_python="${venv_dir}/bin/python"
 fi
