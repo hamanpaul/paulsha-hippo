@@ -83,6 +83,13 @@ class HookQueueWriterTest(unittest.TestCase):
             e.update(extra)
         return e
 
+    def _queue_capture(self, tool: str, session_id: str) -> Path:
+        matches = sorted(
+            (self.memory_root / "runtime" / "queue").glob(f"{tool}__{session_id}__*.json")
+        )
+        self.assertEqual(len(matches), 1, f"expected one queue capture, got {matches}")
+        return matches[0]
+
     # ------------------------------------------------------------------
     # Claude hook
     # ------------------------------------------------------------------
@@ -94,12 +101,13 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / "claude-code__claude-session-end-001.json"
+        queue_file = self._queue_capture("claude-code", "claude-session-end-001")
         self.assertTrue(queue_file.exists(), f"queue file not found: {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "session_end")
         self.assertEqual(written["tool"], "claude-code")
         self.assertEqual(written["session_id"], "claude-session-end-001")
+        self.assertEqual(written["capture_id"], queue_file.stem.rsplit("__", 1)[-1])
 
     def test_claude_hook_always_sets_capture_scope_session_end(self):
         payload = {"session_id": "claude-plain-001", "cwd": "/repo"}
@@ -107,10 +115,11 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / "claude-code__claude-plain-001.json"
+        queue_file = self._queue_capture("claude-code", "claude-plain-001")
         self.assertTrue(queue_file.exists())
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "session_end")
+        self.assertTrue(written["capture_id"])
 
     def test_claude_hook_exits_zero_on_empty_stdin(self):
         result = _run_hook("claude_session_end.py", "", extra_env=self._env())
@@ -215,14 +224,13 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("copilot_session_end.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-session-end-001.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-session-end-001")
         self.assertTrue(queue_file.exists(), f"expected {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["session_id"], "copilot-session-end-001")
         self.assertEqual(written["tool"], "copilot-cli")
         self.assertEqual(written["capture_scope"], "session_end")
+        self.assertTrue(written["capture_id"])
 
     def test_copilot_hook_supplements_missing_fields_from_history_file(self):
         """If history file exists, copilot hook reads it to supplement missing fields."""
@@ -252,7 +260,7 @@ class HookQueueWriterTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / f"copilot-cli__{sid}.json"
+        queue_file = self._queue_capture("copilot-cli", sid)
         self.assertTrue(queue_file.exists(), f"expected {queue_file}")
         written = json.loads(queue_file.read_text())
         # Supplemented fields should appear
@@ -270,9 +278,7 @@ class HookQueueWriterTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-nohist-001.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-nohist-001")
         self.assertTrue(queue_file.exists())
 
     def test_copilot_hook_exits_zero_on_invalid_json(self):
@@ -290,9 +296,7 @@ class HookQueueWriterTest(unittest.TestCase):
         result = _run_hook("claude_session_end.py", payload, extra_env=self._env())
         self.assertEqual(result.returncode, 0)
         # Queue file still written
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "claude-code__claude-novenv-001.json"
-        )
+        queue_file = self._queue_capture("claude-code", "claude-novenv-001")
         self.assertTrue(queue_file.exists())
 
 

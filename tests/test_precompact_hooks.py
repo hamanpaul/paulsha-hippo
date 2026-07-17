@@ -52,6 +52,13 @@ class PreCompactHooksTest(unittest.TestCase):
             e.update(extra)
         return e
 
+    def _queue_capture(self, tool: str, session_id: str) -> Path:
+        matches = sorted(
+            (self.memory_root / "runtime" / "queue").glob(f"{tool}__{session_id}__*.json")
+        )
+        self.assertEqual(len(matches), 1, f"expected one queue capture, got {matches}")
+        return matches[0]
+
     # ------------------------------------------------------------------
     # Claude precompact hook
     # ------------------------------------------------------------------
@@ -71,12 +78,13 @@ class PreCompactHooksTest(unittest.TestCase):
         result = _run_hook("claude_precompact.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = self.memory_root / "runtime" / "queue" / "claude-code__claude-compact-001.json"
+        queue_file = self._queue_capture("claude-code", "claude-compact-001")
         self.assertTrue(queue_file.exists(), f"queue file not found: {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "pre_compact")
         self.assertEqual(written["tool"], "claude-code")
         self.assertEqual(written["session_id"], "claude-compact-001")
+        self.assertTrue(written["capture_id"])
 
     def test_claude_precompact_queue_file_written_atomically(self):
         """No .tmp file left behind after successful write."""
@@ -113,14 +121,13 @@ class PreCompactHooksTest(unittest.TestCase):
         result = _run_hook("copilot_precompact.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-compact-001.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-compact-001")
         self.assertTrue(queue_file.exists(), f"queue file not found: {queue_file}")
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["capture_scope"], "pre_compact")
         self.assertEqual(written["tool"], "copilot-cli")
         self.assertEqual(written["session_id"], "copilot-compact-001")
+        self.assertTrue(written["capture_id"])
 
     def test_copilot_precompact_normalizes_camel_case_session_id(self):
         """Copilot precompact normalizes sessionId to session_id."""
@@ -129,9 +136,7 @@ class PreCompactHooksTest(unittest.TestCase):
         result = _run_hook("copilot_precompact.py", payload, extra_env=self._env())
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        queue_file = (
-            self.memory_root / "runtime" / "queue" / "copilot-cli__copilot-compact-002.json"
-        )
+        queue_file = self._queue_capture("copilot-cli", "copilot-compact-002")
         self.assertTrue(queue_file.exists())
         written = json.loads(queue_file.read_text())
         self.assertEqual(written["session_id"], "copilot-compact-002")

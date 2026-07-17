@@ -55,7 +55,7 @@ class AtomizerE2ETests(unittest.TestCase):
             self.assertEqual(processing.state_of(root, "claude:sess-e2e"), "promoted")
             self.assertEqual(list((root / "inbox" / "_slices").rglob("*.md")), [])
 
-    def test_reimport_overwrites_same_slice_id(self):
+    def test_reimport_ambiguous_identity_titles_stay_parallel_for_review(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
@@ -67,11 +67,21 @@ class AtomizerE2ETests(unittest.TestCase):
             raw.parent.mkdir(parents=True, exist_ok=True)
             raw.write_text(FIXTURE.read_text(encoding="utf-8").replace("alpha body", "ALPHA v2"),
                            encoding="utf-8")
-            processing.processing_path(root).unlink()
             pipeline.run(root, config=cfg, config_hash=h, now="2026-05-31T05:00:00Z")
             ids_after = sorted(p.name for p in (root / "knowledge").rglob("*.md"))
-            self.assertEqual(ids_before, ids_after)
-            self.assertIn("ALPHA v2", (root / "knowledge" / "paulshaclaw" / ids_after[0]).read_text())
+            self.assertTrue(set(ids_before).issubset(ids_after))
+            new_ids = sorted(set(ids_after) - set(ids_before))
+            self.assertEqual(len(new_ids), 1)
+            new_doc = parse_artifact_text(
+                (root / "knowledge" / "paulshaclaw" / new_ids[0]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(new_doc.frontmatter["supersedes"], "[]")
+            supersedes = [edge for edge in relations.read_edges(root) if edge["type"] == "supersedes"]
+            self.assertEqual(supersedes, [])
+            self.assertIn(
+                "ALPHA v2",
+                (root / "knowledge" / "paulshaclaw" / new_ids[0]).read_text(),
+            )
 
     def test_produced_slice_passes_stage3_gate(self):
         with TemporaryDirectory() as tmp:
@@ -164,7 +174,7 @@ class AtomizerE2ETests(unittest.TestCase):
                         "  command:",
                         f"    - {sys.executable}",
                         f"    - {stub}",
-                        "  timeout_seconds: 30",
+                        "  timeout_seconds: 300",
                         "  model: fake-agent",
                     )
                 )

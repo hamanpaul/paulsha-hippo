@@ -44,6 +44,20 @@ Before any config migration, historical retitle/reattribution, quarantine move, 
 - **WHEN** a historical `_unknown` note has no source-session evidence for a project
 - **THEN** recovery SHALL leave it `_unknown`, record it as unresolved, and MUST NOT guess a project
 
+### Requirement: Hash-pinned resumable importer recovery
+
+The system SHALL expose `hippo recovery plan`, `apply`, `resume`, and `rollback`. Recovery sources SHALL be limited to frozen `archive/queue/**/*.json` payloads and transcript pointers whose content can be verified and pinned. A plan SHALL pin code, effective config, project registry, and every selected source hash; identify each winner, old/new path and hash, decision, and expected ledger delta; and default to at most five selected sessions. Importer reconstruction and any later LLM replay SHALL be separate operations: recovered importer artifacts SHALL carry a machine-readable no-replay marker, and an already promoted session MUST NOT be blindly replayed.
+
+Apply SHALL persist complete batch membership, a staging copy, preimage, and fsynced replace intent before using `os.replace` to commit an item. Apply and resume SHALL reject code/config/registry/source drift and target-path drift before mutation. Rollback SHALL compensate only paths committed by the selected recovery batch, restore byte-identical preimages or remove batch-created outputs, and SHALL NOT truncate or rewrite existing JSONL ledgers. A rolled-back item SHALL be eligible for a later apply. A recovered finding SHALL use a new slice ID. Automatic `supersedes` SHALL be added only when source, project, and canonical title match while body hash differs; ambiguous candidates SHALL remain side-by-side for human review.
+
+#### Scenario: Interrupted apply resumes byte-equivalently
+- **WHEN** recovery is interrupted at any journaled commit point and all pinned inputs remain unchanged
+- **THEN** `resume` SHALL complete to the same bytes and manifest state as an uninterrupted apply
+
+#### Scenario: Rollback only compensates this batch
+- **WHEN** rollback follows a partially or fully applied batch
+- **THEN** it SHALL restore only that batch's preimages, preserve unrelated/newer files, and leave all pre-existing JSONL bytes unchanged
+
 ### Requirement: Complete backlog and health semantics
 
 Machine-readable status SHALL report raw, split, retrying, parked, quarantined, and promoted session counts; oldest backlog age; notes created; generic-title, `_unknown`, invalid checksum/frontmatter counts; eligible/indexed coverage; backend/config/build identity; and a run correlation ID. Repeated malformed inbox artifacts SHALL enter a durable quarantine state with hash/reason/source evidence so subsequent dream cycles do not emit the same warning indefinitely. Health MUST distinguish process success from pipeline `ok`, degraded/partial, failed, and skipped outcomes.

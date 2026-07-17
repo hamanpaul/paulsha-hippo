@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from paulsha_hippo.atomizer.config import (
@@ -166,7 +167,7 @@ class AgentExecConfigTests(unittest.TestCase):
     def test_resolve_agent_exec_settings_prefers_env_upstream(self):
         from paulsha_hippo.atomizer import config as cfgmod
 
-        with unittest.mock.patch.dict(
+        with mock.patch.dict(
             "os.environ",
             {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": "http://10.0.0.9:9002"},
             clear=False,
@@ -182,7 +183,7 @@ class AgentExecConfigTests(unittest.TestCase):
             p = Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
             agents_root = p / "custom-agents"
-            with unittest.mock.patch.dict(
+            with mock.patch.dict(
                 "os.environ",
                 {"PSC_AGENTS_ROOT": str(agents_root)},
                 clear=False,
@@ -229,11 +230,10 @@ class AgentExecConfigTests(unittest.TestCase):
             p = pathlib.Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
             cfg_default, hash_default = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg_default.agent_exec_max_output_tokens, 8192)
+            self.assertEqual(cfg_default.agent_exec_max_output_tokens, 2048)
             (p / "atomizer.yaml").write_text(base + "agent_exec:\n  max_output_tokens: 16384\n", encoding="utf-8")
-            cfg_big, hash_big = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg_big.agent_exec_max_output_tokens, 16384)
-            self.assertNotEqual(hash_default, hash_big)
+            with self.assertRaises(cfgmod.AtomizerConfigError):
+                cfgmod.load_config(default_dir=p, override_path=None)
 
     def test_max_output_tokens_rejects_non_positive(self):
         import tempfile, pathlib

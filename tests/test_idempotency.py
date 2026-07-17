@@ -72,14 +72,22 @@ class IdempotencyPipelineTest(unittest.TestCase):
         return [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
 
     def expected_hash(self, payload):
-        subset = (
-            payload["session_id"],
-            payload["capture_scope"],
-            payload["turn_count"],
-            payload["ended_at"],
-            sorted(payload["touched_files"]),
-            len(payload["user_prompts"]),
-        )
+        subset = {
+            "tool": payload["tool"],
+            "session_id": payload["session_id"],
+            "parent_session_id": payload.get("parent_session_id"),
+            "capture_scope": payload["capture_scope"],
+            "started_at": payload.get("started_at"),
+            "ended_at": payload.get("ended_at"),
+            "cwd": payload.get("cwd"),
+            "repo": payload.get("repo"),
+            "commit": payload.get("commit"),
+            "turn_count": payload["turn_count"],
+            "user_prompts": payload["user_prompts"],
+            "assistant_messages": [payload["assistant_summary"]],
+            "touched_files": sorted(payload["touched_files"]),
+            "referenced_artifacts": sorted(payload["referenced_artifacts"]),
+        }
         canonical = json.dumps(subset, sort_keys=True, separators=(",", ":"))
         return sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -105,7 +113,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
         inbox = self.root / "inbox" / "sessions" / "copilot-cli" / "2026-05-24" / "sid-001.md"
         self.assertTrue(inbox.exists())
         self.assertIn("source_session: sid-001", inbox.read_text(encoding="utf-8"))
-        archive = self.root / "archive" / "queue" / "2026-05" / f"copilot-cli__sid-001--written--{self.expected_hash(payload)[:12]}.json"
+        archive = Path(first_decision["archive_path"])
         self.assertTrue(archive.exists())
         self.assertEqual([entry["status"] for entry in self.ledger_entries()], ["written", "hash-duplicate"])
 
@@ -142,7 +150,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
         self.assertIn("  repo: github.com/owner/x", rendered)
         self.assertNotIn("  repo: hamanpaul/other-repo", rendered)
 
-    def test_higher_completeness_updates_and_lower_completeness_stale_skips(self):
+    def test_content_changes_update_even_when_completeness_is_lower(self):
         base = self.payload(scope="turn", turns=1, files=["a.py"], prompts=["one"])
         richer = self.payload(scope="turn", turns=2, files=["a.py", "b.py"], prompts=["one", "two"])
         stale = self.payload(scope="turn", turns=1, files=["a.py"], prompts=["one"], ended_at="2026-05-24T10:05:00+00:00")
@@ -153,16 +161,17 @@ class IdempotencyPipelineTest(unittest.TestCase):
             ingest_queue_item(self.write_queue_item("stale", stale), memory_root=self.root),
         ]
 
-        self.assertEqual([decision["status"] for decision in decisions], ["written", "updated", "stale-skip"])
+        self.assertEqual([decision["status"] for decision in decisions], ["written", "updated", "updated"])
         self.assertEqual(decisions[1]["from_completeness"], [0, 1, 1, 1])
         self.assertEqual(decisions[1]["to_completeness"], [0, 2, 2, 2])
         self.assertEqual(decisions[2]["from_completeness"], [0, 2, 2, 2])
         self.assertEqual(decisions[2]["to_completeness"], [0, 1, 1, 1])
         inbox = self.root / "inbox" / "sessions" / "copilot-cli" / "2026-05-24" / "sid-001.md"
         rendered = inbox.read_text(encoding="utf-8")
-        self.assertIn("2. two", rendered)
-        self.assertIn("- b.py", rendered)
-        self.assertEqual([entry["status"] for entry in self.ledger_entries()], ["written", "updated", "stale-skip"])
+        self.assertIn("1. one", rendered)
+        self.assertNotIn("2. two", rendered)
+        self.assertNotIn("- b.py", rendered)
+        self.assertEqual([entry["status"] for entry in self.ledger_entries()], ["written", "updated", "updated"])
 
     def test_watcher_final_updates_session_end_because_scope_rank_is_higher(self):
         session_end = self.payload(scope="session_end", turns=3, files=["a.py"], prompts=["one"])
@@ -357,14 +366,16 @@ class IdempotencyPipelineTest(unittest.TestCase):
     def test_queue_item_remains_retryable_when_ledger_append_fails_after_archive(self):
         payload = self.payload(session_id="sid-ledger-fail")
         queue_item = self.write_queue_item("ledger_fail", payload)
-        archive = self.root / "archive" / "queue" / "2026-05" / f"copilot-cli__sid-ledger-fail--written--{self.expected_hash(payload)[:12]}.json"
 
         with mock.patch("paulsha_hippo.importer.pipeline._append_ledger", side_effect=OSError("ledger full")):
             with self.assertRaisesRegex(OSError, "ledger full"):
                 ingest_queue_item(queue_item, memory_root=self.root)
 
         self.assertTrue(queue_item.exists())
-        self.assertTrue(archive.exists())
+        archives = list((self.root / "archive" / "queue" / "2026-05").glob(
+            "copilot-cli__sid-ledger-fail__*--written--*.json"
+        ))
+        self.assertEqual(len(archives), 1)
         self.assertEqual(self.ledger_entries(), [])
 
     def test_archive_failure_does_not_commit_written_ledger_and_retry_succeeds(self):
@@ -377,7 +388,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
                 ingest_queue_item(failing_queue, memory_root=self.root)
 
         self.assertEqual(
-            [entry["status"] for entry in self.ledger_entries() if entry["idempotency_key"] == "copilot-cli:sid-archive-fail"],
+            [entry["status"] for entry in self.ledger_entries() if entry["logical_session_key"] == "copilot-cli:sid-archive-fail"],
             [],
         )
         self.assertTrue(failing_queue.exists())
@@ -389,7 +400,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
         self.assertFalse(failing_queue.exists())
         self.assertTrue(Path(retry_decision["archive_path"]).exists())
         self.assertEqual(
-            [entry["status"] for entry in self.ledger_entries() if entry["idempotency_key"] == "copilot-cli:sid-archive-fail"],
+            [entry["status"] for entry in self.ledger_entries() if entry["logical_session_key"] == "copilot-cli:sid-archive-fail"],
             ["written"],
         )
 
@@ -424,7 +435,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
         self.assertEqual(len(parsed), len(queue_items))
         self.assertEqual({entry["status"] for entry in parsed}, {"written"})
         self.assertEqual(
-            {entry["idempotency_key"] for entry in parsed},
+            {entry["logical_session_key"] for entry in parsed},
             {f"copilot-cli:sid-concurrent-{index:03d}" for index in range(24)},
         )
 
@@ -451,7 +462,7 @@ class IdempotencyPipelineTest(unittest.TestCase):
 
         self.assertEqual(
             [decision["status"] for decision in decisions],
-            ["written", "hash-duplicate", "hash-duplicate", "updated", "stale-skip"],
+            ["written", "hash-duplicate", "hash-duplicate", "updated", "updated"],
         )
         self.assertFalse(any(queue_item.exists() for queue_item in queue_items))
         archive_paths = [Path(decision["archive_path"]) for decision in decisions]

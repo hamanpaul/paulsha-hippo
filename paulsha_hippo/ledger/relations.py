@@ -106,6 +106,67 @@ def append_edge(
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def append_edges(
+    memory_root: Path,
+    edges: list[dict[str, str]],
+    *,
+    now: str,
+    config_hash: str,
+) -> None:
+    """Validate and append one session's relation set under one ledger lock/fsync."""
+    normalized: list[tuple[str, str, str]] = []
+    for edge in edges:
+        edge_type = str(edge.get("type", ""))
+        frm = str(edge.get("from", ""))
+        to = str(edge.get("to", ""))
+        if edge_type not in VALID_EDGE_TYPES:
+            raise ValueError(f"invalid relation type: {edge_type}")
+        if not frm or not to:
+            raise ValueError("relation from/to must be non-empty")
+        triple = (edge_type, frm, to)
+        if triple not in normalized:
+            normalized.append(triple)
+    if not normalized:
+        return
+
+    ledger_path = relations_path(memory_root)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger_path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            existing: set[tuple[str, str, str]] = set()
+            for line_num, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RelationsLedgerError(
+                        f"malformed JSON at line {line_num}: {exc}"
+                    ) from exc
+                existing.add((str(event.get("type")), str(event.get("from")), str(event.get("to"))))
+            lines = []
+            for edge_type, frm, to in normalized:
+                if (edge_type, frm, to) in existing:
+                    continue
+                event = {
+                    "ts": now,
+                    "type": edge_type,
+                    "from": frm,
+                    "to": to,
+                    "atomizer_config_hash": config_hash,
+                }
+                lines.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
+            if lines:
+                handle.seek(0, os.SEEK_END)
+                handle.write("\n".join(lines) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def read_edges(memory_root: Path) -> list[dict[str, Any]]:
     """
     Read all edges from the relations ledger.

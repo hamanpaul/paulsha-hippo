@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -192,7 +193,7 @@ def write_queue_payload(
     payload: dict,
     capture_scope: str,
 ) -> Path | None:
-    """Write an atomic queue payload to runtime/queue/<tool>__<sid>.json.
+    """Write one uniquely identified capture without overwriting the same session.
 
     Returns Path on success, or None on failure.
     """
@@ -201,11 +202,13 @@ def write_queue_payload(
         queue_payload["tool"] = tool
         queue_payload["session_id"] = session_id
         queue_payload["capture_scope"] = capture_scope
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
 
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{tool}__{sanitize_id(session_id)}.json"
+        filename = f"{tool}__{sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(

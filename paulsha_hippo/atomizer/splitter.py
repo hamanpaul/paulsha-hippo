@@ -18,6 +18,8 @@ class Fragment:
     fragment_index: int
     body: str
     session_title: str = ""
+    part_index: int = 1
+    part_count: int = 1
 
 
 def split(body: str, config: AtomizerConfig) -> list[str]:

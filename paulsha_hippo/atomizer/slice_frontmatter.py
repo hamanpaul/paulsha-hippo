@@ -32,7 +32,11 @@ class Slice:
 
 
 def _slice_id(fragment: Fragment) -> str:
-    key = f"{fragment.project}|{fragment.source_agent}|{fragment.source_session}|{fragment.fragment_index}"
+    body_hash = hashlib.sha256(fragment.body.encode("utf-8")).hexdigest()
+    key = (
+        f"{fragment.project}|{fragment.source_agent}|{fragment.source_session}|"
+        f"{fragment.fragment_index}|{body_hash}"
+    )
     return "sl-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -143,7 +147,7 @@ def render(slice_: Slice) -> str:
     for key in _SCALAR_ORDER:
         if key not in fm:
             continue
-        if key in ("session_title", "atom_title"):
+        if key in ("project", "session_title", "atom_title"):
             # free-text → always a quoted scalar so YAML indicator chars can't deform it
             lines.append(f"{key}: {json.dumps(str(fm[key]), ensure_ascii=False)}")
         else:

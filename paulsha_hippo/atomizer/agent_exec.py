@@ -26,7 +26,7 @@ class AgentClient(ABC):
 
 
 class AgentExecClient(AgentClient):
-    def __init__(self, command: list[str], timeout: int = 600, env: dict | None = None) -> None:
+    def __init__(self, command: list[str], timeout: int = 300, env: dict | None = None) -> None:
         self._command = list(command)
         self._timeout = timeout
         self._env = dict(env) if env is not None else None
@@ -69,7 +69,7 @@ class HttpAgentClient(AgentClient):
     """
 
     def __init__(self, base_url: str, model: str, *, api_key_env: str | None = None,
-                 timeout: int = 600, max_tokens: int = 8192,
+                 timeout: int = 300, max_tokens: int = 2048,
                  env: dict | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model

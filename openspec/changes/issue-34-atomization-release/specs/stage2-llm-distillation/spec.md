@@ -32,7 +32,7 @@ LLM distillation MUST be fail-closed: when the configured backend command is mis
 
 ### Requirement: Session semantic content preservation
 
-The importer SHALL represent the generated session title separately from the adapter-provided assistant summary. Title generation MUST NOT overwrite or replace `assistant_summary`. The rendered inbox artifact SHALL use the generated session title for its title metadata and SHALL preserve the original assistant summary in the semantic body consumed by atomization. When old source data no longer contains the original summary, migration MUST report that evidence as unavailable and MUST NOT substitute a generated title as if it were the original summary.
+The importer SHALL represent the generated session title separately from all adapter-provided assistant outcomes. A normalized session SHALL preserve every ordered, complete assistant output in `assistant_messages`; `assistant_summary` SHALL remain a compatibility field equal to the final non-empty assistant message. Neither field MAY be truncated by the importer. Title generation MUST NOT overwrite or replace either semantic field. The rendered inbox artifact SHALL use the generated `session_title` for title metadata and SHALL preserve the original assistant outcomes in the semantic body consumed by atomization. Each snapshot SHALL carry a unique `capture_id`; an explicit `parent_session_id` SHALL be retained only when supported by source evidence. Legacy payloads SHALL derive `capture_id` from the byte-preserved raw payload SHA-256. When old source data no longer contains the original outcome, migration MUST report that evidence as unavailable and MUST NOT substitute a generated title as if it were the original outcome.
 
 #### Scenario: Generated title does not replace assistant outcome
 - **WHEN** an adapter supplies an assistant summary and title generation produces a different session title
@@ -41,6 +41,44 @@ The importer SHALL represent the generated session title separately from the ada
 #### Scenario: Irrecoverable historical summary is not invented
 - **WHEN** a historical inbox artifact contains only the generated title and its source archive cannot reconstruct the original summary
 - **THEN** migration SHALL leave the unavailable summary explicitly unresolved and MUST NOT copy the title into the summary field
+
+#### Scenario: Multiple full assistant outcomes survive normalization
+- **WHEN** a transcript contains multiple assistant text messages including one longer than 2,000 characters
+- **THEN** `assistant_messages` SHALL preserve all messages in source order without truncation and `assistant_summary` SHALL equal the final non-empty message
+
+#### Scenario: Capture identity does not collapse changed content
+- **WHEN** two snapshots share tool and session ID but have different capture IDs or different ordered semantic content
+- **THEN** both raw snapshots SHALL be archived and the newer semantic content SHALL not be discarded by a coarse completeness comparison; when both snapshots carry comparable capture timestamps, an older late-arriving snapshot SHALL NOT replace the newer canonical inbox artifact
+
+### Requirement: Bounded 32K zero-tool distillation
+
+The canonical Gemma distiller SHALL use a 32,768-token provider context with at most 12,000 deterministically estimated input tokens, 2,048 output tokens, a 10 percent input safety margin, and an independent 48 KiB UTF-8 prompt-argv gate. Fixed skill, schema, and project-registry prompt content SHALL be charged before session fragments. Fragments SHALL be packed in source order; an oversized individual fragment SHALL be split deterministically at paragraph boundaries, labeled `part n/m`, and fully covered without tail truncation. Chunks SHALL execute sequentially with parallelism one, a 300-second timeout, and at most two attempts per chunk. All chunk outputs SHALL remain staged until every chunk succeeds; the system SHALL use only deterministic local deduplication and MUST NOT invoke a reducer model. A budget that cannot be satisfied SHALL fail closed as `context_budget_exceeded`.
+
+The zero-tool command profile SHALL explicitly include `--available-tools=none`, `--disable-builtin-mcps`, `--no-custom-instructions`, `--no-ask-user`, `--no-remote`, and `--no-remote-export`; failure MUST NOT silently fall back to a tool-enabled profile.
+
+#### Scenario: Large session is fully covered by ordered chunks
+- **WHEN** a session is approximately 53K estimated tokens
+- **THEN** the atomizer SHALL produce multiple ordered prompts whose fragment-part coverage is complete and non-overlapping, each within both token and argv budgets
+
+#### Scenario: Provider boundary is explicit
+- **WHEN** effective provider context is 32,767, 32,768, or 32,769 tokens
+- **THEN** only values at least 32,768 satisfy the provider gate and all accepted prompts still satisfy the stricter 12,000-token and 48 KiB gates
+
+### Requirement: Explicit canonical LLM disposition
+
+The canonical response SHALL be exactly an object with fields `schema_version`, `disposition`, `reason`, and `findings`. `schema_version` SHALL equal `1`; `disposition` SHALL be either `findings` or `no_findings`; unknown fields and surrounding non-whitespace noise SHALL be invalid. `findings` SHALL contain one or more valid proposals and use `reason=null`; one malformed proposal SHALL invalidate the entire response rather than publish a salvageable subset. When the source session has a known project, that pinned source project SHALL override model re-homing. `no_findings` SHALL contain an empty findings list and a non-empty reason. During one compatibility version, a non-empty legacy proposal array MAY be accepted. A legacy empty array, empty wrapper, empty stdout, malformed type, or unknown field SHALL be invalid and MUST NOT produce `promoted`.
+
+`promoted` SHALL require `accepted_slices >= 1`. Only explicit successful `no_findings` responses from every chunk MAY terminate with zero slices, using the distinct terminal state `no-findings` and retaining the reasons.
+
+Parked evidence SHALL retain only structured failure metadata plus the byte count and SHA-256 of invalid model stdout; it MUST NOT persist the stdout text because a backend can echo private prompt content. Each chunk attempt SHALL clear any previous chunk's in-memory stdout before execution.
+
+#### Scenario: Empty legacy array is invalid
+- **WHEN** the backend returns `[]` or a wrapper containing an empty findings array without an explicit `no_findings` disposition and reason
+- **THEN** the attempt SHALL consume the bounded invalid-output retry path and MUST NOT record `promoted`
+
+#### Scenario: Explicit no-findings terminates without a slice
+- **WHEN** every chunk returns a valid `no_findings` response with a non-empty reason
+- **THEN** the session SHALL enter terminal `no-findings`, archive its fragments, and never create a zero-slice promoted record
 
 ### Requirement: Canonical semantic atom title before publication
 

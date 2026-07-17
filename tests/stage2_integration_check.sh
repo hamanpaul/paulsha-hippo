@@ -102,7 +102,7 @@ require_hook_dry_run \
   "fixture dry-run claude" \
   "claude_session_end.py" \
   "$ROOT_DIR/tests/fixtures/claude/session_end/payload.json" \
-  "claude-code__claude-session-end-001.json"
+  "claude-code__claude-session-end-001__*.json"
 
 require_hook_dry_run \
   "fixture dry-run codex" \
@@ -114,7 +114,7 @@ require_hook_dry_run \
   "fixture dry-run copilot" \
   "copilot_session_end.py" \
   "$ROOT_DIR/tests/fixtures/copilot/session_end/payload.json" \
-  "copilot-cli__copilot-session-end-001.json"
+  "copilot-cli__copilot-session-end-001__*.json"
 
 echo "[stage2] janitor dry-run over fixtures"
 JANITOR_ROOT="$TMP_DIR/janitor-fixtures"
@@ -150,7 +150,7 @@ agent_exec:
   command:
     - python3
     - $ROOT_DIR/tests/fixtures/atomizer/fake-agent.py
-  timeout_seconds: 30
+  timeout_seconds: 300
   model: fake-agent
 EOF
 PYTHONPATH="$ROOT_DIR" python3 -m paulsha_hippo.cli atomize \

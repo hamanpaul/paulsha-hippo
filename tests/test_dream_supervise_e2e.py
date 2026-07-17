@@ -45,7 +45,9 @@ class DreamSuperviseE2ETests(unittest.TestCase):
             clean_env = {k: v for k, v in os.environ.items()
                          if not k.startswith(("PSC_", "HIPPO_"))}
             clean_env["HOME"] = str(home)
-            with mock.patch.dict(os.environ, clean_env, clear=True):
+            with mock.patch.dict(os.environ, clean_env, clear=True), mock.patch(
+                "paulsha_hippo.ops._dream_timer_active", return_value=False
+            ):
                 rc = cli.main([
                     "dream", "supervise", "--interval", "1", "--once",
                     "--memory-root", str(root),

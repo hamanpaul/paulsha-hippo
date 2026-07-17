@@ -1,0 +1,10 @@
+### Changed
+- atomizer 預設改走本機 `co-gem`（Gemma `gem` profile），由 stdin 接收蒸餾 prompt；停用舊的 Claude Gemma4 upstream 設定，改指向本機 llama router `127.0.0.1:8080`。
+- importer 分離 `session_title` 與完整 assistant outcomes，新增 capture identity、semantic hash 及 fail-closed derived-field sanitizer；raw archive 保持原 bytes。
+- Gemma atomizer 固定 32,768 context、12K input、2,048 output、48 KiB argv、300 秒、2 次 bounded attempts、串行與 zero-tool flags；大 session 以穩定 paragraph parts 全覆蓋分塊，不截尾。
+- LLM response 改為 canonical disposition wrapper；空輸出不再產生 `promoted, slices=0`，只有附理由的 `no_findings` 可以 `no-findings` 終態結案。
+- 任一 malformed finding 使整份 LLM response fail-closed，known source project 不接受模型 re-home；parked evidence 只留 stdout bytes/hash，不保存可能回顯 private prompt 的原文。
+- knowledge publication 於全 chunks 成功後才 staging/fsync 並以 publication journal 提交；內容更正使用新 slice ID，僅在 source/project/canonical title 唯一吻合時自動連結 `supersedes`。
+- 新增 `hippo recovery plan|apply|resume|rollback`，以 code/config/registry/source/transcript hash pins、preimage、journal、`fsync` 與 `os.replace` 執行預設 5-session importer recovery batch，不自動重播 LLM 或改寫舊 JSONL。
+- canonical inbox 只接受有 timestamp 證據的新 capture 前進；晚到的舊 capture 仍 archive/ledger，但不覆蓋較新的 session。
+- CI 改用 `find` 偵測 tests、不再吞安裝失敗，並新增 wheel clean-install smoke。

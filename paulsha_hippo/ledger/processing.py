@@ -11,8 +11,13 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_STATES = {"split", "promoted", "skipped", "parked"}
-PARKED_FAILURE_CATEGORIES = {"backend_unavailable", "transient", "invalid_output"}
+VALID_STATES = {"split", "promoted", "no-findings", "skipped", "parked"}
+PARKED_FAILURE_CATEGORIES = {
+    "backend_unavailable",
+    "transient",
+    "invalid_output",
+    "context_budget_exceeded",
+}
 _ERROR_TEXT_MAX_CHARS = 500
 _REDACTION_FAILED_PLACEHOLDER = "[REDACTION UNAVAILABLE: text withheld]"
 

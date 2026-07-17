@@ -1,14 +1,9 @@
-"""Per-session <=20-char zh-TW title generation via local gemma4, with offline fallback.
-
-The title is generated at import time and stored as the session's ``assistant_summary``
-(rendered under ## Summary) plus a ``title_source`` marker (gemma4 | fallback). Title
-generation never blocks or fails the import: if the LLM backend is unavailable the title
-falls back to the first user prompt truncated, marked ``fallback`` for later regeneration.
-"""
+"""Per-capture <=20-char zh-TW title generation with semantic-field preservation."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import socket
@@ -138,18 +133,33 @@ def generate_atom_title(
     return None, "offline"
 
 
-def _cache_path(memory_root: str | Path, session_id: str) -> Path:
+def _title_input_hash(session: dict[str, Any]) -> str:
+    messages = session.get("assistant_messages")
+    if not isinstance(messages, list):
+        messages = [session.get("assistant_summary") or ""]
+    payload = {
+        "user_prompts": list(session.get("user_prompts") or []),
+        "assistant_messages": list(messages),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cache_path(memory_root: str | Path, session_id: str, input_hash: str) -> Path:
     safe = re.sub(r"[\\/]+", "__", (session_id or "_unknown"))
-    return Path(memory_root) / "runtime" / "cache" / "title" / f"{safe}.json"
+    return Path(memory_root) / "runtime" / "cache" / "title" / f"{safe}--{input_hash}.json"
 
 
 def apply(session: dict[str, Any], *, memory_root: str | Path, **kwargs: Any) -> dict[str, Any]:
-    """Generate (or reuse cached) title and set session['assistant_summary'] + 'title_source'."""
-    cache = _cache_path(memory_root, session.get("session_id") or "")
+    """Generate/reuse a title without mutating assistant semantic content."""
+    input_hash = _title_input_hash(session)
+    cache = _cache_path(memory_root, session.get("session_id") or "", input_hash)
     if cache.exists():
         try:
             cached = json.loads(cache.read_text(encoding="utf-8"))
-            session["assistant_summary"] = cached["title"]
+            if cached.get("input_hash") != input_hash:
+                raise KeyError("input_hash")
+            session["session_title"] = cached["title"]
             session["title_source"] = cached["source"]
             return session
         except (OSError, json.JSONDecodeError, KeyError):
@@ -160,8 +170,11 @@ def apply(session: dict[str, Any], *, memory_root: str | Path, **kwargs: Any) ->
         # left uncached so they regenerate (and upgrade) once gemma4 is reachable.
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_name(f".{cache.name}.tmp")
-        tmp.write_text(json.dumps({"title": title, "source": source}), encoding="utf-8")
+        tmp.write_text(
+            json.dumps({"title": title, "source": source, "input_hash": input_hash}),
+            encoding="utf-8",
+        )
         tmp.replace(cache)
-    session["assistant_summary"] = title
+    session["session_title"] = title
     session["title_source"] = source
     return session

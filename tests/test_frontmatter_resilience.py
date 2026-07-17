@@ -70,7 +70,8 @@ class ImporterEscapingTests(unittest.TestCase):
         session = {
             "tool": "claude-code",
             "session_id": "s-bracket",
-            "assistant_summary": "[PERSONA CONTRACT — guardrail",
+            "assistant_summary": "semantic outcome remains separate",
+            "session_title": "[PERSONA CONTRACT — guardrail",
             "title_source": "fallback",
         }
         markdown = render_markdown(session, project="paulshaclaw")
@@ -81,7 +82,8 @@ class ImporterEscapingTests(unittest.TestCase):
         session = {
             "tool": "codex",
             "session_id": "s-json",
-            "assistant_summary": '{"verdict":"needs-attention"}',
+            "assistant_summary": "semantic outcome remains separate",
+            "session_title": '{"verdict":"needs-attention"}',
             "title_source": "gemma4",
         }
         markdown = render_markdown(session, project="serialwrap")

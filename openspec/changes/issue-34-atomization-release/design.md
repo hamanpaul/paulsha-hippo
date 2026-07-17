@@ -49,6 +49,8 @@ CLI hook/session archive
 
 Normalized session 增加 `session_title`（或等價 canonical 欄位）。Title generator 只能寫這個欄位與 `title_source`，不可覆寫 adapter 提供的 `assistant_summary`。Inbox frontmatter 使用 `session_title`，`## Summary` body 保留原始 `assistant_summary`。對舊資料只在 source archive 仍可重建 summary 時回填；否則標記 evidence unavailable，禁止用 title 冒充 summary。
 
+Normalized session 同時保留所有有序、完整的 `assistant_messages[]`，並將最後一筆非空訊息映射到相容欄位 `assistant_summary`。每次 hook snapshot 有唯一 `capture_id`；legacy payload 由 raw payload SHA-256 衍生，只有 source 明確提供時才設定 `parent_session_id`。Importer 以 `tool:session_id:capture_id` 作為 capture identity，再以包含全部有序 prompts/outcomes、files、artifacts、scope 與 parent ID 的 semantic hash 排除真正重複 snapshot；不再用粗略 completeness 捨棄內容改變。
+
 ### 3. Atom title 在 write 前成為 canonical `title`
 
 LLM proposal 的 title 同時寫入 `title` 與相容欄位 `atom_title`；MOC naming 依序使用 `title`、`atom_title`、heading、最後才 fallback。`is_generic_title` 與 retrieval pool 共用單一判定；首次 generic output 以同一 canonical backend 做一次 bounded repair，仍 generic 則該 session 留在 bounded retry/park 流程，不寫一張注定不可檢索的 promoted note。Repair 使用獨立、versioned、包含 proposal index/original title/config/skill/prompt hash 的 cache key，只 immutable-replace title，並計入同一次 promotion attempt；不得命中原本 full-proposal cache 後假裝修復。
@@ -94,6 +96,16 @@ Hermetic tests 可使用 fake backend 驗 deterministic contract，但 release g
 ### 11. Per-session publication 以 journal/commit marker 閉合
 
 Atomizer 在任何 visible write 前先驗證全批 proposals，將 atoms 寫入 same-filesystem staging 並 fsync，append `publish_prepare` journal（target/checksum/relations），再 materialize targets。新 schema atoms 只有在 transaction commit marker 存在時才對 MOC/index eligible；中途 crash 留下的 targets 因此不會被檢索。下次 run 在新 work 前先依 journal idempotently finish 或 rollback，relation edges 以 publication ID 去重，最後才 append `promoted` commit record。Dream 把 `run_id` 傳入 atomizer，atomizer 回傳/persist 精確 `produced_slice_ids` 供 run-level metadata/FTS reconciliation。
+
+### 12. 32K Gemma 使用 bounded sequential chunks
+
+Distiller 有效 context 固定為 32,768 tokens，但每 chunk 只允許 12,000 estimated input tokens（另有 10% safety margin）與 2,048 output tokens，且實際 prompt argv UTF-8 不得超過 48 KiB。固定 prompt 成本先計入 skill、schema 與 registry，剩餘空間按原 fragment 順序打包。單一 fragment 過大時先依段落穩定分割並標示 `part n/m`；不得截尾或遺漏任何字元。Chunks 依序以 parallelism 1 執行，每 chunk timeout 300 秒、最多 2 次嘗試，結果先進 staging；全部成功後才做決定性 local dedup 與 per-session atomic publication，不另呼叫 reducer。任一 budget gate 無法滿足時以 `context_budget_exceeded` fail closed。
+
+Canonical Gemma/Copilot argv 必須明確含有 `--available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export`，不得在失敗時靜默改回六工具 profile。Canonical response 為 `{"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}`。相容窗只接受非空 legacy array；空 array、空 wrapper、錯誤型別、噪音或未知欄位都是 invalid output。`no_findings` 必須有非空理由，並以獨立 terminal `no-findings` 狀態結案；`promoted` 必須 `accepted_slices >= 1`。
+
+### 13. Recovery 以 frozen sources 與 hash pins 為邊界
+
+`hippo recovery plan|apply|resume|rollback` 只允許使用 frozen `archive/queue/**/*.json` 與其可驗證 transcript pointer。Plan 固定 code/config/registry/source hashes，列出 winner、舊新路徑/hash、decision 與預計 ledger delta。Apply 先寫 same-filesystem staging 與 preimage，以 journal、`fsync` 與 `os.replace` 逐項提交；resume 前重新驗證全部 pins，rollback 只補償本批已提交變更，永不 rewrite 舊 JSONL。Importer recovery 與 LLM replay 分離，預設 batch size 5，不盲目重跑既有 promoted sessions。只有 source/project/canonical title 相同且 body hash 改變時才自動建立 `supersedes`，否則並列並留給人工審核。
 
 ## Parallelization and Merge Topology
 

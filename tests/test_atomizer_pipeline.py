@@ -196,8 +196,9 @@ class PipelineTests(unittest.TestCase):
                                   now="2026-05-31T03:00:00Z", doc_corpus=corpus)
             self.assertEqual(result["summary"]["noise_dropped"], 1)
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
-            # source fragment still archived (session promoted, not stuck)
-            self.assertEqual(list((root / "inbox" / "_slices").rglob("*.md")), [])
+            # Noise rejection is not an explicit LLM no-findings decision.
+            self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 1)
+            self.assertEqual(processing.state_of(root, "claude:sdoc"), "split")
 
     def test_doc_fragment_kept_without_corpus(self):
         with TemporaryDirectory() as tmp:
@@ -428,7 +429,7 @@ class PipelineTests(unittest.TestCase):
                 hashlib.sha256(skill_text.encode("utf-8")).hexdigest(),
             )
 
-    def test_llm_empty_output_reaches_promoted_terminal_state(self):
+    def test_llm_empty_output_is_parked_invalid_output(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
@@ -446,25 +447,28 @@ class PipelineTests(unittest.TestCase):
                 root, config=cfg, config_hash=h, now="2026-05-31T03:00:00Z", promoter=promoter
             )
 
-            self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             event = processing.read_events(root)[-1]
-            self.assertEqual(event["state"], "promoted")
-            self.assertEqual(event["slices"], 0)
+            self.assertEqual(event["state"], "parked")
+            self.assertEqual(event["failure_category"], "invalid_output")
             self.assertEqual(result["summary"]["slices"], 0)
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
-            self.assertEqual(list((root / "inbox" / "_slices").rglob("*.md")), [])
-            self.assertEqual(len(list((root / "archive" / "fragments").rglob("*.md"))), 2)
+            self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
+            self.assertEqual(len(list((root / "archive" / "fragments").rglob("*.md"))), 0)
             self.assertEqual(list(cache_dir.glob("*.json")), [])
-            self.assertFalse(any("left in split" in warning for warning in result["warnings"]))
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
 
-    def test_llm_wrapped_empty_output_reaches_promoted_terminal_state_without_retry_budget(self):
+    def test_llm_explicit_no_findings_reaches_distinct_terminal_state(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
             cfg, h = atomizer_config.load_config(override_path=None)
             cache_dir = root / "runtime" / "cache" / "atomize"
             cached_client = agent_exec.CachingAgentClient(
-                FakeAgentClient('{"findings": []}'),
+                FakeAgentClient(
+                    '{"schema_version":1,"disposition":"no_findings",'
+                    '"reason":"session contains no durable finding","findings":[]}'
+                ),
                 cache_dir,
             )
             promoter = llm_promoter.LLMPromoter(
@@ -478,10 +482,14 @@ class PipelineTests(unittest.TestCase):
                 root, config=cfg, config_hash=h, now="2026-05-31T03:00:00Z", promoter=promoter
             )
 
-            self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "no-findings")
             event = processing.read_events(root)[-1]
-            self.assertEqual(event["state"], "promoted")
+            self.assertEqual(event["state"], "no-findings")
             self.assertEqual(event["slices"], 0)
+            self.assertEqual(event["accepted_slices"], 0)
+            self.assertEqual(
+                event["no_findings_reasons"], ["session contains no durable finding"]
+            )
             self.assertEqual(result["summary"]["slices"], 0)
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
             self.assertEqual(list((root / "inbox" / "_slices").rglob("*.md")), [])
@@ -538,11 +546,11 @@ class PipelineTests(unittest.TestCase):
                 root, config=cfg, config_hash=h, now="2026-05-31T03:00:00Z", promoter=promoter
             )
 
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
             edges = relations.read_edges(root)
             self.assertEqual([e["type"] for e in edges], ["fragment_of", "fragment_of"])
-            self.assertTrue(any("left in split" in warning for warning in result["warnings"]))
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
 
     def test_llm_relates_to_emits_slice_edge_by_runtime_title(self):
         with TemporaryDirectory() as tmp:
@@ -570,6 +578,62 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(relate_edges), 1)
             self.assertTrue(relate_edges[0]["from"].startswith("slice:sl-"))
             self.assertTrue(relate_edges[0]["to"].startswith("slice:sl-"))
+
+    def test_changed_llm_finding_with_unique_identity_supersedes(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+
+            def canned(body: str) -> str:
+                return json.dumps(
+                    [{
+                        "title": "stable canonical title",
+                        "artifact_kind": "report",
+                        "project": "paulshaclaw",
+                        "tags": [],
+                        "body": body,
+                        "source_fragment_indices": [0, 1],
+                        "relations": [],
+                    }]
+                )
+
+            first = llm_promoter.LLMPromoter(
+                FakeAgentClient(canned("body version one")),
+                skill_text="SKILL",
+                known_projects=["paulshaclaw"],
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-16T01:00:00Z", promoter=first,
+            )
+            old_slice = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            old_id = old_slice.stem
+
+            _seed_raw(root)
+            processing.processing_path(root).unlink()
+            second = llm_promoter.LLMPromoter(
+                FakeAgentClient(canned("body version two")),
+                skill_text="SKILL",
+                known_projects=["paulshaclaw"],
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h,
+                now="2026-07-16T02:00:00Z", promoter=second,
+            )
+
+            notes = sorted((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            self.assertEqual(len(notes), 2)
+            new_note = next(path for path in notes if path != old_slice)
+            frontmatter, _ = pipeline._parse_frontmatter(
+                new_note.read_text(encoding="utf-8")
+            )
+            self.assertEqual(frontmatter["supersedes"], [old_id])
+            supersedes = [
+                edge for edge in relations.read_edges(root) if edge["type"] == "supersedes"
+            ]
+            self.assertEqual(len(supersedes), 1)
+            self.assertEqual(supersedes[0]["to"], f"slice:{old_id}")
 
     def test_llm_dangling_relates_to_warns_and_promotes(self):
         with TemporaryDirectory() as tmp:
@@ -755,17 +819,17 @@ class PipelineTests(unittest.TestCase):
             cfg, h = atomizer_config.load_config(override_path=None)
             warnings: list[str] = []
             pipeline._split_pass(root, cfg, h, "2026-05-31T03:00:00Z", False, warnings)
-            original_append = relations.append_edge
+            original_append = relations.append_edges
             crashed = {"done": False}
 
             def flaky_append(*args, **kwargs):
                 result = original_append(*args, **kwargs)
-                if kwargs.get("type") == "promoted_to" and not crashed["done"]:
+                if not crashed["done"]:
                     crashed["done"] = True
                     raise OSError("simulated crash after first promoted_to edge")
                 return result
 
-            with mock.patch.object(relations, "append_edge", side_effect=flaky_append):
+            with mock.patch.object(relations, "append_edges", side_effect=flaky_append):
                 with self.assertRaises(OSError):
                     pipeline._promote_pass(
                         root,
@@ -779,12 +843,27 @@ class PipelineTests(unittest.TestCase):
                     )
 
             self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
+            publication_events = [
+                json.loads(line)
+                for line in (root / "runtime" / "ledger" / "publication.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual([event["event"] for event in publication_events], ["staged"])
             result = pipeline.run(root, config=cfg, config_hash=h, now="2026-05-31T03:02:00Z")
 
             self.assertEqual(result["summary"]["slices"], 2)
             edges = relations.read_edges(root)
             edge_triples = [(edge["type"], edge["from"], edge["to"]) for edge in edges]
             self.assertEqual(len(edge_triples), len(set(edge_triples)))
+            publication_events = [
+                json.loads(line)
+                for line in (root / "runtime" / "ledger" / "publication.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(publication_events[-1]["event"], "committed")
 
     def test_bad_fragment_references_leave_session_split_without_partial_writes(self):
         with TemporaryDirectory() as tmp:
@@ -939,8 +1018,8 @@ class PipelineTests(unittest.TestCase):
             cfg, h = atomizer_config.load_config(override_path=None)
             result = pipeline.run(root, config=cfg, config_hash=h, now="2026-06-25T03:00:00Z")
             self.assertGreaterEqual(result["summary"]["noise_dropped"], 1)
-            self.assertEqual(result["summary"]["skipped"], 0)
-            self.assertFalse(any("noise" in w for w in result["warnings"]))
+            self.assertEqual(result["summary"]["skipped"], 1)
+            self.assertTrue(any("rejected" in w for w in result["warnings"]))
 
     def test_dry_run_counts_noise_without_writing(self):
         with TemporaryDirectory() as tmp:
@@ -1044,10 +1123,10 @@ class LLMPromoteEndToEndTests(unittest.TestCase):
                 root, config=cfg, config_hash=h, now="2026-05-31T03:00:00Z", promoter=promoter
             )
 
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
             self.assertEqual(result["summary"]["slices"], 0)
-            self.assertTrue(any("left in split" in warning for warning in result["warnings"]))
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
 
 
 class ReimportOverwriteTests(unittest.TestCase):
@@ -1112,9 +1191,9 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 promoter=promoter,
             )
 
-            self.assertEqual(inner.calls, 1)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
-            self.assertTrue(any("left in split" in warning for warning in result["warnings"]))
+            self.assertEqual(inner.calls, 2)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertTrue(any("parked" in warning for warning in result["warnings"]))
             self.assertEqual(
                 list((root / "runtime" / "cache" / "atomize").glob("*.json")),
                 [],
@@ -1130,7 +1209,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 ["chatter, not json", _VALID_ONE_SLICE],
             )
 
-            pipeline.run(
+            result1 = pipeline.run(
                 root,
                 config=cfg,
                 config_hash=h,
@@ -1148,7 +1227,8 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
 
             self.assertEqual(inner.calls, 2)
             self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
-            self.assertEqual(result2["summary"]["slices"], 1)
+            self.assertEqual(result1["summary"]["slices"], 1)
+            self.assertEqual(result2["summary"]["slices"], 0)
 
     def test_non_llm_promoter_failure_does_not_touch_cache_dir(self):
         with TemporaryDirectory() as tmp:
@@ -1182,20 +1262,17 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 [agent_exec.AgentTransientError("agent timed out after 600s")] * 7,
             )
 
-            result = None
-            for hour in range(6):
-                result = pipeline.run(
-                    root,
-                    config=cfg,
-                    config_hash=h,
-                    now=f"2026-07-10T0{hour}:00:00Z",
-                    promoter=promoter,
-                )
+            result = pipeline.run(
+                root,
+                config=cfg,
+                config_hash=h,
+                now="2026-07-10T00:00:00Z",
+                promoter=promoter,
+            )
 
             cache_dir = root / "runtime" / "cache" / "atomize"
             self.assertIsNotNone(result)
-            # 第 6 次失敗（attempts=6 > 5）→ park；前 5 次留 split 續重試
-            self.assertEqual(inner.calls, 6)
+            self.assertEqual(inner.calls, 2)
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list(cache_dir.glob("*.retries")), [])
             self.assertEqual(list(cache_dir.glob("*.json")), [])
@@ -1204,7 +1281,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             self.assertTrue(evidence.exists())
             payload = json.loads(evidence.read_text(encoding="utf-8"))
             self.assertEqual(payload["failure_category"], "transient")
-            self.assertEqual(payload["attempts"], 6)
+            self.assertEqual(payload["attempts"], 2)
             # split fragments 保留（requeue 重試素材）
             self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
 
@@ -1213,7 +1290,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 root, config=cfg, config_hash=h,
                 now="2026-07-10T06:00:00Z", promoter=promoter,
             )
-            self.assertEqual(inner.calls, 6)
+            self.assertEqual(inner.calls, 2)
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertFalse(any("claude:s1" in w for w in result2["warnings"]))
 
@@ -1228,33 +1305,25 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 + ["chatter, not json", _VALID_ONE_SLICE],
             )
 
-            for hour in range(2):
-                pipeline.run(
-                    root, config=cfg, config_hash=h,
-                    now=f"2026-07-10T0{hour}:00:00Z", promoter=promoter,
-                )
-
             cache_dir = root / "runtime" / "cache" / "atomize"
             result3 = pipeline.run(
                 root, config=cfg, config_hash=h,
-                now="2026-07-10T02:00:00Z", promoter=promoter,
+                now="2026-07-10T00:00:00Z", promoter=promoter,
             )
-            # transient×2 + invalid_output×1 = attempts 3（單一預算），毒快取已淘汰
             retries = list(cache_dir.glob("*.retries"))
-            self.assertEqual(inner.calls, 3)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
-            self.assertEqual(len(retries), 1)
-            self.assertEqual(retries[0].read_text(encoding="utf-8").strip(), "3")
+            self.assertEqual(inner.calls, 2)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(retries, [])
             self.assertEqual(list(cache_dir.glob("*.json")), [])
-            self.assertTrue(any("retry 3/5" in warning for warning in result3["warnings"]))
+            self.assertTrue(any("parked" in warning for warning in result3["warnings"]))
 
             result4 = pipeline.run(
                 root, config=cfg, config_hash=h,
                 now="2026-07-10T03:00:00Z", promoter=promoter,
             )
-            self.assertEqual(inner.calls, 4)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
-            self.assertEqual(result4["summary"]["slices"], 1)
+            self.assertEqual(inner.calls, 2)
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            self.assertEqual(result4["summary"]["slices"], 0)
             self.assertEqual(list(cache_dir.glob("*.retries")), [])
 
     def test_retry_counter_increments_and_cache_cleared_within_budget(self):
@@ -1274,9 +1343,9 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
 
             cache_dir = root / "runtime" / "cache" / "atomize"
             retries = list(cache_dir.glob("*.retries"))
-            self.assertEqual(inner.calls, 1)
-            self.assertEqual(len(retries), 1)
-            self.assertEqual(retries[0].read_text(encoding="utf-8").strip(), "1")
+            self.assertEqual(inner.calls, 2)
+            self.assertEqual(retries, [])
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list(cache_dir.glob("*.json")), [])
 
     def test_exhausted_budget_evicts_cache_and_parks_session(self):
@@ -1295,8 +1364,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 now="2026-07-10T04:00:00Z", promoter=promoter,
             )
 
-            # 第 6 次 invalid_output → park：毒快取與 sidecar 一併淘汰
-            self.assertEqual(inner.calls, 1)
+            self.assertEqual(inner.calls, 2)
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             self.assertEqual(list(cache_dir.glob("*.json")), [])
             self.assertEqual(list(cache_dir.glob("*.retries")), [])
@@ -1304,10 +1372,12 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
             evidence = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
             payload = json.loads(evidence.read_text(encoding="utf-8"))
             self.assertEqual(payload["failure_category"], "invalid_output")
-            self.assertEqual(payload["attempts"], 6)
+            self.assertEqual(payload["attempts"], 2)
             self.assertEqual(payload["cache_key"], cache_key)
-            # 證據保存最後一次原始輸出摘要
-            self.assertIn("chatter, not json", payload["last_output_excerpt"])
+            # 原始模型輸出可能回顯 private prompt；證據只留不可逆摘要。
+            self.assertNotIn("last_output_excerpt", payload)
+            self.assertEqual(payload["last_output_bytes"], len("chatter, not json".encode()))
+            self.assertEqual(len(payload["last_output_sha256"]), 64)
             # split fragments 保留
             self.assertEqual(len(list((root / "inbox" / "_slices").rglob("*.md"))), 2)
 
@@ -1315,7 +1385,7 @@ class PromoteFailureCacheRecoveryTests(unittest.TestCase):
                 root, config=cfg, config_hash=h,
                 now="2026-07-10T05:00:00Z", promoter=promoter,
             )
-            self.assertEqual(inner.calls, 1)
+            self.assertEqual(inner.calls, 2)
             self.assertFalse(any("claude:s1" in w for w in result2["warnings"]))
 
     def test_successful_promotion_removes_retry_sidecar(self):
@@ -1446,7 +1516,7 @@ def _global_disable_rules_override(rule_ids):
 class ParkEvidenceRedactionTests(unittest.TestCase):
     """#15 review F1：parked 證據與 processing ledger 不得留 credential 副本。"""
 
-    def test_park_session_redacts_error_and_last_output_excerpt(self):
+    def test_park_session_redacts_error_and_withholds_raw_model_output(self):
         secret_err = "ghp_" + "A1b2C3d4" * 5
         secret_out = "sk-ant-" + "a1B2c3D4" * 4
         with TemporaryDirectory() as tmp:
@@ -1470,11 +1540,9 @@ class ParkEvidenceRedactionTests(unittest.TestCase):
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             self.assertNotIn(secret_err, evidence["error"])
             self.assertIn("REDACTED", evidence["error"])
-            self.assertNotIn(secret_out, evidence["last_output_excerpt"])
-            self.assertIn("REDACTED", evidence["last_output_excerpt"])
-            # 乾淨行保留（line-level redaction 不整段清空）
-            self.assertIn("model chatter", evidence["last_output_excerpt"])
-            self.assertIn("tail line", evidence["last_output_excerpt"])
+            self.assertNotIn("last_output_excerpt", evidence)
+            self.assertEqual(len(evidence["last_output_sha256"]), 64)
+            self.assertGreater(evidence["last_output_bytes"], 0)
 
             ledger_blob = processing.processing_path(root).read_text(encoding="utf-8")
             self.assertNotIn(secret_err, ledger_blob)
@@ -1612,7 +1680,9 @@ class ParkSplitSessionsTests(unittest.TestCase):
             )
             self.assertEqual(evidence["cache_key"], cache_key)
             self.assertEqual(evidence["attempts"], 5)
-            self.assertEqual(evidence["last_output_excerpt"], "poison output")
+            self.assertNotIn("last_output_excerpt", evidence)
+            self.assertEqual(evidence["last_output_bytes"], len("poison output".encode()))
+            self.assertEqual(len(evidence["last_output_sha256"]), 64)
 
     def test_park_clears_all_cache_key_variants_but_not_other_sessions(self):
         """殘留多個 cache_key 變體時全數清除（主變體取 attempts 最大者落證據）；
@@ -1644,47 +1714,37 @@ class ParkSplitSessionsTests(unittest.TestCase):
             self.assertEqual(event["attempts"], 3)
 
     def test_requeued_session_gets_fresh_retry_budget_after_init_failure_park(self):
-        """finding 重現劇本的收尾：park（init 失敗）→ requeue 後，promote 再遇
-        1 次 transient 失敗必須從 attempts=1 起算（留在 split），不得繼承殘留
-        計數直接重新 park。"""
+        """park → requeue 後使用全新的 bounded two-attempt budget。"""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_raw(root)
             cfg, h = atomizer_config.load_config(override_path=None)
-            # 先讓 session 走到 split 並累積 5 次 transient 失敗（仍在 split）
             promoter = llm_promoter.LLMPromoter(
                 ScriptedAgentClient(
-                    [agent_exec.AgentExecError("boom")] * 5
+                    [agent_exec.AgentExecError("boom")] * 2
                 ),
                 skill_text="SKILL", known_projects=["paulshaclaw"], model="fake-llm",
             )
-            for _ in range(5):
-                pipeline.run(root, config=cfg, config_hash=h,
-                             now="2026-07-10T00:00:00Z", promoter=promoter)
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
-
-            # atomizer 初始化失敗 → park_split_sessions 強制 park
-            pipeline.park_split_sessions(
-                root, error_text="promoter init failed",
-                now="2026-07-10T01:00:00Z", config_hash="unavailable",
-            )
+            pipeline.run(root, config=cfg, config_hash=h,
+                         now="2026-07-10T00:00:00Z", promoter=promoter)
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             event = processing.fold_events(root)["claude:s1"]
-            self.assertEqual(event["attempts"], 5)  # 證據記真實歷史
+            self.assertEqual(event["attempts"], 2)
 
             # 修復後 requeue 回 split，再遇 1 次 transient 失敗
             processing.append_state(root, session_key="claude:s1", state="split",
                                     now="2026-07-10T02:00:00Z", config_hash=h,
                                     requeued_from="parked")
             retry_promoter = llm_promoter.LLMPromoter(
-                ScriptedAgentClient([agent_exec.AgentExecError("boom again")]),
+                ScriptedAgentClient([agent_exec.AgentExecError("boom again")] * 2),
                 skill_text="SKILL", known_projects=["paulshaclaw"], model="fake-llm",
             )
             pipeline.run(root, config=cfg, config_hash=h,
                          now="2026-07-10T03:00:00Z", promoter=retry_promoter)
 
-            # 全新預算：attempts 從 1 起算、留在 split（修前：繼承 5、+1=6 → 重新 park）
-            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+            self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
+            event = processing.fold_events(root)["claude:s1"]
+            self.assertEqual(event["attempts"], 2)
 
     def test_second_call_is_noop_for_already_parked(self):
         with TemporaryDirectory() as tmp:

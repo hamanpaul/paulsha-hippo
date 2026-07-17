@@ -138,6 +138,21 @@ def _build_parser() -> argparse.ArgumentParser:
     atomize.add_argument("--dry-run", action="store_true")
     atomize.set_defaults(func=_atomize)
 
+    recovery = memory_subparsers.add_parser(
+        "recovery", help="hash-pinned importer recovery（不自動重播 LLM）"
+    )
+    recovery_subparsers = recovery.add_subparsers(dest="recovery_command", required=True)
+    recovery_plan = recovery_subparsers.add_parser("plan")
+    recovery_plan.add_argument("--memory-root", required=True)
+    recovery_plan.add_argument("--manifest", default=None)
+    recovery_plan.add_argument("--batch-size", type=int, default=5)
+    recovery_plan.add_argument("--baseline-count", type=int, default=None)
+    recovery_plan.set_defaults(func=_recovery)
+    for command in ("apply", "resume", "rollback"):
+        recovery_action = recovery_subparsers.add_parser(command)
+        recovery_action.add_argument("--manifest", required=True)
+        recovery_action.set_defaults(func=_recovery)
+
     dream = memory_subparsers.add_parser("dream")
     dream_subparsers = dream.add_subparsers(dest="dream_command", required=True)
     dream_run = dream_subparsers.add_parser("run")
@@ -384,6 +399,29 @@ def _atomize(args: argparse.Namespace) -> int:
     if args.now is None:
         args.now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return atomize_run(args)
+
+
+def _recovery(args: argparse.Namespace) -> int:
+    from . import recovery
+
+    if args.recovery_command == "plan":
+        manifest = recovery.create_plan(
+            args.memory_root,
+            manifest_path=args.manifest,
+            batch_size=args.batch_size,
+            baseline_count=args.baseline_count,
+        )
+        print(json.dumps({"manifest": str(manifest)}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.recovery_command == "rollback":
+        result = recovery.rollback_plan(args.manifest)
+    else:
+        result = recovery.apply_plan(
+            args.manifest,
+            resume=args.recovery_command == "resume",
+        )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def _dream(args: argparse.Namespace) -> int:

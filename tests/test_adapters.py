@@ -19,7 +19,11 @@ NORMALIZED_KEYS = {
     "commit",
     "turn_count",
     "user_prompts",
+    "assistant_messages",
     "assistant_summary",
+    "session_title",
+    "capture_id",
+    "parent_session_id",
     "touched_files",
     "referenced_artifacts",
     "raw_payload_pointer",
@@ -60,7 +64,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertIsInstance(session["session_id"], str)
         self.assertIn(session["tool"], {"claude-code", "codex", "copilot-cli"})
         self.assertGreaterEqual(session["turn_count"], 1)
-        for key in ["user_prompts", "touched_files", "referenced_artifacts"]:
+        for key in ["user_prompts", "assistant_messages", "touched_files", "referenced_artifacts"]:
             self.assertIsInstance(session[key], list)
         self.assertIsInstance(session["assistant_summary"], str)
         self.assertIsInstance(session["raw_payload_pointer"], str)

@@ -58,8 +58,10 @@ class SessionEndUsageRetiredTests(unittest.TestCase):
                  "transcript_path": str(tp)}, root)
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             # Queue payload still written (hook core unaffected).
-            self.assertTrue(
-                (root / "runtime" / "queue" / "claude-code__s1.json").exists())
+            self.assertEqual(
+                len(list((root / "runtime" / "queue").glob("claude-code__s1__*.json"))),
+                1,
+            )
             # cited/matched usage event retired -> SessionEnd writes nothing.
             self.assertFalse(
                 (root / "runtime" / "ledger" / "memory_usage.jsonl").exists())

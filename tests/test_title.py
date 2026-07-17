@@ -48,7 +48,8 @@ def test_apply_caches_and_sets_fields(tmp_path):
     sess = {"session_id": "s9", "user_prompts": ["a"], "assistant_summary": "b"}
     s1 = title.apply(dict(sess), memory_root=tmp_path, runner=runner)
     title.apply(dict(sess), memory_root=tmp_path, runner=runner)
-    assert s1["assistant_summary"] == "簡短標題"
+    assert s1["session_title"] == "簡短標題"
+    assert s1["assistant_summary"] == "b"
     assert s1["title_source"] == "gemma4"
     assert len(calls) == 1  # second call hit cache
 
@@ -72,7 +73,7 @@ def test_pipeline_injects_title_into_inbox(tmp_path, monkeypatch):
     rendered = decision["rendered"]
     assert "title: UART 升級修復" in rendered
     assert "title_source: gemma4" in rendered
-    assert "## Summary\nUART 升級修復" in rendered
+    assert "## Summary\n已修好 UART 升級流程並加上重試。" in rendered
 
 
 def test_apply_does_not_cache_fallback(tmp_path):

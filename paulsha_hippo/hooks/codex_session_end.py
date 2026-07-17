@@ -97,13 +97,15 @@ def main(argv: list[str] | None = None) -> int:
         queue_payload = dict(payload)
         queue_payload["tool"] = TOOL
         queue_payload["capture_scope"] = capture_scope
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
         # Codex Stop/SubagentStop are mid-session snapshots, so ended_at is explicit null.
         queue_payload["ended_at"] = None
 
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{TOOL}__{_sanitize_id(session_id)}__{uuid.uuid4().hex}.json"
+        filename = f"{TOOL}__{_sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(

@@ -1,18 +1,21 @@
 ## 1. Restore test and release truth
 
-- [ ] 1.1 Replace the GitHub Actions test-suite glob detection with a robust check, remove install error swallowing, and add a workflow contract test proving pytest is collected and executed.
+- [x] 1.1 Replace the GitHub Actions test-suite glob detection with a robust check, remove install error swallowing, and add a workflow contract test proving pytest is collected and executed.
 - [ ] 1.2 Add build/version attestation across package, importer, CLI, hooks, service, and artifact metadata; defer the version bump only until the final candidate-freeze task, before any artifact/upgrade/canary gate.
-- [ ] 1.3 Add wheel clean-install and installed-surface test harnesses that do not import from the checkout by cwd shadowing.
+- [x] 1.3 Add wheel clean-install and installed-surface test harnesses that do not import from the checkout by cwd shadowing.
 - [ ] 1.4 Add the policy-required PR template and arrange the authorized `release:0.1.1` label before the version-freeze PR can merge.
 
 ## 2. Preserve session content and atom semantics
 
-- [ ] 2.1 Add a dedicated session-title field; update adapters/title cache/frontmatter rendering so original assistant summary survives unchanged.
+- [x] 2.1 Add `session_title`, ordered full `assistant_messages`, compatible last-message `assistant_summary`, source-backed `parent_session_id`, and per-snapshot `capture_id`; update adapters/title cache/frontmatter rendering so no assistant outcome is truncated or overwritten.
 - [ ] 2.2 Persist LLM proposal title as canonical `title`, define a versioned title-repair cache/attempt contract, update MOC fallback order, enforce the shared generic-title gate before promotion, and add full write → MOC → index regression coverage.
 - [ ] 2.3 Define rich project-ID validation separately from a collision-resistant hashed filesystem directory mapping; inherit known source project and union-read legacy/generated registries only for unknown sources.
 - [ ] 2.4 Introduce an agent-result/provenance contract and integrate it through cache, processing ledger, note frontmatter serialization/round-trip, and E2E assertions with requested-versus-observed model truth and sanitized backend/config/skill/build fingerprints.
 - [ ] 2.5 Preserve a bounded sanitized stderr excerpt for non-zero agent failures without logging prompt/output/secrets.
 - [ ] 2.6 Add per-session publication journal/commit-marker recovery so a mid-write or mid-edge failure cannot expose partial atoms or duplicate relations.
+- [x] 2.7 Replace coarse importer dedup with `tool:session_id:capture_id` identity plus a normalized semantic hash over ordered prompts/outcomes, files, artifacts, capture scope, and parent ID; include title-input hash in title cache identity and sanitize only derived surfaces.
+- [x] 2.8 Add deterministic 32K/12K/2K/48-KiB chunk budgeting, ordered paragraph splitting, complete fragment coverage, sequential two-attempt execution, and a zero-tool command profile with no fallback.
+- [x] 2.9 Require the canonical disposition wrapper; accept only non-empty legacy arrays during compatibility, map explicit all-chunk `no_findings` to terminal `no-findings`, and prohibit `promoted` with zero accepted slices.
 
 ## 3. Canonicalize configuration and deployed surfaces
 
@@ -30,7 +33,7 @@
 
 ## 5. Build reversible migration and recovery
 
-- [ ] 5.1 Implement independent census/SHA-256 manifest plus dry-run/apply/rollback for config, legacy filename, retitle, project reattribution, quarantine, index rebuild, and lock cleanup operations.
+- [x] 5.1 Implement `hippo recovery plan|apply|resume|rollback` with frozen archive/transcript sources, code/config/registry/source pins, winner and ledger-delta manifest, staging/preimage/fsync/replace journal, byte-equivalent resume, and batch-only compensating rollback.
 - [ ] 5.2 Gate recovery on deployed-surface attestation and service-effective backend probe; process deterministic repairs before bounded LLM requeue.
 - [ ] 5.3 Add current-pipx split-surface and stale-system large-backlog upgrade fixtures; prove no ledger truncation, raw/knowledge loss, unbounded retries, guessed provenance/project, or rollback-runner dependency on the replaced target; test old-reader forward compatibility or force isolated-snapshot recovery.
 - [ ] 5.4 Document maintenance ordering: upgrade hooks before legacy lock cleanup; repair/quarantine before requeue; canary batch before expansion.

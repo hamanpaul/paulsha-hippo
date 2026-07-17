@@ -65,9 +65,22 @@ class LlmOutputTests(unittest.TestCase):
         raw = "```json\n[]\n```\n**Reasoning:** The session contains no substantive content."
         self.assertEqual(llm_output.parse(raw, PROJECTS), [])
 
-    def test_all_invalid_proposals_still_raise_no_salvageable(self):
-        with self.assertRaisesRegex(llm_output.LlmOutputError, "no salvageable proposals"):
+    def test_all_invalid_proposals_fail_closed(self):
+        with self.assertRaisesRegex(llm_output.LlmOutputError, "proposal 0"):
             llm_output.parse('[{"bogus": 1}]', PROJECTS)
+
+    def test_canonical_response_with_one_invalid_finding_fails_as_a_whole(self):
+        raw = json.dumps(
+            {
+                "schema_version": 1,
+                "disposition": "findings",
+                "reason": None,
+                "findings": [_proposal_payload("valid"), {"bogus": 1}],
+            }
+        )
+
+        with self.assertRaisesRegex(llm_output.LlmOutputError, "proposal 1"):
+            llm_output.parse_response(raw, PROJECTS)
 
     def test_parses_bare_array_after_label_on_previous_line(self):
         raw = (
@@ -120,6 +133,15 @@ class LlmOutputTests(unittest.TestCase):
         # an unsafe value never reaches the filesystem: it is coerced, not trusted
         proposals = llm_output.parse(raw, ["../escaped"])
         self.assertEqual(proposals[0].project, "_unknown")
+
+    def test_known_rich_project_id_is_preserved_as_metadata(self):
+        raw = (
+            '[{"title":"a","artifact_kind":"report",'
+            '"project":"github.com/hamanpaul/serialwrap","tags":[],"body":"b",'
+            '"source_fragment_indices":[0],"relations":[]}]'
+        )
+        proposals = llm_output.parse(raw, ["github.com/hamanpaul/serialwrap"])
+        self.assertEqual(proposals[0].project, "github.com/hamanpaul/serialwrap")
 
     def test_empty_body_raises(self):
         raw = (
@@ -202,16 +224,15 @@ class LlmOutputTests(unittest.TestCase):
         proposals = llm_output.parse(raw, PROJECTS)
         self.assertEqual(len(proposals), 1)
 
-    def test_duplicate_title_drops_later_keeps_first(self):
+    def test_duplicate_title_fails_entire_response(self):
         raw = (
             '[{"title":"dup","artifact_kind":"report","project":"paulshaclaw","tags":[],"body":"b1",'
             '"source_fragment_indices":[0],"relations":[]},'
             '{"title":"dup","artifact_kind":"report","project":"paulshaclaw","tags":[],"body":"b2",'
             '"source_fragment_indices":[1],"relations":[]}]'
         )
-        proposals = llm_output.parse(raw, PROJECTS)
-        self.assertEqual(len(proposals), 1)
-        self.assertEqual(proposals[0].body, "b1")
+        with self.assertRaisesRegex(llm_output.LlmOutputError, "duplicate title"):
+            llm_output.parse(raw, PROJECTS)
 
     def test_non_list_fields_raise(self):
         raw = (
@@ -376,15 +397,15 @@ class LlmOutputLenientTests(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0].project, "_unknown")
 
-    def test_hard_error_proposal_skipped_others_survive(self):
+    def test_hard_error_proposal_fails_entire_response(self):
         raw = (
             '[{"title":"good","artifact_kind":"report","project":"paulshaclaw","tags":[],"body":"b1",'
             '"source_fragment_indices":[0],"relations":[]},'
             '{"title":"bad","artifact_kind":"banana","project":"paulshaclaw","tags":[],"body":"b2",'
             '"source_fragment_indices":[1],"relations":[]}]'
         )
-        proposals = llm_output.parse(raw, PROJECTS)
-        self.assertEqual([p.title for p in proposals], ["good"])
+        with self.assertRaisesRegex(llm_output.LlmOutputError, "invalid artifact_kind"):
+            llm_output.parse(raw, PROJECTS)
 
     def test_all_proposals_dropped_raises(self):
         raw = (

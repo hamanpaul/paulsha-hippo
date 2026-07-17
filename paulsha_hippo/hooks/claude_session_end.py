@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 TOOL = "claude-code"
@@ -87,6 +88,8 @@ def main() -> int:
         queue_payload = dict(payload)
         queue_payload["tool"] = TOOL
         queue_payload["capture_scope"] = "session_end"
+        capture_id = uuid.uuid4().hex
+        queue_payload["capture_id"] = capture_id
         # ended_at: prefer explicit field, else timestamp
         if not queue_payload.get("ended_at"):
             ts = queue_payload.get("timestamp")
@@ -96,7 +99,7 @@ def main() -> int:
         queue_dir = root / "runtime" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{TOOL}__{_sanitize_id(session_id)}.json"
+        filename = f"{TOOL}__{_sanitize_id(session_id)}__{capture_id}.json"
         queue_path = queue_dir / filename
         tmp_path = queue_dir / f".{filename}.tmp"
         tmp_path.write_text(

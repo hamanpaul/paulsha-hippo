@@ -695,12 +695,13 @@ def _dream_timer_active() -> bool:
 
 def run_dream_supervise(*, interval: int, extra_argv: list[str] | None = None,
                         once: bool = False, runner=None,
-                        timer_active=_dream_timer_active) -> int:
+                        timer_active=None) -> int:
     """前景常駐：每 interval 秒跑一次 dream run --require-idle。
 
     systemd dream timer 已接管時讓位（避免雙跑）；首輪延後一個 interval。
     """
-    if timer_active():
+    timer_probe = timer_active or _dream_timer_active
+    if timer_probe():
         print("systemd dream timer 已接管；supervise 讓位（不啟動前景 loop）")
         return 0
     from paulsha_hippo import cli as hippo_cli

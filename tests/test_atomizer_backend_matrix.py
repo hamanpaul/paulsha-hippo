@@ -32,7 +32,7 @@ def _seed(root: Path) -> None:
     shutil.copyfile(RAW_FIXTURE, raw)
 
 
-def _write_override(root: Path, agent_script: str, *, timeout_seconds: int = 30) -> Path:
+def _write_override(root: Path, agent_script: str, *, timeout_seconds: int = 300) -> Path:
     projects = root / "projects.yaml"
     projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
     override = root / "atomizer.override.yaml"
@@ -70,16 +70,15 @@ def _cache_json_files(root: Path) -> list[Path]:
 
 
 class ProseWrappedJsonTests(unittest.TestCase):
-    def test_prose_wrapped_json_promotes(self):
+    def test_prose_wrapped_json_is_parked_invalid_output(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
             override = _write_override(root, "prose-agent.py")
             rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
-            self.assertEqual(processing.state_of(root, SESSION_KEY), "promoted")
-            slices = sorted((root / "knowledge" / "paulshaclaw").rglob("*.md"))
-            self.assertGreaterEqual(len(slices), 1)
+            self.assertEqual(processing.state_of(root, SESSION_KEY), "parked")
+            self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
 
 
 class TruncatedOutputTests(unittest.TestCase):
@@ -92,18 +91,10 @@ class TruncatedOutputTests(unittest.TestCase):
             rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
             state = processing.state_of(root, SESSION_KEY)
-            self.assertIn(state, {"split", "parked"})
+            self.assertEqual(state, "parked")
             self.assertIn("llm promote failed", out)
             # 毒快取即時淘汰（spec §3.1.1 invalid output：先淘汰快取再重試）
             self.assertEqual(_cache_json_files(root), [])
-
-            for round_no in range(1, 9):
-                if state == "parked":
-                    break
-                rc, out = _atomize(root, override, f"2026-07-10T{round_no:02d}:00:00Z")
-                self.assertEqual(rc, 0)
-                state = processing.state_of(root, SESSION_KEY)
-            self.assertEqual(state, "parked")
 
             event = processing.fold_events(root)[SESSION_KEY]
             self.assertEqual(event["failure_category"], "invalid_output")
@@ -136,21 +127,21 @@ class NonZeroExitTests(unittest.TestCase):
             override = _write_override(root, "failing-agent.py")
             rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
-            self.assertEqual(processing.state_of(root, SESSION_KEY), "split")
+            self.assertEqual(processing.state_of(root, SESSION_KEY), "parked")
             self.assertIn("exited with code 3", out)
             self.assertEqual(_cache_json_files(root), [])
 
 
 class TimeoutTests(unittest.TestCase):
-    def test_timeout_is_transient_no_cache_written(self):
+    def test_timeout_override_cannot_weaken_fixed_300_second_contract(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
             override = _write_override(root, "hanging-agent.py", timeout_seconds=1)
             rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
-            self.assertEqual(rc, 0)
-            self.assertEqual(processing.state_of(root, SESSION_KEY), "split")
-            self.assertIn("timed out after 1s", out)
+            self.assertEqual(rc, 1)
+            self.assertIsNone(processing.state_of(root, SESSION_KEY))
+            self.assertIn("timeout_seconds is fixed at 300", out)
             self.assertEqual(_cache_json_files(root), [])
 
 

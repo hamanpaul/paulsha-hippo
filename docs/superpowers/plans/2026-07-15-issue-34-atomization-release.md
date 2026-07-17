@@ -69,6 +69,11 @@ Fix ordering therefore是：先恢復 CI/test truth與資料契約，再 canonic
 | 7 | malformed inbox 重複 warning/backlog 誤算 | durable quarantine；raw/split/retrying/parked/quarantine census | 同一 poison 只隔離一次，後續 run 不重複 warning |
 | 8 | Copilot ingress 斷鏈 | 同時支援 current `session-state/<sid>/events.jsonl` 與 legacy layout；重裝 hooks | 真 Copilot hook → import → atom；不可只用舊 fixture |
 | 9 | legacy per-session locks | 先 attested hook upgrade，再 cleanup；不重寫 shard-lock | cleanup before/after manifest，後續無新 legacy lock |
+| 10 | assistant outcome 截斷/遺漏 | `assistant_messages[]` 完整有序保留，last non-empty 映射 `assistant_summary` | Claude/Codex/Copilot multi-output 與 >2,000 字 fixtures |
+| 11 | capture/hash 誤去重 | `capture_id`、`parent_session_id`、完整 semantic hash、title-input hash | retry/capture/content/key-order matrix |
+| 12 | 32K session 整批超限 | 12K input + 2K output + 48 KiB gate，ordered chunking 與 fragment coverage | 32,767/32,768/32,769 與 ~53K corpus |
+| 13 | `promoted, slices=0` | canonical disposition wrapper 與 terminal `no-findings` | empty/noise/invalid/no-findings matrix，zero-slice promoted = 0 |
+| 14 | backfill 不可重啟/回滾 | `hippo recovery plan|apply|resume|rollback` hash-pinned journal | commit-point fault injection + byte-equivalent resume/rollback |
 
 所有 implementation/release PR 若引用 `#34` 都先使用白名單 `policy-exempt:issue-link`，理由為「umbrella issue 保留至 tag + live consumer evidence」，不可發明新 exemption label。`v0.1.1` producer artifact 可在 auto-consumption capability 降級後發布；只有 tag、九項 evidence 與真 offered → Read 都完成時，才以 evidence comment 關閉 Issue #34。
 
@@ -758,3 +763,17 @@ Final evidence bundle must contain sanitized, reproducible references to:
 - Issue #34 rows 1–9 mapped to the above evidence.
 
 Completion means the published `v0.1.1` artifact—not a source checkout—has passed these gates. A running timer, exit code 0, a newly written markdown file, or a `promoted` ledger row alone is insufficient.
+
+---
+
+## 15. 2026-07-16 資料保全與 32K Gemma 實作 addendum
+
+本 addendum 對前述 wave 提供更嚴格、優先適用的契約：
+
+1. `NormalizedSession` 保留 `session_title`、完整有序 `assistant_messages[]`、最後非空的相容 `assistant_summary`、每 capture 唯一 `capture_id`與只在有 source evidence 時存在的 `parent_session_id`。
+2. Raw archive 維持 byte-preserved；title、inbox、Gemma 與 index 在 derived boundary 做欄位級 fail-closed sanitizer。Idempotency 使用 `tool:session_id:capture_id`，並以含 prompts/outcomes/files/artifacts/scope/parent 的 semantic hash 排除真正重複 capture；有可比較 timestamp 時，晚到的舊 capture 只 archive/ledger，不覆蓋較新的 canonical inbox。
+3. Gemma 預算固定 32,768 context、12,000 estimated input、2,048 output、48 KiB argv、300s/chunk、2 attempts、parallelism 1 與 zero tools。Fixed prompt 成本先扣，fragment 原順序打包，過大 fragment 以 exact source spans + `part n/m` 穩定分割，串接後 byte-for-byte 等於原文，禁止截尾。
+4. Canonical response 是 `schema_version/disposition/reason/findings` wrapper。相容期只收非空 legacy array；空 array/wrapper/stdout、noise、錯誤類型與未知欄位均 invalid，任一 finding 無效即整份失敗而非局部 salvage；source project 已知時禁止模型 re-home。`promoted` 需要至少一張 accepted slice；全 chunks 明確 `no_findings` 才記 terminal `no-findings`。Parked evidence 只留失敗 metadata 與 stdout bytes/hash，不保存可能回顯 private prompt 的原始 stdout。
+5. Recovery 只讀 frozen archive 與可 pin transcript，預設 batch 5。Plan 固定 code/config/registry/source hashes；apply/resume/rollback 以完整 batch membership、staging/preimage/replace-intent journal/fsync/replace 執行，拒絕 target drift，rollback 只補償本 batch且可再 apply，不改寫舊 JSONL。Recovered importer artifact 帶 no-replay marker，與 LLM replay 分離，不盲跑 promoted sessions。
+
+實作順序固定為：先更新 OpenSpec/traceability/contract RED tests，再修 importer，接著 bounded atomizer，然後 recovery CLI，最後才執行同 commit/wheel 的 install、upgrade、rollback 與三輪 canary gates。未全綠之前不得 release。
