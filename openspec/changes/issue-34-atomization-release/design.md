@@ -105,7 +105,7 @@ Canonical Gemma/Copilot argv 必須明確含有 `--available-tools=none --disabl
 
 ### 13. Recovery 以 frozen sources 與 hash pins 為邊界
 
-`hippo recovery plan|apply|resume|rollback` 只允許使用 frozen `archive/queue/**/*.json` 與其可驗證 transcript pointer。Plan 固定 code/config/registry/source hashes，列出 winner、舊新路徑/hash、decision 與預計 ledger delta。Apply 先寫 same-filesystem staging 與 preimage，以 journal、`fsync` 與 `os.replace` 逐項提交；resume 前重新驗證全部 pins，rollback 只補償本批已提交變更，永不 rewrite 舊 JSONL。Importer recovery 與 LLM replay 分離，預設 batch size 5，不盲目重跑既有 promoted sessions。只有 source/project/canonical title 相同且 body hash 改變時才自動建立 `supersedes`，否則並列並留給人工審核。
+`hippo recovery plan|apply|resume|rollback` 只允許使用 frozen `archive/queue/**/*.json` 與其可驗證 transcript pointer。Plan 時把 transcript bytes 凍結到 transaction root，重抽與 apply/resume 只使用並驗證該 snapshot hash；外部仍在追加的 live transcript 不會讓既定 plan 漂移，也不會改變 planned artifact。Plan 固定 code/config/registry/source/transcript-snapshot hashes，列出 winner、舊新路徑/hash、decision 與預計 ledger delta。Apply 先寫 same-filesystem staging 與 preimage，以 journal、`fsync` 與 `os.replace` 逐項提交；resume 前重新驗證全部 pins，rollback 只補償本批已提交變更，永不 rewrite 舊 JSONL。Importer recovery 與 LLM replay 分離，預設 batch size 5，不盲目重跑既有 promoted sessions。只有 source/project/canonical title 相同且 body hash 改變時才自動建立 `supersedes`，否則並列並留給人工審核。
 
 ## Parallelization and Merge Topology
 

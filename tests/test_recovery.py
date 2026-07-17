@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,43 @@ def _plan(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return recovery.create_plan(root, batch_size=5)
 
 
+def _seed_live_transcript_source(root: Path) -> tuple[Path, Path]:
+    transcript = root / "live-transcript.jsonl"
+    transcript.write_text(
+        '\n'.join(
+            [
+                json.dumps({"type": "user", "message": {"content": "repair this"}}),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": "frozen outcome"}]
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    source = root / "archive" / "queue" / "2026-07" / "claude__live.json"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        json.dumps(
+            {
+                "tool": "claude",
+                "session_id": "live",
+                "capture_scope": "session_end",
+                "cwd": "/repo",
+                "transcript_path": str(transcript),
+                "ended_at": "2026-07-16T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source, transcript
+
+
 def test_plan_accounts_all_raw_and_keeps_llm_replay_separate(tmp_path, monkeypatch):
     _seed_source(tmp_path, session_id="same", summary="older")
     second = tmp_path / "archive" / "queue" / "2026-07" / "claude__same__new.json"
@@ -63,6 +101,49 @@ def test_plan_accounts_all_raw_and_keeps_llm_replay_separate(tmp_path, monkeypat
     assert sum(entry.get("decision") == "importer-recover" for entry in manifest["entries"]) == 1
     assert sum(entry.get("decision") == "superseded-source" for entry in manifest["entries"]) == 1
     assert all(entry["expected_ledger_delta"]["historical_jsonl"] == 0 for entry in manifest["entries"])
+
+
+def test_live_transcript_is_frozen_at_plan_and_may_continue_afterward(tmp_path, monkeypatch):
+    source, transcript = _seed_live_transcript_source(tmp_path)
+    manifest_path = _plan(tmp_path, monkeypatch)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    winner = next(entry for entry in manifest["entries"] if entry.get("winner"))
+    snapshot = Path(winner["transcript"]["snapshot_path"])
+
+    assert snapshot.is_file()
+    assert winner["transcript"]["sha256"] == sha256(snapshot.read_bytes()).hexdigest()
+    assert winner["capture_id"] == sha256(source.read_bytes()).hexdigest()
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "late outcome"}]},
+                }
+            )
+            + "\n"
+        )
+
+    result = recovery.apply_plan(manifest_path)
+    recovered = Path(winner["inbox_path"]).read_text(encoding="utf-8")
+    assert result["committed"] == 1
+    assert "frozen outcome" in recovered
+    assert "late outcome" not in recovered
+    assert str(source) in recovered
+
+
+def test_apply_rejects_frozen_transcript_snapshot_drift(tmp_path, monkeypatch):
+    _seed_live_transcript_source(tmp_path)
+    manifest_path = _plan(tmp_path, monkeypatch)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    winner = next(entry for entry in manifest["entries"] if entry.get("winner"))
+    snapshot = Path(winner["transcript"]["snapshot_path"])
+    snapshot.write_bytes(b"tampered\n")
+
+    with pytest.raises(recovery.RecoveryError, match="transcript snapshot drift"):
+        recovery.apply_plan(manifest_path)
+    assert not list((tmp_path / "inbox").rglob("*.md"))
 
 
 def test_recovery_apply_does_not_implicitly_replay_promoted_session(tmp_path, monkeypatch):

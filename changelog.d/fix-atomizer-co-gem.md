@@ -9,3 +9,4 @@
 - canonical inbox 只接受有 timestamp 證據的新 capture 前進；晚到的舊 capture 仍 archive/ledger，但不覆蓋較新的 session。
 - CI 改用 `find` 偵測 tests、不再吞安裝失敗，並新增 wheel clean-install smoke。
 - 移除受版控的 stale `build/lib` mirror，setuptools 改用隔離且 forced 的 build base；installed hooks 直接綁定目前 wheel/pipx interpreter，CI clean-install smoke 會實跑 `install hooks` 與 `doctor`，避免新 CLI 混入舊 module。
+- Recovery plan 會把 verified transcript 凍結到 transaction root，重抽與 apply/resume 只驗 hash-pinned snapshot；外部仍在追加的 live transcript 不再讓整份 manifest 永久 drift，legacy capture ID 仍由原始 archive bytes 衍生。

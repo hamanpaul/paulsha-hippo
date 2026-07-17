@@ -9,6 +9,7 @@ extraction existed. Dead transcript pointers yield empty content (skipped gracef
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +33,17 @@ def prepare_reextract(
     root: Path,
     *,
     allow_title_backend: bool = True,
+    raw_payload_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build one sanitized importer recovery candidate without mutating memory."""
     result = _extract(payload_path)
+    source_payload = raw_payload_path or payload_path
+    explicit_capture_id = result.raw_payload.get("capture_id")
+    if not isinstance(explicit_capture_id, str) or not explicit_capture_id:
+        # Recovery may extract through a rewritten payload that points at a frozen
+        # transcript snapshot.  Legacy capture identity must still derive from the
+        # original byte-preserved raw archive, never from that transaction-local copy.
+        result.session["capture_id"] = sha256(source_payload.read_bytes()).hexdigest()
     title_kwargs = {} if allow_title_backend else {"runner": _offline_title_runner}
     session = title.apply(
         sanitize_session(dict(result.session)), memory_root=root, **title_kwargs
@@ -56,7 +65,7 @@ def prepare_reextract(
         memory_root=str(root),
     )
     inbox_path = root / "inbox" / bucket / session["tool"] / day / f"{safe_key(session['session_id'])}.md"
-    session["raw_payload_pointer"] = str(payload_path)
+    session["raw_payload_pointer"] = str(source_payload)
     provenance_repo = normalize_remote(_git.git_remote(_git.git_toplevel(session.get("cwd")))) or "_unknown"
     rendered = render_markdown(
         session,

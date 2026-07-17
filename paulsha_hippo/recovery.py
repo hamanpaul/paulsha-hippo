@@ -102,7 +102,12 @@ def _archive_sources(memory_root: Path) -> list[Path]:
     return result
 
 
-def _transcript_pin(payload_path: Path) -> dict[str, Any] | None:
+def _transcript_pin(
+    payload_path: Path,
+    *,
+    snapshot_root: Path | None = None,
+    cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     try:
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -122,7 +127,45 @@ def _transcript_pin(payload_path: Path) -> dict[str, Any] | None:
     transcript = Path(pointer).expanduser()
     if not transcript.is_file():
         return {"path": str(transcript), "status": "missing", "sha256": None}
-    return {"path": str(transcript.resolve()), "status": "verified", "sha256": _sha_path(transcript)}
+    resolved = str(transcript.resolve())
+    if cache is not None and resolved in cache:
+        return dict(cache[resolved])
+    frozen = transcript.read_bytes()
+    digest = _sha_bytes(frozen)
+    pin = {
+        "path": resolved,
+        "status": "verified",
+        "sha256": digest,
+    }
+    if snapshot_root is not None:
+        snapshot_path = snapshot_root / f"{digest}.bin"
+        if not snapshot_path.is_file():
+            _write_fsync(snapshot_path, frozen)
+        pin["snapshot_path"] = str(snapshot_path.resolve())
+    if cache is not None:
+        cache[resolved] = dict(pin)
+    return pin
+
+
+def _extraction_payload(row: dict[str, Any], recovery_root: Path) -> Path:
+    """Return the raw source or a transaction-local copy pointed at a frozen transcript."""
+    source = Path(str(row["source"]))
+    transcript = row.get("transcript")
+    if not isinstance(transcript, dict) or transcript.get("status") != "verified":
+        return source
+    snapshot = Path(str(transcript.get("snapshot_path") or ""))
+    if not snapshot.is_file() or _sha_path(snapshot) != transcript.get("sha256"):
+        raise RecoveryError(f"transcript snapshot drift during planning: {snapshot}")
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RecoveryError(f"archive payload is not an object: {source}")
+    payload["transcript_path"] = str(snapshot)
+    extraction_source = recovery_root / "extraction-sources" / f"{row['source_hash']}.json"
+    _write_fsync(
+        extraction_source,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n",
+    )
+    return extraction_source
 
 
 def _canary(payload: bytes) -> tuple[int, str | None]:
@@ -203,20 +246,31 @@ def create_plan(
             "source_hash": _sha_path(source),
             "source_bytes": source.stat().st_size,
             "source_set": "baseline" if source in baseline_sources else "ingress-drift",
-            "transcript": _transcript_pin(source),
+            "transcript": None,
         }
         for source in sources
     ]
     preliminary_id = _sha_bytes(_canonical([(row["source"], row["source_hash"]) for row in source_rows]))[:16]
     recovery_root = root / "runtime" / "recovery" / preliminary_id
     planned_root = recovery_root / "planned"
+    transcript_cache: dict[str, dict[str, Any]] = {}
+    for row in source_rows:
+        row["transcript"] = _transcript_pin(
+            Path(str(row["source"])),
+            snapshot_root=recovery_root / "transcripts",
+            cache=transcript_cache,
+        )
     candidates: list[dict[str, Any]] = []
     source_by_path = {row["source"]: row for row in source_rows}
     for source in sources:
         row = source_by_path[str(source)]
         try:
+            extraction_source = _extraction_payload(row, recovery_root)
             candidate = backfill.prepare_reextract(
-                source, root, allow_title_backend=False
+                extraction_source,
+                root,
+                allow_title_backend=False,
+                raw_payload_path=source,
             )
             rendered = str(candidate.pop("rendered")).encode("utf-8")
             candidate.update(row)
@@ -375,9 +429,11 @@ def _verify_pins(manifest: dict[str, Any]) -> Path:
         source_rows.append({"source": str(source), "source_hash": expected})
         transcript = entry.get("transcript")
         if isinstance(transcript, dict) and transcript.get("status") == "verified":
-            pointer = Path(str(transcript["path"]))
-            if not pointer.is_file() or _sha_path(pointer) != transcript.get("sha256"):
-                raise RecoveryError(f"transcript pin drift: {pointer}")
+            snapshot = Path(str(transcript.get("snapshot_path") or "")).resolve()
+            if not snapshot.is_relative_to(transaction_root / "transcripts"):
+                raise RecoveryError(f"transcript snapshot escapes transaction: {snapshot}")
+            if not snapshot.is_file() or _sha_path(snapshot) != transcript.get("sha256"):
+                raise RecoveryError(f"transcript snapshot drift: {snapshot}")
         if entry.get("decision") == "importer-recover":
             target = Path(str(entry.get("inbox_path") or "")).resolve()
             artifact = Path(str(entry.get("planned_artifact") or "")).resolve()
