@@ -97,9 +97,9 @@ Hermetic tests 可使用 fake backend 驗 deterministic contract，但 release g
 
 Atomizer 在任何 visible write 前先驗證全批 proposals，將 atoms 寫入 same-filesystem staging 並 fsync，append `publish_prepare` journal（target/checksum/relations），再 materialize targets。新 schema atoms 只有在 transaction commit marker 存在時才對 MOC/index eligible；中途 crash 留下的 targets 因此不會被檢索。下次 run 在新 work 前先依 journal idempotently finish 或 rollback，relation edges 以 publication ID 去重，最後才 append `promoted` commit record。Dream 把 `run_id` 傳入 atomizer，atomizer 回傳/persist 精確 `produced_slice_ids` 供 run-level metadata/FTS reconciliation。
 
-### 12. 32K Gemma 使用 bounded sequential chunks
+### 12. 最低 32K provider context 下使用 bounded sequential chunks
 
-Distiller 有效 context 固定為 32,768 tokens，但每 chunk 只允許 12,000 estimated input tokens（另有 10% safety margin）與 2,048 output tokens，且實際 prompt argv UTF-8 不得超過 48 KiB。固定 prompt 成本先計入 skill、schema 與 registry，剩餘空間按原 fragment 順序打包。單一 fragment 過大時先依段落穩定分割並標示 `part n/m`；不得截尾或遺漏任何字元。Chunks 依序以 parallelism 1 執行，每 chunk timeout 300 秒、最多 2 次嘗試，結果先進 staging；全部成功後才做決定性 local dedup 與 per-session atomic publication，不另呼叫 reducer。任一 budget gate 無法滿足時以 `context_budget_exceeded` fail closed。
+Distiller 有效 provider context 必須至少為 32,768 tokens；32,768 是預設與最低支援的地端基準。即使 operator 宣告更大的 context，每 chunk 仍只允許固定的 12,000 estimated input tokens（另有 10% safety margin）與 2,048 output tokens，且實際 prompt argv UTF-8 不得超過 48 KiB。固定 prompt 成本先計入 skill、schema 與 registry，剩餘空間按原 fragment 順序打包。單一 fragment 過大時先依段落穩定分割並標示 `part n/m`；不得截尾或遺漏任何字元。Chunks 依序以 parallelism 1 執行，每 chunk timeout 300 秒、最多 2 次嘗試，結果先進 staging；全部成功後才做決定性 local dedup 與 per-session atomic publication，不另呼叫 reducer。任一 budget gate 無法滿足時以 `context_budget_exceeded` fail closed。
 
 Canonical Gemma/Copilot argv 必須明確含有 `--available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export`，不得在失敗時靜默改回六工具 profile。Canonical response 為 `{"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}`。相容窗只接受非空 legacy array；空 array、空 wrapper、錯誤型別、噪音或未知欄位都是 invalid output。`no_findings` 必須有非空理由，並以獨立 terminal `no-findings` 狀態結案；`promoted` 必須 `accepted_slices >= 1`。
 

@@ -5,7 +5,11 @@ import json
 import pytest
 
 from paulsha_hippo.atomizer import budget, llm_output
-from paulsha_hippo.atomizer.config import AtomizerConfig, DEFAULT_AGENT_EXEC_COMMAND
+from paulsha_hippo.atomizer.config import (
+    MIN_CONTEXT_WINDOW as CONFIG_MIN_CONTEXT_WINDOW,
+    AtomizerConfig,
+    DEFAULT_AGENT_EXEC_COMMAND,
+)
 from paulsha_hippo.atomizer.splitter import Fragment
 
 
@@ -87,9 +91,25 @@ def test_non_empty_legacy_array_is_temporarily_accepted():
 
 
 def test_provider_context_boundary():
+    assert budget.CONTEXT_WINDOW == budget.MIN_CONTEXT_WINDOW
+    assert CONFIG_MIN_CONTEXT_WINDOW == budget.MIN_CONTEXT_WINDOW
     assert budget.provider_context_supported(32767) is False
     assert budget.provider_context_supported(32768) is True
     assert budget.provider_context_supported(32769) is True
+    assert budget.provider_context_supported(262144) is True
+
+
+def test_pack_prompt_chunks_rejects_provider_context_below_minimum():
+    with pytest.raises(
+        budget.ContextBudgetExceeded,
+        match=r"provider context 32767 < minimum 32768",
+    ):
+        budget.pack_prompt_chunks(
+            skill_text="skill contract",
+            fragments=[_fragment(0, "body")],
+            known_projects=["paulsha-hippo"],
+            context_window=32767,
+        )
 
 
 def test_large_fragments_are_fully_covered_by_ordered_bounded_chunks():
@@ -114,6 +134,31 @@ def test_large_fragments_are_fully_covered_by_ordered_bounded_chunks():
     assert all("part " in chunk.prompt for chunk in chunks)
 
 
+def test_larger_provider_context_does_not_widen_prompt_chunk_gates():
+    source = "\n\n".join(
+        f"paragraph-{index:04d} " + ("x" * 180) for index in range(1200)
+    )
+    kwargs = {
+        "skill_text": "skill contract",
+        "fragments": [_fragment(0, source)],
+        "known_projects": ["paulsha-hippo"],
+    }
+
+    chunks_32k = budget.pack_prompt_chunks(**kwargs, context_window=32768)
+    chunks_256k = budget.pack_prompt_chunks(**kwargs, context_window=262144)
+
+    assert chunks_256k == chunks_32k
+    assert all(chunk.estimated_tokens <= budget.SAFE_INPUT_TOKENS for chunk in chunks_256k)
+    assert all(
+        len(chunk.prompt.encode("utf-8")) <= budget.MAX_PROMPT_ARGV_BYTES
+        for chunk in chunks_256k
+    )
+    reconstructed = "".join(
+        part.body for chunk in chunks_256k for part in chunk.parts
+    )
+    assert reconstructed == source
+
+
 def test_oversized_fragment_preserves_all_whitespace_byte_for_byte():
     source = ("leading\n\n\n\nparagraph\n\n" + ("x" * 60000) + "\n\n\ntrailing\n")
 
@@ -129,7 +174,7 @@ def test_oversized_fragment_preserves_all_whitespace_byte_for_byte():
     assert reconstructed == source
 
 
-def test_atomizer_config_contract_is_fixed():
+def test_atomizer_bounded_defaults_and_fixed_safety_gates():
     cfg = AtomizerConfig(
         schema_version="1",
         boundary_patterns=(),

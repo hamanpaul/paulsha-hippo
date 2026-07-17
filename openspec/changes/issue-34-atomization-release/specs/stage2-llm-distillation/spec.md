@@ -50,9 +50,9 @@ The importer SHALL represent the generated session title separately from all ada
 - **WHEN** two snapshots share tool and session ID but have different capture IDs or different ordered semantic content
 - **THEN** both raw snapshots SHALL be archived and the newer semantic content SHALL not be discarded by a coarse completeness comparison; when both snapshots carry comparable capture timestamps, an older late-arriving snapshot SHALL NOT replace the newer canonical inbox artifact
 
-### Requirement: Bounded 32K zero-tool distillation
+### Requirement: Bounded zero-tool distillation with a 32K minimum provider context
 
-The canonical Gemma distiller SHALL use a 32,768-token provider context with at most 12,000 deterministically estimated input tokens, 2,048 output tokens, a 10 percent input safety margin, and an independent 48 KiB UTF-8 prompt-argv gate. Fixed skill, schema, and project-registry prompt content SHALL be charged before session fragments. Fragments SHALL be packed in source order; an oversized individual fragment SHALL be split deterministically at paragraph boundaries, labeled `part n/m`, and fully covered without tail truncation. Chunks SHALL execute sequentially with parallelism one, a 300-second timeout, and at most two attempts per chunk. All chunk outputs SHALL remain staged until every chunk succeeds; the system SHALL use only deterministic local deduplication and MUST NOT invoke a reducer model. A budget that cannot be satisfied SHALL fail closed as `context_budget_exceeded`.
+The canonical Gemma distiller SHALL require a provider context of at least 32,768 tokens, while retaining fixed limits of at most 12,000 deterministically estimated input tokens, 2,048 output tokens, a 10 percent input safety margin, and an independent 48 KiB UTF-8 prompt-argv gate. A larger provider context MUST NOT raise these fixed execution limits. Fixed skill, schema, and project-registry prompt content SHALL be charged before session fragments. Fragments SHALL be packed in source order; an oversized individual fragment SHALL be split deterministically at paragraph boundaries, labeled `part n/m`, and fully covered without tail truncation. Chunks SHALL execute sequentially with parallelism one, a 300-second timeout, and at most two attempts per chunk. All chunk outputs SHALL remain staged until every chunk succeeds; the system SHALL use only deterministic local deduplication and MUST NOT invoke a reducer model. A budget that cannot be satisfied SHALL fail closed as `context_budget_exceeded`.
 
 The zero-tool command profile SHALL explicitly include `--available-tools=none`, `--disable-builtin-mcps`, `--no-custom-instructions`, `--no-ask-user`, `--no-remote`, and `--no-remote-export`; failure MUST NOT silently fall back to a tool-enabled profile.
 
@@ -61,7 +61,7 @@ The zero-tool command profile SHALL explicitly include `--available-tools=none`,
 - **THEN** the atomizer SHALL produce multiple ordered prompts whose fragment-part coverage is complete and non-overlapping, each within both token and argv budgets
 
 #### Scenario: Provider boundary is explicit
-- **WHEN** effective provider context is 32,767, 32,768, or 32,769 tokens
+- **WHEN** operator-declared provider context is 32,767, 32,768, 32,769, or 262,144 tokens
 - **THEN** only values at least 32,768 satisfy the provider gate and all accepted prompts still satisfy the stricter 12,000-token and 48 KiB gates
 
 ### Requirement: Explicit canonical LLM disposition

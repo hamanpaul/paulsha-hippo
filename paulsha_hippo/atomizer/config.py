@@ -11,6 +11,8 @@ from typing import Any
 
 from paulsha_hippo import paths
 
+from .limits import MIN_CONTEXT_WINDOW
+
 # Default config directory is package location
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +25,7 @@ DEFAULT_AGENT_EXEC_TIMEOUT = 300
 DEFAULT_AGENT_EXEC_MODEL = "gem"
 DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_AGENT_EXEC_UPSTREAM_URL = "http://127.0.0.1:8080"
-DEFAULT_CONTEXT_WINDOW = 32768
+DEFAULT_CONTEXT_WINDOW = MIN_CONTEXT_WINDOW
 DEFAULT_MAX_INPUT_TOKENS = 12000
 DEFAULT_MAX_PROMPT_ARGV_BYTES = 48 * 1024
 DEFAULT_CHUNK_RETRIES = 2
@@ -390,6 +392,11 @@ def load_config(
     context_window = _parse_positive_int(
         config_data.get("context_window", DEFAULT_CONTEXT_WINDOW), "context_window"
     )
+    if context_window < MIN_CONTEXT_WINDOW:
+        raise AtomizerConfigError(
+            "context_window must be at least "
+            f"{MIN_CONTEXT_WINDOW}, got {context_window}"
+        )
     max_input_tokens = _parse_positive_int(
         config_data.get("max_input_tokens", DEFAULT_MAX_INPUT_TOKENS), "max_input_tokens"
     )
@@ -404,7 +411,6 @@ def load_config(
         config_data.get("parallelism", DEFAULT_PARALLELISM), "parallelism"
     )
     fixed_values = {
-        "context_window": (context_window, DEFAULT_CONTEXT_WINDOW),
         "max_input_tokens": (max_input_tokens, DEFAULT_MAX_INPUT_TOKENS),
         "max_prompt_argv_bytes": (max_prompt_argv_bytes, DEFAULT_MAX_PROMPT_ARGV_BYTES),
         "chunk_retries": (chunk_retries, DEFAULT_CHUNK_RETRIES),

@@ -30,7 +30,7 @@
 - 新增 `docs/backend-matrix.md`（preset argv 契約／probe／前置條件／實測狀態／unavailable 升級前提與 gemini rc=41 證據）；README backend 段同步（R-18）。
 
 ### Changed
-- Issue #34 原子化資料保全：importer 分離 title/full outcomes 並以 capture+semantic hash 去重；Gemma 固定 32K/12K/48 KiB/zero-tool bounded chunks；只有明確 `no_findings` 可零 slice 結案，`promoted` 必須至少一個 accepted slice。
+- Issue #34 原子化資料保全：importer 分離 title/full outcomes 並以 capture+semantic hash 去重；Gemma 以 32K 為最低支援地端 context，並維持固定 12K input、2K output、48 KiB argv 與 zero-tool bounded chunks；只有明確 `no_findings` 可零 slice 結案，`promoted` 必須至少一個 accepted slice。
 - 新增 hash-pinned `hippo recovery plan|apply|resume|rollback`、staged publication journal 與可驗證 wheel clean-install CI gate；recovery 預設每批 5 sessions，不自動重播既有 promoted sessions 或改寫舊 JSONL。
 - Canonical LLM response 改為整份 fail-closed、known source project 固定歸屬，parked evidence 不再保存模型 stdout 原文；晚到且有 timestamp 證據的舊 capture 不覆蓋較新的 canonical inbox。
 - wheel 建置移除受版控的 stale `build/lib` mirror 並改用隔離 forced build base；installed hooks 直接使用目前 wheel/pipx interpreter，clean-install CI 會實跑 hooks 與 doctor，避免 CLI/module 混版。

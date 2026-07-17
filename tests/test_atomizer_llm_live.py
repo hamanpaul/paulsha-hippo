@@ -125,10 +125,10 @@ FIXTURE_LEGACY = FIXTURE
 
 @unittest.skipUnless(
     os.environ.get("PSC_ATOMIZE_LIVE"),
-    "set PSC_ATOMIZE_LIVE=1 to enable the real claude-gemma4 atomizer test",
+    "set PSC_ATOMIZE_LIVE=1 to enable the real co-gem zero-tool atomizer test",
 )
 class AtomizerLlmLiveTests(unittest.TestCase):
-    def test_live_llm_atomize_produces_gate_valid_slice(self):
+    def test_live_llm_atomize_with_256k_declaration_produces_gate_valid_slice(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             raw = root / "inbox" / "research" / "claude" / "2026-05-31" / "s1.md"
@@ -137,7 +137,10 @@ class AtomizerLlmLiveTests(unittest.TestCase):
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
             override = root / "atomizer.override.yaml"
-            override.write_text(f'known_projects_file: "{projects}"\n', encoding="utf-8")
+            override.write_text(
+                f'known_projects_file: "{projects}"\ncontext_window: 262144\n',
+                encoding="utf-8",
+            )
 
             rc = cli.main(["atomize",
                     "--memory-root",
@@ -157,6 +160,18 @@ class AtomizerLlmLiveTests(unittest.TestCase):
             for slice_path in slice_paths:
                 result = run_static_gate_check_file(slice_path)
                 self.assertTrue(result.ok, result.errors)
+            print(
+                json.dumps(
+                    {
+                        "smoke": "atomize-live-256k-context-declaration",
+                        "backend": "co-gem-zero-tool",
+                        "declared_context_window": 262144,
+                        "slices": len(slice_paths),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

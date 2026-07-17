@@ -26,6 +26,7 @@ class TestAtomizerConfig(unittest.TestCase):
         self.assertGreater(cfg.max_fragment_chars, 0)
         self.assertIsInstance(cfg.boundary_patterns, tuple)
         self.assertGreater(len(cfg.boundary_patterns), 0)
+        self.assertEqual(cfg.context_window, 32768)
         self.assertEqual(len(hash_value), 64)  # SHA-256 hex digest
 
     def test_override_merges_and_changes_hash(self):
@@ -70,6 +71,91 @@ class TestAtomizerConfig(unittest.TestCase):
         _, hash2 = load_config(override_path=None)
         
         self.assertEqual(hash1, hash2)
+
+    def test_context_window_below_minimum_fails_closed(self):
+        """Provider contexts below the shipped 32K baseline fail at config load."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            override_path = Path(f.name)
+            f.write("context_window: 32767\n")
+
+        try:
+            with self.assertRaisesRegex(
+                AtomizerConfigError,
+                r"context_window must be at least 32768, got 32767",
+            ):
+                load_config(override_path=override_path)
+        finally:
+            override_path.unlink()
+
+    def test_context_window_at_or_above_minimum_is_accepted(self):
+        """Operators may declare larger provider contexts without widening Hippo gates."""
+        for value in (32768, 32769, 262144):
+            with self.subTest(value=value):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                ) as f:
+                    override_path = Path(f.name)
+                    f.write(f"context_window: {value}\n")
+
+                try:
+                    cfg, _ = load_config(override_path=override_path)
+                    self.assertEqual(cfg.context_window, value)
+                finally:
+                    override_path.unlink()
+
+    def test_context_window_remains_in_config_hash(self):
+        """32K and 256K provider declarations remain provenance-distinguishable."""
+        hashes = []
+        for value in (32768, 262144):
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f:
+                override_path = Path(f.name)
+                f.write(f"context_window: {value}\n")
+
+            try:
+                _, hash_value = load_config(override_path=override_path)
+                hashes.append(hash_value)
+            finally:
+                override_path.unlink()
+
+        self.assertNotEqual(*hashes)
+
+    def test_larger_context_declaration_cannot_weaken_fixed_safety_limits(self):
+        """A 256K declaration does not make any execution safety limit tunable."""
+        unsafe_overrides = (
+            ("max_input_tokens: 12001\n", "max_input_tokens is fixed at 12000"),
+            (
+                "max_prompt_argv_bytes: 49153\n",
+                "max_prompt_argv_bytes is fixed at 49152",
+            ),
+            ("chunk_retries: 3\n", "chunk_retries is fixed at 2"),
+            ("parallelism: 2\n", "parallelism is fixed at 1"),
+            (
+                "agent_exec:\n  timeout_seconds: 301\n",
+                "agent_exec.timeout_seconds is fixed at 300",
+            ),
+            (
+                "agent_exec:\n  max_output_tokens: 2049\n",
+                "agent_exec.max_output_tokens is fixed at 2048",
+            ),
+        )
+        for override_body, expected_error in unsafe_overrides:
+            with self.subTest(override_body=override_body):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yaml", delete=False
+                ) as f:
+                    override_path = Path(f.name)
+                    f.write("context_window: 262144\n" + override_body)
+
+                try:
+                    with self.assertRaisesRegex(
+                        AtomizerConfigError,
+                        expected_error,
+                    ):
+                        load_config(override_path=override_path)
+                finally:
+                    override_path.unlink()
 
     def test_bool_as_int_rejected(self):
         """Boolean max_fragment_chars must fail closed instead of becoming 1 or 0."""

@@ -14,7 +14,7 @@
 - [ ] 2.5 Preserve a bounded sanitized stderr excerpt for non-zero agent failures without logging prompt/output/secrets.
 - [ ] 2.6 Add per-session publication journal/commit-marker recovery so a mid-write or mid-edge failure cannot expose partial atoms or duplicate relations.
 - [x] 2.7 Replace coarse importer dedup with `tool:session_id:capture_id` identity plus a normalized semantic hash over ordered prompts/outcomes, files, artifacts, capture scope, and parent ID; include title-input hash in title cache identity and sanitize only derived surfaces.
-- [x] 2.8 Add deterministic 32K/12K/2K/48-KiB chunk budgeting, ordered paragraph splitting, complete fragment coverage, sequential two-attempt execution, and a zero-tool command profile with no fallback.
+- [x] 2.8 Add deterministic minimum-32K provider validation with fixed 12K/2K/48-KiB chunk gates, ordered paragraph splitting, complete fragment coverage, sequential two-attempt execution, and a zero-tool command profile with no fallback.
 - [x] 2.9 Require the canonical disposition wrapper; accept only non-empty legacy arrays during compatibility, map explicit all-chunk `no_findings` to terminal `no-findings`, and prohibit `promoted` with zero accepted slices.
 
 ## 3. Canonicalize configuration and deployed surfaces

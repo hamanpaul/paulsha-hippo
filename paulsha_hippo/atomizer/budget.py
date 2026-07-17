@@ -1,4 +1,4 @@
-"""Deterministic 32K/12K prompt budgeting with complete fragment coverage."""
+"""Deterministic prompt budgeting with a 32K minimum provider context."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import math
 import re
 from dataclasses import dataclass, replace
 
+from .limits import MIN_CONTEXT_WINDOW
 from .splitter import Fragment
 
-CONTEXT_WINDOW = 32_768
+# Backward-compatible alias for callers that imported the original constant.
+CONTEXT_WINDOW = MIN_CONTEXT_WINDOW
 MAX_INPUT_TOKENS = 12_000
 INPUT_SAFETY_MARGIN = 0.10
 SAFE_INPUT_TOKENS = int(MAX_INPUT_TOKENS * (1.0 - INPUT_SAFETY_MARGIN))
@@ -52,7 +54,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def provider_context_supported(context_window: int) -> bool:
-    return context_window >= CONTEXT_WINDOW
+    return context_window >= MIN_CONTEXT_WINDOW
 
 
 def _render(skill_text: str, parts: list[FragmentPart], known_projects: list[str]) -> str:
@@ -192,13 +194,14 @@ def pack_prompt_chunks(
     skill_text: str,
     fragments: list[Fragment],
     known_projects: list[str],
-    context_window: int = CONTEXT_WINDOW,
+    context_window: int = MIN_CONTEXT_WINDOW,
     max_input_tokens: int = MAX_INPUT_TOKENS,
     max_prompt_argv_bytes: int = MAX_PROMPT_ARGV_BYTES,
 ) -> list[PromptChunk]:
     if not provider_context_supported(context_window):
         raise ContextBudgetExceeded(
-            f"context_budget_exceeded: provider context {context_window} < {CONTEXT_WINDOW}"
+            "context_budget_exceeded: provider context "
+            f"{context_window} < minimum {MIN_CONTEXT_WINDOW}"
         )
     if max_input_tokens > MAX_INPUT_TOKENS or max_prompt_argv_bytes > MAX_PROMPT_ARGV_BYTES:
         raise ContextBudgetExceeded("context_budget_exceeded: configured prompt gate exceeds contract")
