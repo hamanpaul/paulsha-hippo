@@ -250,8 +250,12 @@ def create_plan(
         }
         for source in sources
     ]
-    preliminary_id = _sha_bytes(_canonical([(row["source"], row["source_hash"]) for row in source_rows]))[:16]
-    recovery_root = root / "runtime" / "recovery" / preliminary_id
+    # Transaction identity includes every global pin, not only the source set.
+    # A hook-only or config-only candidate change must never overwrite/reuse an
+    # earlier plan's manifest, snapshots, or journal for the same archive census.
+    pins = _pins(root, source_rows)
+    recovery_id = _sha_bytes(_canonical({"pins": pins, "batch_size": batch_size}))[:20]
+    recovery_root = root / "runtime" / "recovery" / recovery_id
     planned_root = recovery_root / "planned"
     transcript_cache: dict[str, dict[str, Any]] = {}
     for row in source_rows:
@@ -375,8 +379,9 @@ def create_plan(
     for candidate in candidates:
         candidate["plan_order"] = order.get(candidate["source_hash"])
 
-    pins = _pins(root, source_rows)
-    recovery_id = _sha_bytes(_canonical({"pins": pins, "batch_size": batch_size}))[:20]
+    final_pins = _pins(root, source_rows)
+    if final_pins != pins:
+        raise RecoveryError("recovery pins drifted while planning; retry from a fresh plan")
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "recovery_id": recovery_id,

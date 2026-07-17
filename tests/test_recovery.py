@@ -194,6 +194,26 @@ def test_plan_separates_frozen_baseline_from_later_ingress_drift(tmp_path, monke
     ]
 
 
+def test_transaction_root_includes_code_pin_and_preserves_prior_journal(tmp_path, monkeypatch):
+    _seed_source(tmp_path)
+    code_hash = {"value": "a" * 64}
+    monkeypatch.setattr(recovery, "_code_hash", lambda: code_hash["value"])
+
+    first_manifest_path = recovery.create_plan(tmp_path, batch_size=5)
+    first_manifest = json.loads(first_manifest_path.read_text(encoding="utf-8"))
+    first_journal = Path(first_manifest["transaction_root"]) / "journal.jsonl"
+    first_journal.write_bytes(b'{"event":"existing"}\n')
+
+    code_hash["value"] = "b" * 64
+    second_manifest_path = recovery.create_plan(tmp_path, batch_size=5)
+    second_manifest = json.loads(second_manifest_path.read_text(encoding="utf-8"))
+
+    assert second_manifest["transaction_root"] != first_manifest["transaction_root"]
+    assert second_manifest_path != first_manifest_path
+    assert first_manifest_path.is_file()
+    assert first_journal.read_bytes() == b'{"event":"existing"}\n'
+
+
 @pytest.mark.parametrize("commit_point", ["begin", "preimage", "staged", "replace", "committed"])
 def test_resume_after_each_commit_point_is_byte_equivalent(tmp_path, monkeypatch, commit_point):
     _seed_source(tmp_path)

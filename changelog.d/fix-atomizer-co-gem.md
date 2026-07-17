@@ -11,3 +11,4 @@
 - 移除受版控的 stale `build/lib` mirror，setuptools 改用隔離且 forced 的 build base；installed hooks 直接綁定目前 wheel/pipx interpreter，CI clean-install smoke 會實跑 `install hooks` 與 `doctor`，避免新 CLI 混入舊 module。
 - Recovery plan 會把 verified transcript 凍結到 transaction root，重抽與 apply/resume 只驗 hash-pinned snapshot；外部仍在追加的 live transcript 不再讓整份 manifest 永久 drift，legacy capture ID 仍由原始 archive bytes 衍生。
 - Installed hook command 顯式傳遞 `HIPPO_HOOK_PYTHON`；SessionEnd／wakeup background importer 在沒有 legacy nested hook venv 時沿用該 wheel/pipx interpreter，修正 queue 寫入後無法自動 ingest 的 installed-only 斷鏈。
+- Recovery transaction root 改由 code/config/registry/source pins 與 batch size 共同定址；相同 source census 的新 candidate 不再覆寫或誤用舊 manifest、transcript snapshots、journal。
