@@ -156,6 +156,9 @@ def hippo_invocation(root: Path) -> list[str]:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
     if venv_python.exists():
         return [str(venv_python), "-m", "paulsha_hippo"]
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    if configured_python.is_absolute() and configured_python.is_file() and os.access(configured_python, os.X_OK):
+        return [str(configured_python), "-m", "paulsha_hippo"]
     return ["python3", "-m", "paulsha_hippo"]
 
 
@@ -224,13 +227,15 @@ def write_queue_payload(
 def fire_importer(root: Path, tool: str, queue_path: Path) -> None:
     """Fire-and-forget trigger the importer in the background."""
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        log_warn(root, tool, f"venv not found at {venv_python}; queue written but importer not triggered")
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    importer_python = venv_python if venv_python.exists() else configured_python
+    if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
+        log_warn(root, tool, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
     try:
         subprocess.Popen(
             [
-                str(venv_python), "-m", "paulsha_hippo.importer.cli",
+                str(importer_python), "-m", "paulsha_hippo.importer.cli",
                 "ingest", "--queue-item", str(queue_path),
                 "--memory-root", str(root),
             ],

@@ -46,13 +46,15 @@ def _sanitize_id(value: str) -> str:
 
 def _fire_importer(root: Path, queue_path: Path) -> None:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        _log_warn(root, f"venv not found at {venv_python}; queue written but importer not triggered")
+    configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
+    importer_python = venv_python if venv_python.exists() else configured_python
+    if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
+        _log_warn(root, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
     try:
         subprocess.Popen(
             [
-                str(venv_python), "-m", "paulsha_hippo.importer.cli",
+                str(importer_python), "-m", "paulsha_hippo.importer.cli",
                 "ingest", "--queue-item", str(queue_path),
                 "--memory-root", str(root),
             ],

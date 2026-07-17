@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -300,6 +301,38 @@ class HookQueueWriterTest(unittest.TestCase):
         queue_file = self._queue_capture("claude-code", "claude-novenv-001")
         self.assertTrue(queue_file.exists())
 
+    def test_installed_interpreter_drives_background_importer_without_nested_venv(self):
+        from paulsha_hippo.hooks import (
+            _wakeup_common,
+            claude_session_end,
+            codex_session_end,
+            copilot_session_end,
+        )
+
+        queue_path = self.memory_root / "runtime" / "queue" / "capture.json"
+        env = {"HIPPO_HOOK_PYTHON": sys.executable}
+        fire_calls = (
+            (claude_session_end._fire_importer, (self.memory_root, queue_path)),
+            (codex_session_end._fire_importer, (self.memory_root, queue_path)),
+            (copilot_session_end._fire_importer, (self.memory_root, queue_path)),
+            (_wakeup_common.fire_importer, (self.memory_root, "codex", queue_path)),
+        )
+        with mock.patch.dict(os.environ, env), mock.patch("subprocess.Popen") as popen:
+            for fire, args in fire_calls:
+                fire(*args)
+
+        self.assertEqual(popen.call_count, 4)
+        for call in popen.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[0], sys.executable)
+            self.assertEqual(argv[1:3], ["-m", "paulsha_hippo.importer.cli"])
+
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                _wakeup_common.hippo_invocation(self.memory_root),
+                [sys.executable, "-m", "paulsha_hippo"],
+            )
+
 
 # ---------------------------------------------------------------------------
 # Installer / Uninstaller tests
@@ -445,6 +478,7 @@ class InstallerTest(unittest.TestCase):
         ]
         self.assertTrue(commands)
         self.assertTrue(all(sys.executable in command for command in commands), commands)
+        self.assertTrue(all(f"HIPPO_HOOK_PYTHON={sys.executable}" in command for command in commands))
 
     # ------------------------------------------------------------------
     # Full install — Claude config

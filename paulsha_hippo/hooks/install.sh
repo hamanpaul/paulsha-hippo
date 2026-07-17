@@ -228,6 +228,9 @@ else
 fi
 hook_dir="${memory_root}/hooks"
 hook_env_prefix="PSC_MEMORY_ROOT=${memory_root} PSC_CONFIG_ROOT=${config_root}"
+if [[ -n "$hook_python" ]]; then
+  hook_env_prefix+=" HIPPO_HOOK_PYTHON=${hook_python}"
+fi
 
 # ------------------------------------------------------------------
 # Step 4: Claude settings.json — merge SessionEnd, SessionStart, PreCompact hook entries
