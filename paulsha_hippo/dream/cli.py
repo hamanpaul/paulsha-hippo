@@ -181,10 +181,12 @@ def _reconcile(args: argparse.Namespace) -> int:
     from . import reconcile as reconcile_mod
     memory_root = Path(args.memory_root)
     now = args.now or datetime.now().isoformat()
+    # Normalize: no mode flag → dry-run (safe default)
+    dry_run = not args.apply
     result = reconcile_mod.run_reconcile(
         memory_root,
         now=now,
-        dry_run=args.dry_run,
+        dry_run=dry_run,
         apply=args.apply,
         limit=args.limit,
     )

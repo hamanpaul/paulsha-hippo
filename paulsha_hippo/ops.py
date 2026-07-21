@@ -306,7 +306,7 @@ def _check_timer_health() -> tuple[bool, list[str]] | None:
                     f"timer next elapse 異常遠（距今 {int(gap_s)}s，超過 {2 * period}s）"
                 )
         except (ValueError, OSError):
-            pass
+            messages.append(f"timer NextElapseUSecRealtime={next_elapse}（無法解析）")
     return len(messages) == 0, messages
 
 
@@ -400,9 +400,9 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
         drift = _check_timer_unit_drift()
         if drift is not None:
             drifted, drift_msgs = drift
-            if drifted:
+            if drift_msgs:
                 for msg in drift_msgs:
-                    print(f"  timer unit drift: ⚠ {msg}")
+                    print(f"  timer unit: ⚠ {msg}")
             else:
                 print("  timer unit: ✓ 與 repo template 一致")
     else:
@@ -840,7 +840,8 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
             )
         if is_active.stdout.strip() != "active":
             print(
-                f"FAIL: timer enable 成功但 is-active={is_active.stdout.strip()!r}",
+                f"FAIL: timer enable 成功但 is-active={is_active.stdout.strip()!r} "
+                f"(rc={is_active.returncode}, stderr={is_active.stderr.strip()!r})",
                 file=sys.stderr,
             )
             return 1
@@ -850,7 +851,8 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
         )
         if is_enabled.stdout.strip() != "enabled":
             print(
-                f"FAIL: timer is-active 但 is-enabled={is_enabled.stdout.strip()!r}",
+                f"FAIL: timer is-active 但 is-enabled={is_enabled.stdout.strip()!r} "
+                f"(rc={is_enabled.returncode}, stderr={is_enabled.stderr.strip()!r})",
                 file=sys.stderr,
             )
             return 1

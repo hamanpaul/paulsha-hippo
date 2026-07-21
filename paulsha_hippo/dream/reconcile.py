@@ -47,7 +47,7 @@ def _classify(
                 details.append({
                     "session_key": str(frag_path),
                     "category": "malformed",
-                    "fragments": len(frag_sessions[session_key]),
+                    "fragments": 1,
                     "action": "skip",
                 })
             continue

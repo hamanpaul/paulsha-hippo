@@ -195,10 +195,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dream_reconcile.add_argument("--memory-root", required=True)
     dream_reconcile.add_argument("--now", default=None)
-    dream_reconcile.add_argument("--dry-run", action="store_true",
+    reconcile_mode = dream_reconcile.add_mutually_exclusive_group()
+    reconcile_mode.add_argument("--dry-run", action="store_true",
                                  help="只產出報告（預設行為）")
-    dream_reconcile.add_argument("--apply", action="store_true",
-                                 help="執行修復")
+    reconcile_mode.add_argument("--apply", action="store_true",
+                                help="執行修復")
     dream_reconcile.add_argument("--limit", type=int, default=None,
                                  help="每類最多處理 N 個 session")
     dream_reconcile.set_defaults(func=_dream)
