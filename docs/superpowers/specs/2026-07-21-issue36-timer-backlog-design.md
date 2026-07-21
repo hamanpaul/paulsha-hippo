@@ -74,8 +74,9 @@ Unchanged: unit file write, rename logic, daemon-reload, linger reminder,
 **`_check_timer_unit_drift()`**:
 - Read deployed `~/.config/systemd/user/paulsha-hippo-dream.timer`
 - Compare against repo template (post-rename expected content)
-- Diff key fields: `OnCalendar`, `Persistent`, `Description`, `WantedBy`
-- Any difference → WARN "部署 timer unit 與 repo template 不同步" with details
+- Diff only the key fields: `OnCalendar`, `Persistent`, `Description`, `WantedBy`
+- **Exclude `ExecStart`** from comparison — installer substitutes `sys.executable` at install time (environment-dependent: pipx/venv/global), so ExecStart legitimately differs across installs. Comparing it would produce false positives.
+- Any difference in key fields → WARN "部署 timer unit 與 repo template 不同步" with details
 - Report only, never overwrite
 - Returns `(drifted: bool, messages: list[str])`
 
@@ -86,6 +87,13 @@ message, no crash, no exit code impact.
 
 **Where**: `paulsha_hippo/dream/reconcile.py` (new module),
 `paulsha_hippo/dream/cli.py` (new `reconcile` subcommand).
+
+**CLI arguments** (consistent with existing `dream run` / `dream status`):
+- `--memory-root` (required) — memory root path, same as all dream subcommands
+- `--now` (required) — timestamp string, same as `dream run`
+- `--dry-run` (flag) — produce report only (default when neither `--dry-run` nor `--apply` is given)
+- `--apply` (flag) — execute fixes
+- `--limit N` (optional int) — max N sessions **per category** (so up to 4×N total across orphan/terminal/stale/healthy; healthy is a no-op so effectively 3×N). Default unlimited.
 
 `hippo dream reconcile --dry-run` (also default when no mode flag):
 
@@ -100,17 +108,27 @@ message, no crash, no exit code impact.
 | `stale-split` | ledger=split, fragment missing | mark `no-findings` |
 | `healthy` | ledger=split + fragment exists | no action needed |
 
-Output JSON with summary counts + per-session details + suggested actions.
+Output JSON with summary counts + per-session details + suggested actions:
+
+```json
+{
+  "summary": {"orphan_fragment": 42, "terminal_unarchived": 15, "stale_split": 3, "healthy": 120, "malformed": 1},
+  "details": [
+    {"session_key": "claude:abc123", "category": "orphan-fragment", "fragments": 5, "action": "set-split"},
+    ...
+  ]
+}
+```
 
 ### 8.4 — Reconcile apply (backlog fix)
 
 `hippo dream reconcile --apply`:
 
 - Run dry-run classification first, then execute per category:
-  - `orphan-fragment`: `processing.append_state(state="split", ...)` → next dream run's `_promote_pass` processes it
-  - `terminal-unarchived`: call existing `_archive_fragments()` → move to `archive/fragments/`
-  - `stale-split`: `processing.append_state(state="no-findings", skip_reason="fragments missing")`
-- Each fix writes dream ledger record with `reconcile` marker
+  - `orphan-fragment`: `processing.append_state(memory_root, session_key=session_key, state="split", now=now, config_hash="reconcile", source="reconcile", fragments=frag_count)` → next dream run's `_promote_pass` processes it
+  - `terminal-unarchived`: import and call `_archive_fragments()` from `atomizer/pipeline.py` (read-only dependency — reconcile imports the function, does not modify that module) → move to `archive/fragments/`
+  - `stale-split`: `processing.append_state(memory_root, session_key=session_key, state="no-findings", now=now, config_hash="reconcile", source="reconcile", no_findings_reasons=["fragments missing"])`
+- Each fix writes dream ledger record via `dream_ledger.append_run()` with `reconcile` marker in the record's `passes` dict (key `"reconcile"`)
 - `--limit N`: max N sessions per category (default unlimited)
 
 **Safety gates**:
