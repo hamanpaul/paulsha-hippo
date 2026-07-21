@@ -103,10 +103,13 @@ message, no crash, no exit code impact.
 
 | Category | Condition | Suggested action |
 |---|---|---|
-| `orphan-fragment` | fragment exists, ledger has no session | set `state=split` |
-| `terminal-unarchived` | ledger ∈ {promoted, no-findings}, fragment still in `_slices` | archive fragment |
-| `stale-split` | ledger=split, fragment missing | mark `no-findings` |
+| `orphan_fragment` | fragment exists, ledger has no session | set `state=split` |
+| `terminal_unarchived` | ledger ∈ {promoted, no-findings}, fragment still in `_slices` | archive fragment |
+| `stale_split` | ledger=split, fragment missing | mark `no-findings` |
 | `healthy` | ledger=split + fragment exists | no action needed |
+
+Category names use underscores as canonical form in code and JSON; display
+output may use hyphens for readability.
 
 Output JSON with summary counts + per-session details + suggested actions:
 
@@ -128,14 +131,14 @@ Output JSON with summary counts + per-session details + suggested actions:
   - `orphan-fragment`: `processing.append_state(memory_root, session_key=session_key, state="split", now=now, config_hash="reconcile", source="reconcile", fragments=frag_count)` → next dream run's `_promote_pass` processes it
   - `terminal-unarchived`: import and call `_archive_fragments()` from `atomizer/pipeline.py` (read-only dependency — reconcile imports the function, does not modify that module) → move to `archive/fragments/`
   - `stale-split`: `processing.append_state(memory_root, session_key=session_key, state="no-findings", now=now, config_hash="reconcile", source="reconcile", no_findings_reasons=["fragments missing"])`
-- Each fix writes dream ledger record via `dream_ledger.append_run()` with `reconcile` marker in the record's `passes` dict (key `"reconcile"`)
+- Each fix writes dream ledger record via `dream_ledger.append_run()` with `reconcile` marker in the record's `passes` dict (key `"reconcile"` → value is a dict `{"applied": N, "errors": M, "categories": {...}}`)
 - `--limit N`: max N sessions per category (default unlimited)
 
 **Safety gates**:
 - Acquire dream singleton lock (`dream_lock.acquire_dream_lock`) — skip if held
 - Bare `hippo dream reconcile` (no flag) → defaults to `--dry-run`
 - Per-session failure → record error, continue next session, summary includes `errors` count
-- All ledger mutations via `processing.append_state` (existing atomic writes), never raw file edits
+- All ledger mutations via `processing.append_state` (existing atomic writes), never raw file edits. `config_hash="reconcile"` is a fixed sentinel string — if downstream code validates `config_hash` as hex, this sentinel must be added to any allowlist. Reconcile-originated events are identifiable via `source="reconcile"` field.
 - Does not touch `atomizer/pipeline.py` — reconcile only fixes ledger + archives, doesn't run atomize
 
 ### Error handling & edge cases
