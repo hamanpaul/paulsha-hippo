@@ -255,6 +255,37 @@ def _parse_unit_fields(unit_text: str) -> dict[str, str]:
     return fields
 
 
+def _parse_systemd_time(value: str) -> int | None:
+    """Parse systemd time property to microseconds since epoch.
+
+    Handles two formats:
+    - Raw microseconds (numeric, e.g. "1753504803000000")
+    - Human-readable (e.g. "Tue 2026-07-21 23:00:03 CST")
+    """
+    value = value.strip()
+    if not value:
+        return None
+    # Try raw microseconds first
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    # Try human-readable format: "Tue 2026-07-21 23:00:03 CST"
+    # Strip weekday prefix and timezone suffix, parse as local time
+    parts = value.split()
+    if len(parts) >= 3:
+        date_str = parts[1] if not parts[0][0].isdigit() else parts[0]
+        time_str = parts[2] if not parts[0][0].isdigit() else parts[1]
+        datetime_str = f"{date_str} {time_str}"
+        try:
+            # Naive datetime — .timestamp() uses local timezone (matches systemd output)
+            dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+            return int(dt.timestamp() * 1e6)
+        except ValueError:
+            pass
+    return None
+
+
 def _check_timer_health() -> tuple[bool, list[str]] | None:
     """8.2: check timer LastTrigger / NextElapse / UnitFileState.
 
@@ -285,27 +316,27 @@ def _check_timer_health() -> tuple[bool, list[str]] | None:
         messages.append("timer 從未觸發（LastTriggerUSec=n/a）")
     else:
         now_us = int(time.time() * 1e6)
-        try:
-            last_us = int(last_trigger)
+        last_us = _parse_systemd_time(last_trigger)
+        if last_us is not None:
             age_s = (now_us - last_us) / 1e6
             period = _resolve_timer_period()
             if age_s > 2 * period:
                 messages.append(
                     f"timer 已 stale（LastTriggerUSec 距今 {int(age_s)}s，超過 {2 * period}s）"
                 )
-        except (ValueError, OSError):
+        else:
             messages.append(f"timer LastTriggerUSec={last_trigger}（無法解析）")
     if next_elapse and next_elapse not in ("0", "n/a", "0:00:00"):
         now_us = int(time.time() * 1e6)
-        try:
-            next_us = int(next_elapse)
+        next_us = _parse_systemd_time(next_elapse)
+        if next_us is not None:
             gap_s = (next_us - now_us) / 1e6
             period = _resolve_timer_period()
             if gap_s > 2 * period:
                 messages.append(
                     f"timer next elapse 異常遠（距今 {int(gap_s)}s，超過 {2 * period}s）"
                 )
-        except (ValueError, OSError):
+        else:
             messages.append(f"timer NextElapseUSecRealtime={next_elapse}（無法解析）")
     return len(messages) == 0, messages
 
