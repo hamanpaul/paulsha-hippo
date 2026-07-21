@@ -225,6 +225,136 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
 
 # ---------------------------------------------------------------- doctor
 
+_TIMER_PERIOD_SECONDS = {
+    "hourly": 3600,
+    "daily": 86400,
+    "weekly": 604800,
+}
+
+_TIMER_DRIFT_FIELDS = ("OnCalendar", "Persistent", "Description", "WantedBy")
+
+
+def _parse_oncalendar_period(timer_text: str) -> int | None:
+    """Best-effort: extract OnCalendar period in seconds for staleness check."""
+    for line in timer_text.splitlines():
+        if line.strip().startswith("OnCalendar="):
+            value = line.split("=", 1)[1].strip()
+            return _TIMER_PERIOD_SECONDS.get(value)
+    return None
+
+
+def _parse_unit_fields(unit_text: str) -> dict[str, str]:
+    """Extract key fields from a systemd unit file."""
+    fields: dict[str, str] = {}
+    for line in unit_text.splitlines():
+        stripped = line.strip()
+        for field in _TIMER_DRIFT_FIELDS:
+            prefix = f"{field}="
+            if stripped.startswith(prefix):
+                fields[field] = stripped[len(prefix):].strip()
+    return fields
+
+
+def _check_timer_health() -> tuple[bool, list[str]] | None:
+    """8.2: check timer LastTrigger / NextElapse / UnitFileState.
+
+    Returns (healthy, messages) or None if systemd --user unavailable.
+    """
+    if not _systemd_user_available():
+        return None
+    show = subprocess.run(
+        ["systemctl", "--user", "show", "paulsha-hippo-dream.timer",
+         "--property=ActiveState,LastTriggerUSec,NextElapseUSecRealtime,UnitFileState"],
+        capture_output=True, text=True,
+    )
+    if show.returncode != 0:
+        return None
+    props: dict[str, str] = {}
+    for line in show.stdout.strip().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            props[key] = value
+    messages: list[str] = []
+    last_trigger = props.get("LastTriggerUSec", "")
+    next_elapse = props.get("NextElapseUSecRealtime", "")
+    unit_file_state = props.get("UnitFileState", "")
+
+    if unit_file_state == "disabled":
+        messages.append("timer 未 enable（UnitFileState=disabled）")
+    if last_trigger in ("n/a", "", "0"):
+        messages.append("timer 從未觸發（LastTriggerUSec=n/a）")
+    else:
+        now_us = int(time.time() * 1e6)
+        try:
+            last_us = int(last_trigger)
+            age_s = (now_us - last_us) / 1e6
+            period = _resolve_timer_period()
+            if age_s > 2 * period:
+                messages.append(
+                    f"timer 已 stale（LastTriggerUSec 距今 {int(age_s)}s，超過 {2 * period}s）"
+                )
+        except (ValueError, OSError):
+            messages.append(f"timer LastTriggerUSec={last_trigger}（無法解析）")
+    if next_elapse and next_elapse not in ("0", "n/a", "0:00:00"):
+        now_us = int(time.time() * 1e6)
+        try:
+            next_us = int(next_elapse)
+            gap_s = (next_us - now_us) / 1e6
+            period = _resolve_timer_period()
+            if gap_s > 2 * period:
+                messages.append(
+                    f"timer next elapse 異常遠（距今 {int(gap_s)}s，超過 {2 * period}s）"
+                )
+        except (ValueError, OSError):
+            pass
+    return len(messages) == 0, messages
+
+
+def _resolve_timer_period() -> int:
+    """Get OnCalendar period in seconds from deployed timer unit."""
+    timer_show = subprocess.run(
+        ["systemctl", "--user", "cat", "paulsha-hippo-dream.timer"],
+        capture_output=True, text=True,
+    )
+    if timer_show.returncode == 0:
+        parsed = _parse_oncalendar_period(timer_show.stdout)
+        if parsed is not None:
+            return parsed
+    return 3600
+
+
+def _check_timer_unit_drift() -> tuple[bool, list[str]] | None:
+    """8.2: compare deployed timer unit against repo template (report only).
+
+    Excludes ExecStart — installer substitutes sys.executable at install time
+    (pipx/venv/global), so it legitimately differs across installs.
+
+    Returns (drifted, messages) or None if systemd --user unavailable.
+    """
+    if not _systemd_user_available():
+        return None
+    deployed_path = Path.home() / _UNIT_DIR_NAME / "paulsha-hippo-dream.timer"
+    if not deployed_path.exists():
+        return False, ["timer unit 未安裝（無法偵測 drift）"]
+    deployed_text = deployed_path.read_text(encoding="utf-8")
+    deployed_fields = _parse_unit_fields(deployed_text)
+
+    src_dir = _PKG_ROOT / "dream" / "systemd"
+    template_text = (src_dir / "paulsha-memory-dream.timer").read_text(encoding="utf-8")
+    template_text = template_text.replace("paulsha-memory-dream", "paulsha-hippo-dream")
+    expected_fields = _parse_unit_fields(template_text)
+
+    messages: list[str] = []
+    for field in _TIMER_DRIFT_FIELDS:
+        expected_val = expected_fields.get(field, "")
+        actual_val = deployed_fields.get(field, "")
+        if expected_val != actual_val:
+            messages.append(
+                f"timer unit drift: {field} expected={expected_val!r} actual={actual_val!r}"
+            )
+    return len(messages) > 0, messages
+
+
 def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
                proc_root: str | Path = "/proc") -> int:
     """健檢。backend 檢查預設為解析級（快速、免費、無副作用——shutil.which／
@@ -258,6 +388,23 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
             capture_output=True, text=True,
         ).stdout.strip()
         print(f"- dream timer：{state or 'unknown'}")
+        # 8.2: timer health + unit drift checks
+        health = _check_timer_health()
+        if health is not None:
+            healthy, health_msgs = health
+            if healthy:
+                print("  timer health: ✓")
+            else:
+                for msg in health_msgs:
+                    print(f"  timer health: ⚠ {msg}")
+        drift = _check_timer_unit_drift()
+        if drift is not None:
+            drifted, drift_msgs = drift
+            if drifted:
+                for msg in drift_msgs:
+                    print(f"  timer unit drift: ⚠ {msg}")
+            else:
+                print("  timer unit: ✓ 與 repo template 一致")
     else:
         print("- systemd --user 不可用（fallback：hippo dream supervise）")
 
@@ -679,6 +826,46 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
         if completed.returncode != 0:
             return completed.returncode
         print("enabled: paulsha-hippo-dream.timer")
+        # 8.1: verify timer is actually active + enabled after enable --now
+        is_active = subprocess.run(
+            ["systemctl", "--user", "is-active", "paulsha-hippo-dream.timer"],
+            capture_output=True, text=True,
+        )
+        # Retry once — systemd may need a moment to register the timer
+        if is_active.stdout.strip() != "active":
+            time.sleep(0.5)
+            is_active = subprocess.run(
+                ["systemctl", "--user", "is-active", "paulsha-hippo-dream.timer"],
+                capture_output=True, text=True,
+            )
+        if is_active.stdout.strip() != "active":
+            print(
+                f"FAIL: timer enable 成功但 is-active={is_active.stdout.strip()!r}",
+                file=sys.stderr,
+            )
+            return 1
+        is_enabled = subprocess.run(
+            ["systemctl", "--user", "is-enabled", "paulsha-hippo-dream.timer"],
+            capture_output=True, text=True,
+        )
+        if is_enabled.stdout.strip() != "enabled":
+            print(
+                f"FAIL: timer is-active 但 is-enabled={is_enabled.stdout.strip()!r}",
+                file=sys.stderr,
+            )
+            return 1
+        # Baseline: first install should show n/a (never triggered)
+        show = subprocess.run(
+            ["systemctl", "--user", "show", "paulsha-hippo-dream.timer",
+             "--property=LastTriggerUSec"],
+            capture_output=True, text=True,
+        )
+        last_trigger = (
+            show.stdout.strip().split("=", 1)[-1]
+            if show.returncode == 0 and "=" in show.stdout
+            else "unknown"
+        )
+        print(f"verified: active + enabled (LastTriggerUSec={last_trigger})")
     return 0
 
 
