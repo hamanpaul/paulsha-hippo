@@ -6,6 +6,7 @@ import pytest
 
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.atomizer import pipeline as atomizer_pipeline
+from paulsha_hippo.importer.adapters import copilot as copilot_adapter
 from paulsha_hippo.importer import pipeline as importer_pipeline
 from paulsha_hippo.importer import title as importer_title
 from paulsha_hippo.lib.session_readers import read_copilot_history
@@ -28,6 +29,34 @@ def test_current_copilot_session_state_events_are_read(tmp_path):
     assert result["user_prompts"] == ["fix UART"]
     assert result["assistant_messages"] == ["root cause found"]
     assert result["assistant_summary"] == "root cause found"
+
+
+def test_copilot_adapter_retries_session_end_flush_race(tmp_path, monkeypatch):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({
+        "tool": "copilot-cli",
+        "session_id": "s-race",
+        "psc_config_root": str(tmp_path),
+        "capture_scope": "session_end",
+        "cwd": str(tmp_path),
+    }), encoding="utf-8")
+    snapshots = iter([
+        {"user_prompts": [], "assistant_messages": [], "assistant_summary": ""},
+        {
+            "user_prompts": ["verify producer"],
+            "assistant_messages": ["producer verified"],
+            "assistant_summary": "producer verified",
+        },
+    ])
+    sleeps: list[float] = []
+    monkeypatch.setattr(copilot_adapter, "read_copilot_history", lambda *_: next(snapshots))
+    monkeypatch.setattr(copilot_adapter.time, "sleep", sleeps.append)
+
+    result = copilot_adapter.extract(queue)
+
+    assert result.session["user_prompts"] == ["verify producer"]
+    assert result.session["assistant_messages"] == ["producer verified"]
+    assert sleeps == [0.05]
 
 
 @pytest.mark.parametrize("layout", ["current", "legacy"])

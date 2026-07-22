@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from paulsha_hippo import paths
@@ -16,6 +17,24 @@ from .base import (
 )
 
 
+_SESSION_END_FLUSH_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+
+def _has_conversation(extracted: dict[str, object]) -> bool:
+    return bool(extracted.get("user_prompts") or extracted.get("assistant_messages"))
+
+
+def _read_session_end_history(config_root: object, session_id: str) -> dict[str, object]:
+    """Bounded retry for Copilot's sessionEnd-before-events-flush ordering."""
+    extracted = read_copilot_history(config_root, session_id)
+    for delay in _SESSION_END_FLUSH_RETRY_DELAYS:
+        if _has_conversation(extracted):
+            break
+        time.sleep(delay)
+        extracted = read_copilot_history(config_root, session_id)
+    return extracted
+
+
 def extract(queue_path: str | Path) -> AdapterResult:
     payload = read_payload(queue_path)
     session_id = string_or_empty(payload.get("sessionId")) or string_or_empty(payload.get("session_id"))
@@ -26,7 +45,11 @@ def extract(queue_path: str | Path) -> AdapterResult:
     )
     extract_from = payload
     if session_id:
-        extracted = {k: v for k, v in read_copilot_history(config_root, session_id).items() if v}
+        if str(payload.get("capture_scope") or "session_end") == "session_end":
+            history = _read_session_end_history(config_root, session_id)
+        else:
+            history = read_copilot_history(config_root, session_id)
+        extracted = {k: v for k, v in history.items() if v}
         if extracted:
             extract_from = {**payload, **extracted}
     return build_session(
