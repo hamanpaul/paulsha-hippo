@@ -2,7 +2,7 @@
 
 ### Requirement: Canonical distiller configuration
 
-The system SHALL use the Hippo configuration root as the single runtime authority for atomizer/distiller configuration. Legacy configuration MAY be read only by an explicit migration planner and MUST NOT be merged into normal runtime loading. Migration SHALL support dry-run, conflict detection, a hash-bound resolution file with per-field `canonical`, `legacy`, or explicit manual value choices and operator rationale, pre-apply backup, idempotent apply, and rollback. Incomplete, unresolved, stale-plan, or conflicting backend configuration SHALL fail closed before processing or requeue begins.
+The system SHALL use the Hippo configuration root as the single runtime authority for atomizer/distiller configuration. Legacy configuration MAY be read only by an explicit migration planner and MUST NOT be merged into normal runtime loading. Runtime configuration SHALL describe external CLI profiles only and MUST NOT contain provider API-key values, credential env names, OAuth state, secret paths, provider base URLs, or direct HTTP/SDK backends. Migration SHALL support dry-run, conflict detection, explicit retirement of sanitized legacy direct-provider fields, a hash-bound resolution file with per-field `canonical`, `legacy`, `remove`, or explicit manual value choices and operator rationale, pre-apply backup of sanitized Hippo-exclusive inputs, idempotent apply, and rollback. Any prohibited direct-provider field with a non-empty value—including credential, credential env name, OAuth state, secret path, or provider URL—SHALL block as `operator-redaction-required`; Hippo SHALL identify only its field/path and MUST NOT copy, back up, apply, resolve, or log it. Migration MAY resume only after the operator sanitizes the source outside Hippo. Incomplete, unresolved, stale-plan, unsafe, or conflicting profile configuration SHALL fail closed before processing or requeue begins.
 
 #### Scenario: Legacy and canonical config conflict
 - **WHEN** migration finds different backend semantics in canonical and legacy configuration
@@ -15,6 +15,36 @@ The system SHALL use the Hippo configuration root as the single runtime authorit
 #### Scenario: Explicit conflict resolution is hash-bound
 - **WHEN** an operator resolves a canonical/legacy conflict in a reviewed resolution file
 - **THEN** apply SHALL accept it only while all source hashes match the plan and SHALL persist the selected source/value and rationale in the migration manifest
+
+#### Scenario: Credential-bearing legacy field blocks automatic migration
+- **WHEN** migration encounters `api_key`, `api_key_env`, provider URL, OAuth, or secret-path fields
+- **THEN** the plan SHALL identify only the field/path; any non-empty prohibited value SHALL block without backup or apply until the operator sanitizes it outside Hippo, after which the retired field MAY be removed from Hippo-owned config under a reviewed manifest
+
+### Requirement: Manifest-driven forced release installation
+
+The release install flow SHALL provide `hippo install all --force --dry-run` and `hippo install all --force`, with explicit service-enable behavior. Force cleanup SHALL use only positive ownership from a prior install manifest or a versioned legacy allowlist; absence from the new package alone SHALL NOT authorize deletion. Dry-run SHALL perform no mutation and SHALL classify every candidate as keep, update, remove, backup, or conflict. Apply SHALL fence and drain writers, stop/record timer and service state, acquire maintenance locks, write and fsync a mode-restricted backup/transaction manifest, use staged atomic replacement, verify `daemon-reload`, doctor, and service-effective profile probes, and restore prior enable/running state. For a shared config, the transaction SHALL store only the whole-file hash plus structured preimage/inverse patch for Hippo-owned entries and MUST NOT copy whole-file bytes. Every shared-file commit SHALL compare the current hash to the planned preimage, and rollback SHALL always use owned-entry three-way compensation that preserves concurrent non-Hippo changes or stop BLOCKED without mutation when unsafe. Whole-file backup/restore is permitted only for sanitized Hippo-exclusive files. Failure SHALL support rollback from a runner outside the mutable target. A second identical force install SHALL produce no semantic diff.
+
+Force MAY clean only Hippo-owned retired config fields/files, managed hook entries/scripts/venvs, the dedicated Hippo Copilot hook file, current/legacy Hippo systemd units, and package-owned cache/temp. It MUST NOT modify or delete raw/archive/inbox/knowledge/memory data, append-only ledgers, indexes, recovery state, logs/locks, project registries, external agent launchers, shell startup files, OAuth/API-key stores, secret env files, unknown files, or non-Hippo entries in shared Claude/Codex settings. Targets SHALL reject symlinks, path traversal, broad root/home scopes, and ownership drift. A user-modified managed file SHALL become conflict + backup, not blind deletion.
+
+#### Scenario: Dry-run identifies retired owned files without mutation
+- **WHEN** an older release manifest owns a hook or config field that the candidate explicitly retires
+- **THEN** `--force --dry-run` SHALL list the planned removal and backup while leaving filesystem bytes, service state, and config unchanged
+
+#### Scenario: Unknown stale-looking file is preserved
+- **WHEN** a file is absent from the candidate package but no prior manifest or legacy allowlist proves Hippo ownership
+- **THEN** force install SHALL preserve it and report a conflict or unmanaged item rather than deleting it
+
+#### Scenario: Force install rolls back atomically
+- **WHEN** service installation, daemon reload, doctor, or an enabled-profile probe fails after mutation begins
+- **THEN** rollback SHALL restore sanitized Hippo-exclusive preimages and prior service/timer state, while shared config SHALL be compensated only through Hippo-owned structured inverse patches and three-way merge; it SHALL preserve concurrent user changes, protected data, secrets, and append-only state
+
+#### Scenario: Concurrent shared-config edit blocks destructive rollback
+- **WHEN** a user changes a shared Claude/Codex config after force install commits but before rollback
+- **THEN** rollback SHALL preserve that change through owned-entry compensation or stop BLOCKED and SHALL NOT overwrite the whole file with its preimage
+
+#### Scenario: Force install is idempotent
+- **WHEN** a completed force install is immediately repeated against unchanged state and artifact
+- **THEN** the second plan SHALL contain no semantic update/removal and apply SHALL preserve all hashes and service state
 
 ### Requirement: Atomic deployed-surface attestation
 
@@ -102,9 +132,33 @@ CI SHALL execute the repository test suite whenever matching test files exist, S
 - **WHEN** an operator inspects a deployed package, hook environment, or service
 - **THEN** the output SHALL identify `0.1.1`, build commit, and artifact identity consistently without relying only on the version string
 
+### Requirement: Evidence-bound release readiness matrix
+
+The release SHALL maintain one authoritative, machine-readable readiness matrix. Every gate SHALL contain a stable gate ID, state (`not-started`, `in-progress`, `passed`, or `blocked`), evidence reference, rerun command, execution timestamp, and—when artifact-bound—the exact candidate commit and wheel SHA-256. A checkbox, merged PR, successful process exit, or prose assertion alone MUST NOT produce `passed`. Changing the candidate commit or wheel hash SHALL invalidate every artifact-bound pass; source-only baseline evidence MAY remain passed only after applicability is revalidated. Hard release gates MUST NOT be waived into a passing state.
+
+#### Scenario: Stale checkbox cannot pass a release gate
+- **WHEN** a task is checked but lacks the required candidate pins or rerunnable evidence
+- **THEN** its readiness state SHALL remain `not-started`, `in-progress`, or `blocked` and final publication SHALL remain blocked
+
+#### Scenario: Candidate drift invalidates artifact evidence
+- **WHEN** the candidate commit or wheel SHA-256 changes after an artifact, upgrade, rollback, recovery, or canary gate passed
+- **THEN** every affected gate SHALL return to `not-started` until rerun against the new candidate
+
+### Requirement: Fail-closed release tag authority
+
+Before all hard release gates pass, `v0.1.1` SHALL NOT exist as a local tag, remote tag, or GitHub release. If a pre-existing tag points to a non-candidate commit, release SHALL be blocked and the tag SHALL be audited and removed rather than silently force-moved. The final tag SHALL point to the exact tested candidate commit, and the GitHub release plus published artifact SHALL be verified against the same wheel hash. Until publication, operator documentation SHALL retain release-candidate semantics and MUST NOT advertise an unavailable `@v0.1.1` install pin.
+
+#### Scenario: Stale tag points outside candidate ancestry
+- **WHEN** any local or remote `v0.1.1` tag resolves to a commit other than the tested candidate
+- **THEN** publication SHALL be blocked, the mismatch SHALL be recorded, and the stale tag SHALL be removed before gates are rerun
+
+#### Scenario: Final tag preserves tested identity
+- **WHEN** all hard gates have passed for one candidate commit and wheel hash
+- **THEN** `v0.1.1` SHALL be added to that exact commit without file changes or artifact rebuild, and published-artifact smoke SHALL verify the same hash
+
 ### Requirement: Installed-service release acceptance
 
-Release acceptance SHALL test a built wheel in clean-install and all supported upgrade profiles, including any declared package-target migration. The installed hooks and timer/service, not direct internal pipeline calls, SHALL process real supported-client sessions through import, atomization, knowledge publication, MOC/index, and recall. Each accepted atom SHALL preserve semantic content, use a specific title, carry the correct project and honest provenance, pass checksum/frontmatter validation, and be present in metadata and FTS indexes. Automatic consumption MAY be claimed only for a client with a real offered-to-Read trace; otherwise the release SHALL downgrade that capability while retaining producer/explicit-recall support. Applied SHALL be counted only from a real structured acknowledgement.
+Release acceptance SHALL test a built wheel in clean-install, force-reinstall, and all supported upgrade profiles, including any declared package-target migration. The installed hooks and timer/service, not direct internal pipeline calls, SHALL process real supported-client sessions through import, atomization, knowledge publication, MOC/index, and recall. Every enabled external-agent profile SHALL pass service-effective eligibility and a bounded isolated smoke; at least one test SHALL prove the declared fallback order, attempt provenance, cache separation, and `degraded-success`, while a separate exhaustion test SHALL park once. Each accepted atom SHALL preserve semantic content, use a specific title, carry the correct project and honest provenance, pass checksum/frontmatter validation, and be present in metadata and FTS indexes. Automatic consumption MAY be claimed only for a client with a real offered-to-Read trace; otherwise the release SHALL downgrade that capability while retaining producer/explicit-recall support. Applied SHALL be counted only from a real structured acknowledgement.
 
 #### Scenario: Supported client completes the installed chain
 - **WHEN** a real supported-client session is captured after wheel install or upgrade
@@ -116,11 +170,21 @@ Release acceptance SHALL test a built wheel in clean-install and all supported u
 
 ### Requirement: Release canary, rollback, and issue closure
 
-The release SHALL pass clean install, both supported upgrade profiles, rollback drill, and a canary/soak of at least three consecutive scheduled cycles, each with a unique new ingress session and at least one accepted atom. A skipped, zero-ingress, or zero-accepted-atom cycle MUST NOT count toward the soak. Canary SHALL show no new legacy locks, no unexpected generic-title or `_unknown` atoms, no parked/split growth, complete index coverage, and an `ok` pipeline status. Producer-correctness release MAY proceed with an explicit automatic-consumption capability downgrade, but Issue #34 MUST remain open until its nine-item traceability matrix points to committed implementation and attached release evidence, including a real offered-to-Read consumer trace.
+The release SHALL pass clean install, both supported upgrade profiles, rollback drill, complete production recovery, and a canary/soak of at least three consecutive systemd-timer-triggered scheduled cycles, each with a unique new ingress session and at least one accepted atom. Direct service invocation, manual pipeline execution, and isolated canaries MUST NOT count as scheduled cycles. A skipped, zero-ingress, or zero-accepted-atom cycle MUST NOT count toward the soak. Canary SHALL show no new legacy locks, no unexpected generic-title or `_unknown` atoms, no parked/split growth, complete index coverage, and an `ok` pipeline status.
+
+The production recovery manifest SHALL enumerate every remaining batch and assign every member of the audited high-risk cohort (53 sessions at the PR #35 baseline) an evidence-backed `recovered`, `retained`, `quarantined`, `parked`, or `manual-review` disposition. It MUST NOT leave unexplained unknowns. Producer-correctness release MAY proceed with an explicit automatic-consumption capability downgrade, but Issue #34 MUST remain open until its nine-item traceability matrix points to committed implementation and attached release evidence, including a real offered-to-Read consumer trace.
 
 #### Scenario: Canary regression blocks release
 - **WHEN** any canary cycle produces an excluded note, deployment mismatch, growing failure state, or incomplete index coverage
 - **THEN** final tag/publication SHALL be blocked and rollback or repair evidence SHALL be recorded
+
+#### Scenario: Isolated or manual canary does not count toward soak
+- **WHEN** a canary is started directly rather than by the enabled systemd timer
+- **THEN** it MAY serve as diagnostic evidence but SHALL NOT increment the three-cycle scheduled soak count
+
+#### Scenario: High-risk recovery cohort is fully dispositioned
+- **WHEN** production recovery is proposed as complete
+- **THEN** the manifest SHALL account for all 53 baseline high-risk sessions and all later selected batches without an unexplained member or data-loss delta
 
 #### Scenario: Issue closes only with evidence
 - **WHEN** all implementation tasks are merged and `v0.1.1` gates pass

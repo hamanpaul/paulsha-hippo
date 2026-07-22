@@ -1,59 +1,70 @@
-## 1. Restore test and release truth
+## 0. Authority reset and verified baseline
 
-- [x] 1.1 Replace the GitHub Actions test-suite glob detection with a robust check, remove install error swallowing, and add a workflow contract test proving pytest is collected and executed.
-- [ ] 1.2 Add build/version attestation across package, importer, CLI, hooks, service, and artifact metadata; defer the version bump only until the final candidate-freeze task, before any artifact/upgrade/canary gate.
-- [x] 1.3 Add wheel clean-install and installed-surface test harnesses that do not import from the checkout by cwd shadowing.
-- [ ] 1.4 Add the policy-required PR template and arrange the authorized `release:0.1.1` label before the version-freeze PR can merge.
+- [x] 0.1 Audit `v0.1.1`: confirm the stale local tag pointed to `d04ba59`, confirm that commit is outside `main` ancestry and no remote tag/GitHub release uses it, then remove the local tag without force-moving it. Recheck all three surfaces before publication.
+- [x] 0.2 Keep README/install guidance at release-candidate semantics while `v0.1.1` is absent; `v0.1.0` remains the only authoritative release.
+- [x] 0.3 Preserve the merged CI-truth and checkout-shadowed wheel clean-install harness baseline from PR #35.
+- [x] 0.4 Preserve the merged session/capture identity, complete ordered assistant content, minimum-32K fixed-budget zero-tool distillation, and canonical disposition/no-zero-slice baseline from PR #35.
+- [x] 0.5 Preserve the merged hash-pinned `hippo recovery plan|apply|resume|rollback` baseline and the first-five importer recovery evidence; do not treat that canary batch as full production recovery.
+- [x] 0.6 Treat Issue #36 timer/reconcile work as a completed non-blocking baseline, not an active Issue #34 release task.
+- [ ] 0.7 Add the authoritative machine-readable readiness matrix with gate ID, state, evidence, rerun command, timestamp, candidate commit, and wheel SHA-256. Candidate drift must invalidate artifact-bound passes.
+- [x] 0.8 Capture a fresh real Claude `offered → Read` baseline through installed hooks and append-only ledgers before implementation. Keep it explicitly pre-candidate; rerun the same gate against the pinned candidate before Issue #34/#39 closure.
 
-## 2. Preserve session content and atom semantics
+## 1. Close remaining atomization contract gaps
 
-- [x] 2.1 Add `session_title`, ordered full `assistant_messages`, compatible last-message `assistant_summary`, source-backed `parent_session_id`, and per-snapshot `capture_id`; update adapters/title cache/frontmatter rendering so no assistant outcome is truncated or overwritten.
-- [ ] 2.2 Persist LLM proposal title as canonical `title`, define a versioned title-repair cache/attempt contract, update MOC fallback order, enforce the shared generic-title gate before promotion, and add full write → MOC → index regression coverage.
-- [ ] 2.3 Define rich project-ID validation separately from a collision-resistant hashed filesystem directory mapping; inherit known source project and union-read legacy/generated registries only for unknown sources.
-- [ ] 2.4 Introduce an agent-result/provenance contract and integrate it through cache, processing ledger, note frontmatter serialization/round-trip, and E2E assertions with requested-versus-observed model truth and sanitized backend/config/skill/build fingerprints.
-- [ ] 2.5 Preserve a bounded sanitized stderr excerpt for non-zero agent failures without logging prompt/output/secrets.
-- [ ] 2.6 Add per-session publication journal/commit-marker recovery so a mid-write or mid-edge failure cannot expose partial atoms or duplicate relations.
-- [x] 2.7 Replace coarse importer dedup with `tool:session_id:capture_id` identity plus a normalized semantic hash over ordered prompts/outcomes, files, artifacts, capture scope, and parent ID; include title-input hash in title cache identity and sanitize only derived surfaces.
-- [x] 2.8 Add deterministic minimum-32K provider validation with fixed 12K/2K/48-KiB chunk gates, ordered paragraph splitting, complete fragment coverage, sequential two-attempt execution, and a zero-tool command profile with no fallback.
-- [x] 2.9 Require the canonical disposition wrapper; accept only non-empty legacy arrays during compatibility, map explicit all-chunk `no_findings` to terminal `no-findings`, and prohibit `promoted` with zero accepted slices.
+- [ ] 1.1 Persist the LLM proposal title as canonical `title`; add a versioned bounded title-repair contract, shared generic-title gate, MOC fallback order, and write → MOC → index regression coverage.
+- [ ] 1.2 Separate rich project-ID validation from a collision-resistant hashed filesystem directory key; inherit a known source project and consult the legacy/generated registry union only for `_unknown` inputs.
+- [ ] 1.3 Add the end-to-end provenance contract across cache, processing ledger, atom frontmatter, round-trip readers, and tests: profile revision/tier/attempt, requested model/effort, observed model truth, verification state, command/config/skill/build identity, and fallback reason.
+- [ ] 1.4 Preserve bounded sanitized stderr evidence for non-zero agent failures without recording prompts, outputs, secrets, tokens, or personal executable paths.
+- [ ] 1.5 Finish per-session publication journal/commit-marker eligibility and recovery so partial files/edges cannot become MOC/index-visible; persist run ID and exact produced slice IDs for reconciliation.
+- [ ] 1.6 Replace full-target-derived temporary names with NAME_MAX-safe same-directory atomic names; test exact byte limit, crash residue, concurrent attempts, and preservation of the full slice ID.
+- [ ] 1.7 Run current and legacy Copilot history layouts through a real importer → inbox → atom fixture; a reader-only fixture or `empty-skip` is insufficient.
+- [ ] 1.8 Add durable malformed-inbox quarantine plus complete raw/split/retrying/parked/quarantined/promoted counts, oldest age, integrity metrics, and run-level disk/frontmatter/metadata-index/FTS health reconciliation.
 
-## 3. Canonicalize configuration and deployed surfaces
+## 2. Canonicalize config and deploy one attested artifact
 
-- [ ] 3.1 Make Hippo config the only runtime distiller source; implement hash-bound per-field conflict resolution plus legacy migration dry-run/idempotence/backup/rollback tests.
-- [ ] 3.2 Add an independent staged upgrade runner and write-ahead plan/prepare/apply/rollback flow covering writer fencing/drain, restorable old artifact, profile-specific package switch, hook environment/scripts, service unit, and service-effective backend validation.
-- [ ] 3.3 Add doctor/status output for per-surface version/build/artifact/config attestation and fail closed on mismatch.
-- [ ] 3.4 Reinstall project-registry producer wiring during managed upgrade and ensure atomizer consumes the generated registry contract.
+- [ ] 2.1 Make Hippo config the sole runtime distiller source; reject and migrate away legacy `openai-compatible`, direct HTTP/TCP, provider URL, API-key/env-name, OAuth, and secret-path fields. Any prohibited field with a non-empty value must block as `operator-redaction-required` without backup/copy/log/apply until sanitized outside Hippo.
+- [ ] 2.2 Remove `HttpAgentClient` and provider-specific request/env wiring; route atomization, importer title generation, and SkillOpt only through one external CLI agent router. Child agents receive a fixed minimal non-secret env, never inherited `os.environ`; env-based auth requires an external launcher. Retire repo-owned Gemma provider proxy/launcher surfaces from the release package.
+- [ ] 2.3 Add declarative profiles with typed traits/task classes, tier/priority, model, profile-specific effort allowlist/renderer, `shell=False` argv, stdin-only prompt, timeout, zero-tool eligibility, and fallback policy. Reject aliases/functions, `{PROMPT}`, shell interpolation, `--yolo`, `--autopilot`, permission bypass, and tool-enabled Dream profiles.
+- [ ] 2.4 Implement deterministic Tier 1 (`claude`, `codex`) → Tier 2 (`agy`, `cg`) → Tier 3 (`co-gem`, `claude-gem`, custom local) routing with explicit same-tier priority, frozen-input whole-session restart, allowlisted error transitions, global deadline/attempt/call budgets, circuit breaker/cooldown, disabled CLI-native fallback, `degraded-success`, and single park on exhaustion.
+- [ ] 2.5 Bind cache/provenance to task class, response-schema and router-contract versions, profile revision, tier, attempt, model, effort, command/config/skill/prompt hashes and fallback reason; never mix operations, schemas, chunks, or cache entries across profiles.
+- [ ] 2.6 Add `hippo install all --force --dry-run|--force` as an ownership-manifest transaction: protected-state denylist, drift conflicts, sanitized Hippo-exclusive backups, writer/service fencing, shared-file hash plus owned-entry inverse patch/three-way rollback with no whole-file copy, external rollback runner, checked daemon reload/doctor/profile probes, and second-run idempotence.
+- [ ] 2.7 Add version/build/artifact/config attestation to package, importer, CLI, hooks, service, doctor, and status; mismatch must fail closed.
+- [ ] 2.8 Add an independent staged upgrade/rollback runner with write-ahead manifest, writer fencing/drain, restorable old artifact, profile-specific package switch, hook/service reinstall, and service-effective agent verification.
+- [ ] 2.9 Reinstall project-registry producer wiring during managed upgrade and verify the atomizer consumes the generated registry contract.
+- [ ] 2.10 Validate both `current-pipx` split-surface and `stale-system` large-backlog profiles, including old-reader forward compatibility or isolated-snapshot recovery.
 
-## 4. Close persistence, ingress, and health gaps
+## 3. Complete production recovery and disposition
 
-- [ ] 4.1 Replace full-target-derived MOC temporary names with NAME_MAX-safe same-directory atomic names; test exact byte limit, crash residue, and concurrent attempts.
-- [ ] 4.2 Support current and legacy Copilot session layouts, with a real layout fixture through importer → inbox → atom rather than `empty-skip`.
-- [ ] 4.3 Add durable malformed-inbox quarantine and full state/age backlog metrics; prevent repeated warning-only loops.
-- [ ] 4.4 Pass a run ID into atomization, return/persist exact produced slice IDs, and add run-level disk/frontmatter/metadata-index/FTS reconciliation plus health state that cannot be inferred solely from process exit code.
+- [ ] 3.1 Gate every recovery apply/resume on candidate surface attestation, canonical config validation, registry/source pins, and service-effective backend probe.
+- [ ] 3.2 Execute deterministic repair/quarantine before LLM requeue; upgrade hooks before legacy-lock cleanup; expand only after a bounded batch passes stop conditions.
+- [ ] 3.3 Run all remaining production recovery batches with no ledger truncation, raw/knowledge loss, guessed provenance/project, unbounded retry, or target-dependent rollback runner.
+- [ ] 3.4 Produce a complete manifest for the audited 53-session high-risk cohort, assigning every session `recovered`, `retained`, `quarantined`, `parked`, or `manual-review` with evidence and no unexplained unknown.
+- [ ] 3.5 Reconcile post-recovery disk/frontmatter/metadata-index/FTS state and attach before/after census, manifest hashes, stop-condition history, and no-data-loss proof to the readiness matrix.
 
-## 5. Build reversible migration and recovery
+## 4. Verify installed producer and consumer chains
 
-- [x] 5.1 Implement `hippo recovery plan|apply|resume|rollback` with frozen archive/transcript sources, code/config/registry/source pins, winner and ledger-delta manifest, staging/preimage/fsync/replace journal, byte-equivalent resume, and batch-only compensating rollback.
-- [ ] 5.2 Gate recovery on deployed-surface attestation and service-effective backend probe; process deterministic repairs before bounded LLM requeue.
-- [ ] 5.3 Add current-pipx split-surface and stale-system large-backlog upgrade fixtures; prove no ledger truncation, raw/knowledge loss, unbounded retries, guessed provenance/project, or rollback-runner dependency on the replaced target; test old-reader forward compatibility or force isolated-snapshot recovery.
-- [ ] 5.4 Document maintenance ordering: upgrade hooks before legacy lock cleanup; repair/quarantine before requeue; canary batch before expansion.
+- [ ] 4.1 From the installed candidate wheel, run hook → service → atom → MOC/index → recall for every claimed Claude/Codex/Copilot producer path; separately smoke every enabled distiller profile under the systemd environment and downgrade any path/profile that cannot complete safely.
+- [ ] 4.2 Pass a synthetic semantic corpus: one reusable concept per atom, expected concept coverage, non-generic canonical title, correct project, honest provenance, valid checksum/frontmatter, and no unnecessary raw-transcript leakage.
+- [ ] 4.3 Obtain a real shortlist offer followed by actual knowledge Read for each automatic-consumption claim. Missing Read may downgrade the capability and permit producer release, but must keep Issue #34 open; `applied` requires structured acknowledgement.
+- [ ] 4.4 Prove Tier 1 failure advances in exact configured order, fallback success is `degraded-success` with prior attempts retained, profile cache entries do not cross-contaminate, safety/config errors do not fallback, and full chain exhaustion parks once within global budgets.
 
-## 6. Verify installed ingress and consumption
+## 5. Freeze and test one release candidate
 
-- [ ] 6.1 Run installed hook → service → atom → MOC/index → recall E2E for each claimed supported client; downgrade unsupported claims.
-- [ ] 6.2 Verify a real shortlist offer followed by actual knowledge Read for automatic-consumption claims; otherwise downgrade that capability and keep Issue #34 open while allowing a producer-correctness release; record applied only with a real structured acknowledgement.
-- [ ] 6.3 Add synthetic semantic corpus acceptance: one concept per note, expected concept coverage, non-generic title, correct project, no unnecessary raw transcript leakage, honest provenance.
+- [ ] 5.1 Complete implementation docs/changelog, set all version declarations to `0.1.1`, apply the existing `release:patch` label, complete the PR template, and strict-validate the active OpenSpec before freezing the untagged candidate commit.
+- [ ] 5.2 Build one wheel from that exact commit and record commit plus wheel SHA-256 in the readiness matrix. No later artifact-bound evidence may use a different build.
+- [ ] 5.3 Run full pytest, policy, OpenSpec validation, clean install, force install dry-run/apply/idempotence/rollback, both upgrade profiles, service-effective profile probes, fallback drills, and published-surface attestation against the pinned wheel.
+- [ ] 5.4 If candidate commit or wheel hash changes, reset and rerun every affected artifact, upgrade, rollback, recovery, ingress, and canary gate.
 
-## 7. Release `0.1.1`
+## 6. Pass real scheduled soak and publish `0.1.1`
 
-- [ ] 7.1 Complete implementation docs, create `[0.1.1] - <release-date>`, reset `[Unreleased]`, update every version declaration to `0.1.1`, complete implementation tasks, and strict-validate the active change before freezing the untagged final candidate commit.
-- [ ] 7.2 Build one commit/hash-addressed candidate wheel from that exact commit and execute full pytest/policy/spec validation, clean install, both upgrade profiles, recovery canary, no-data-loss census, rollback drill, and three consecutive scheduled cycles each containing unique ingress and an accepted atom.
-- [ ] 7.3 After all artifact gates pass, tag/publish the exact tested commit and wheel as immutable `v0.1.1` without changing files or rebuilding; then update downstream pins and run published-artifact smoke.
-- [ ] 7.4 Attach test/artifact/migration/rollback/canary evidence to Issue #34 and map all nine items; mark release tasks complete and run official `openspec archive issue-34-atomization-release` in a post-tag docs/spec closeout. Close the issue only after a real offered-to-Read trace; otherwise publish with the capability downgraded and leave the issue open.
+- [ ] 6.1 Reconfirm `v0.1.1` is absent locally, remotely, and from GitHub Releases before the first publication mutation; any mismatched pre-existing tag blocks release and must be audited/removed, never force-moved.
+- [ ] 6.2 Pass three consecutive cycles genuinely triggered by the enabled systemd timer. Each cycle needs a unique new ingress, at least one accepted atom, `ok` pipeline status, complete index coverage, no excluded note, and no growing split/parked/quarantined state. Manual, direct-service, isolated, skipped, zero-ingress, or zero-accepted cycles do not count.
+- [ ] 6.3 Require every hard readiness gate to be `passed` for the same candidate commit/wheel. A checkbox, merge, prose assertion, process exit 0, or waiver alone is not evidence.
+- [ ] 6.4 Tag that exact tested commit as immutable `v0.1.1` without file changes or rebuild; publish the exact wheel/hash, create the GitHub release, update downstream pins, and run published-artifact smoke.
 
-## 8. Fix #36: timer enable + backlog reconciliation
+## 7. Close release metadata and Issue #34 honestly
 
-- [x] 8.1 Installer enable post-verification: after `systemctl --user enable --now paulsha-hippo-dream.timer`, verify `is-active` + `is-enabled` (retry once with 0.5s sleep on is-active); print baseline `LastTriggerUSec`; return 1 with diagnostic on failure. No change to `enable=False` or systemd-unavailable paths.
-- [x] 8.2 Doctor timer health + unit drift detection: add `_check_timer_health` (LastTriggerUSec/NextElapseUSecRealtime/UnitFileState — n/a or stale >2x OnCalendar period → WARN) and `_check_timer_unit_drift` (compare deployed timer unit's OnCalendar/Persistent/Description/WantedBy against repo template post-rename, exclude ExecStart; report only, never overwrite). Both return `(bool, list[str])`, called from doctor main loop.
-- [x] 8.3 Reconcile dry-run (diagnosis report): `hippo dream reconcile --dry-run` (default). Scan `inbox/_slices/**/*.md`, cross-reference `processing.fold_events`, classify into orphan_fragment / terminal_unarchived / stale_split / healthy / malformed. Output JSON summary + per-session details with suggested actions. New module `dream/reconcile.py`, new subcommand in `dream/cli.py`. CLI args: `--memory-root` (required), `--now` (required), `--dry-run`/`--apply`/`--limit N`.
-- [x] 8.4 Reconcile apply (backlog fix): `hippo dream reconcile --apply`. orphan_fragment → `append_state(state=split, config_hash="reconcile", source="reconcile")`; terminal_unarchived → import `_archive_fragments()` from `atomizer/pipeline.py` (read-only dep); stale_split → `append_state(state=no-findings, config_hash="reconcile", source="reconcile")`. Each fix writes dream ledger via `append_run()` with `passes["reconcile"]` = `{"applied": N, "errors": M, "categories": {...}}`. Hold dream singleton lock. `--limit N` per category. Per-session failure → continue, summary includes errors count.
+- [ ] 7.1 Attach the readiness matrix, test/artifact hashes, deployed-surface attestation, migration/recovery census, 53-session disposition, rollback drill, and three scheduled-cycle ledgers to Issue #34.
+- [ ] 7.2 Map all nine Issue #34 rows to committed implementation and evidence. If offered → Read is still absent, publish only with automatic consumption downgraded and leave the issue open.
+- [ ] 7.3 After publication evidence is durable, run official `openspec archive issue-34-atomization-release` in a post-tag metadata-only commit that does not rebuild the release artifact.
+- [ ] 7.4 Close Issue #34 only when producer, ingress, recovery, scheduled soak, publication, and real consumer Read evidence all satisfy the traceability matrix.

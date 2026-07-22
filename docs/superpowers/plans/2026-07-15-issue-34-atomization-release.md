@@ -10,6 +10,17 @@
 
 **Scope stop:** 本 plan 停在 implementation/release 規格。撰寫 plan 時不得 probe 真 backend、requeue、cleanup、重啟服務、修改 runtime、commit、push、開 PR 或發 release。
 
+## 2026-07-22 architecture amendment — Issue #39
+
+本 amendment 取代本 plan 中任何 Hippo direct HTTP/provider API-key 管理、Gemma TCP side channel 或 prompt-in-argv 的暗示。Issue [#39](https://github.com/hamanpaul/paulsha-hippo/issues/39) 與 active OpenSpec 為這部分的規格 authority：
+
+- Hippo 只管理外部 headless CLI profiles，不保存 provider API key、credential env-name、OAuth、secret path、provider base URL，也不直接呼叫 provider HTTP/SDK。`claude`、`codex`、`agy`、`cg`、`co-gem`、`claude-gem` 一律視為 repo 外 agent/launcher。Legacy source 的任一 prohibited direct-provider field 若含非空值，migration 必須 BLOCKED 且不 backup/copy/apply，先由 operator 在 Hippo 外去敏。
+- Default route 為 Tier 1 `claude`/`codex`、Tier 2 `agy`/`cg`、Tier 3 `co-gem`/`claude-gem`/custom local；同 tier 使用明確 priority。Traits、task classes、model、profile-specific effort 與 argv 都是每 profile 宣告欄位。
+- Prompt 只走 stdin；command 用 `shell=False` token list，只允許經 allowlist 驗證的 `{MODEL}`/`{EFFORT}` 完整 token。Child process 只取得固定 minimal non-secret env，不繼承 `os.environ`；env credential 需求由外部 launcher 自行處理。`.bashrc` alias 不能供 systemd 使用；`cg` 必須另有外部 executable launcher。Dream 禁止 `--yolo`、`--autopilot`、permission bypass、tool/MCP/custom-instruction/user-interaction/remote-enabled profiles。
+- Fallback 是 bounded、acyclic、可觀測 state machine：整個 session attempt 固定一個 profile，切換時從 frozen input 重跑；CLI-native fallback 必須關閉；有 global deadline/attempt/call budget、circuit breaker。Cache identity 包含 task class、response schema、router contract 與 profile/model/effort/command/config/skill/prompt。備援成功標 `degraded-success`，全鏈耗盡才 park 一次。
+- Release install 增加 ownership-manifest-driven `hippo install all --force --dry-run|--force`。它只能清理 manifest/legacy allowlist 證明由 Hippo 擁有的退休設定與檔案，必須 backup/rollback/idempotent，且永不觸碰記憶資料、ledger/index/recovery、project registry、shell rc、外部 launcher 或 OAuth/API-key stores。Shared config 只保存 whole-file hash 與 Hippo-owned inverse patch，不複製整檔，rollback 只做 owned-entry three-way compensation並保留並行使用者修改。
+- Timer/load-gating 部分依目前 hourly timer + load/memory gate 繼續觀察，本次不修改 timer 或 Issue #38。
+
 ---
 
 ## 1. Evidence-backed diagnosis
@@ -228,7 +239,7 @@ python3 -m pytest tests/ -q
 **Files / external prerequisite**
 
 - Create: `.github/pull_request_template.md` with the canonical policy checklist.
-- Before the version-freeze PR, an authorized maintainer creates/uses the policy-recognized `release:0.1.1` label; absence of authority is a release blocker, not a reason to invent an exemption.
+- Before the version-freeze PR, an authorized maintainer applies the policy-recognized `release:patch` label; absence of authority is a release blocker, not a reason to invent an exemption.
 - Add a policy fixture/check proving the version-freeze PR supplies that release label while `VERSION` temporarily differs from the latest tag.
 
 **Wave 0 merge gate**
@@ -373,7 +384,7 @@ python3 -m pytest \
 |---|---|---|
 | valid, same semantics | present | migrate/retire legacy, zero conflict |
 | valid, conflicting | present | dry-run conflict; apply blocked until hash-bound resolution file selects `canonical`, `legacy`, or manual value per field with rationale |
-| incomplete HTTP config | any | validation failure before processing |
+| retired direct-provider fields | any | report/remove only through reviewed migration; validation failure before processing |
 | absent | valid legacy | create canonical from explicit plan + backup |
 | bare argv unresolved in service env | any | blocked until resolved absolute launcher/dependencies |
 | already migrated | retired/absent | second apply zero semantic diff |
@@ -393,23 +404,27 @@ Normal runtime reads only canonical config. Legacy path remains readable solely 
 
 ```yaml
 distiller:
-  backend_id: <id>
-  provider: <provider-or-unknown>
+  profile_id: <id>
+  profile_revision: <revision>
+  tier: <1|2|3>
+  attempt_index: <n>
   requested_model: <configured-or-null>
+  requested_effort: <configured-or-null>
   observed_model: <verified-response-value-or-null>
   model_verification: verified | unverified | unavailable
-  command_or_endpoint_fingerprint: <sha256-prefix>
+  command_fingerprint: <sha256-prefix>
+  fallback_reason: <category-or-null>
   config_hash: <sha256>
   skill_hash: <sha256>
   hippo_version: <version>
   build_commit: <commit-or-unknown>
 ```
 
-- Fingerprint is derived from normalized non-secret identity, not raw path/URL.
+- Fingerprint is derived from normalized non-secret command identity, not raw personal path.
 - Non-zero subprocess evidence: exit code + fixed-size sanitized stderr tail. Strip ANSI/control chars and credential patterns; never store prompt/stdout.
-- Replace the string-only agent response with `AgentRunResult(text, provider, requested_model, observed_model, model_verification, backend_fingerprint)`; HTTP adapters retain response model/provider when verifiable, custom argv returns unverified unless it has authenticated evidence.
-- Cache schema stores the normalized result/provenance contract (or explicit unavailable values), not just text. Cache replay cannot upgrade unverified model identity to verified.
-- `slice_frontmatter.render()` serializes the `distiller` map, parser/validator round-trips it, and `processing.append()` writes the same provenance identity. E2E asserts both records match while containing no raw command path/endpoint/secret.
+- Replace the string-only agent response with an `AgentRunResult` carrying profile/tier/attempt, requested model/effort, observed model verification, command fingerprint, elapsed time, failure category, and fallback reason. External CLI output remains unverified unless it contains authenticated model evidence.
+- Cache schema stores the normalized result/provenance contract and keys by profile revision/model/effort/command/config/skill/prompt hashes, not just text. Cache replay cannot cross profiles or upgrade unverified model identity to verified.
+- `slice_frontmatter.render()` serializes the `distiller` map, parser/validator round-trips it, and `processing.append()` writes the same provenance identity. E2E asserts both records match while containing no raw command path, prompt, credential env-name, secret path, or credential.
 
 ### Task 1B.3: Treat package/hooks/service as one deployment
 
@@ -656,7 +671,7 @@ Before building the final candidate, complete implementation docs, create `CHANG
 2. build wheel + sidecar manifest; verify wheel hash independently;
 3. clean-install candidate outside checkout and run installed tests;
 4. verify package data, version/build info, config planner, hook/service templates;
-5. verify the authorized `release:0.1.1` label and PR template/policy state; do not create a prerelease tag.
+5. verify the authorized `release:patch` label and PR template/policy state; do not create a prerelease tag.
 
 ### 11.2 Controlled current-profile upgrade
 
@@ -735,7 +750,7 @@ Before freezing the final candidate commit:
 2. roll up fragments into `CHANGELOG.md [0.1.1] - <release-date>` and leave a fresh empty `[Unreleased]`;
 3. update README/install/upgrade/health/canonical-config docs and create the required PR template;
 4. complete implementation tasks and strict-validate the active `issue-34-atomization-release` change;
-5. ensure an authorized maintainer has created/applied `release:0.1.1`; this is mandatory for the version-vs-latest-tag window;
+5. ensure an authorized maintainer has applied `release:patch`; this is mandatory for the version-vs-latest-tag window;
 6. merge the version-freeze PR without closing Issue #34, using `policy-exempt:issue-link` with the umbrella-release reason.
 
 From the exact resulting main commit, build one final candidate wheel and run AR-01..AR-13. If they pass, tag that same commit as `v0.1.1`, publish that exact wheel/hash, update downstream pin, and run AR-14. No file change or rebuild is allowed between tested wheel and publication.
@@ -772,7 +787,7 @@ Completion means the published `v0.1.1` artifact—not a source checkout—has p
 
 1. `NormalizedSession` 保留 `session_title`、完整有序 `assistant_messages[]`、最後非空的相容 `assistant_summary`、每 capture 唯一 `capture_id`與只在有 source evidence 時存在的 `parent_session_id`。
 2. Raw archive 維持 byte-preserved；title、inbox、Gemma 與 index 在 derived boundary 做欄位級 fail-closed sanitizer。Idempotency 使用 `tool:session_id:capture_id`，並以含 prompts/outcomes/files/artifacts/scope/parent 的 semantic hash 排除真正重複 capture；有可比較 timestamp 時，晚到的舊 capture 只 archive/ledger，不覆蓋較新的 canonical inbox。
-3. Gemma provider context 以 32,768 為最低支援地端基準與 shipped default；12,000 estimated input、2,048 output、48 KiB argv、300s/chunk、2 attempts、parallelism 1 與 zero tools 維持固定，較大的 provider context 不放寬這些限制。Fixed prompt 成本先扣，fragment 原順序打包，過大 fragment 以 exact source spans + `part n/m` 穩定分割，串接後 byte-for-byte 等於原文，禁止截尾。
+3. 每個 Dream-eligible external CLI profile 的 provider context 以 32,768 為最低支援基準；12,000 estimated input、2,048 output、48 KiB stdin prompt、300s/chunk、2 attempts、parallelism 1 與 zero tools 維持固定，較大的 provider context 不放寬這些限制。Fixed prompt 成本先扣，fragment 原順序打包，過大 fragment 以 exact source spans + `part n/m` 穩定分割，串接後 byte-for-byte 等於原文，禁止截尾。
 4. Canonical response 是 `schema_version/disposition/reason/findings` wrapper。相容期只收非空 legacy array；空 array/wrapper/stdout、noise、錯誤類型與未知欄位均 invalid，任一 finding 無效即整份失敗而非局部 salvage；source project 已知時禁止模型 re-home。`promoted` 需要至少一張 accepted slice；全 chunks 明確 `no_findings` 才記 terminal `no-findings`。Parked evidence 只留失敗 metadata 與 stdout bytes/hash，不保存可能回顯 private prompt 的原始 stdout。
 5. Recovery 只讀 frozen archive 與可 pin transcript，預設 batch 5。Plan 先把 verified transcript 凍結到 transaction root，固定 code/config/registry/source/transcript-snapshot hashes；重抽與 apply/resume 只依 snapshot，外部 live transcript 後續追加不影響既定計畫。apply/resume/rollback 以完整 batch membership、staging/preimage/replace-intent journal/fsync/replace 執行，拒絕 target drift，rollback 只補償本 batch且可再 apply，不改寫舊 JSONL。Recovered importer artifact 帶 no-replay marker，與 LLM replay 分離，不盲跑 promoted sessions。
 
