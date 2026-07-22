@@ -9,7 +9,7 @@ work_item: issue-34-atomization-release
 
 **Goal:** 交付 `paulsha-hippo 0.1.1`，讓 installed Hippo 的 hook + dream service 能把真實 CLI session 正確保存為語意原子筆記：原始經驗不被 title generation 覆寫、title/project/provenance 正確、note 可通過 MOC/index/recall，並能從 Issue #34 的 current/stale deployment profiles 安全升級與恢復。
 
-**OpenSpec:** `openspec/changes/issue-34-atomization-release/`
+**OpenSpec:** `openspec/changes/archive/2026-07-22-issue-34-atomization-release/`
 
 **Release rule:** 本 repo `flat` profile 對這個 feature batch 使用 PATCH `0.1.1`。Final untagged candidate commit 必須先完成 `0.1.1` version、正式 changelog、docs 與 strict-valid active OpenSpec，再以 commit SHA + wheel SHA-256 識別；所有 artifact/upgrade/rollback/canary gate 跑這一顆 wheel。版號規範不接受 `-rc`，因此不得建立 `v0.1.1-rc.*`；通過後只把 `v0.1.1` tag 加到同一 commit，不改檔、不 rebuild。Evidence 完成後再用官方 OpenSpec archive 做 post-tag metadata closeout。
 

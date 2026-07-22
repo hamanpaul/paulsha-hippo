@@ -1,5 +1,8 @@
-## ADDED Requirements
+# atomization-release-integrity Specification
 
+## Purpose
+TBD - created by archiving change issue-34-atomization-release. Update Purpose after archive.
+## Requirements
 ### Requirement: Canonical distiller configuration
 
 The system SHALL use the Hippo configuration root as the single runtime authority for atomizer/distiller configuration. Legacy configuration MAY be read only by an explicit migration planner and MUST NOT be merged into normal runtime loading. Runtime configuration SHALL describe external CLI profiles only and MUST NOT contain provider API-key values, credential env names, OAuth state, secret paths, provider base URLs, or direct HTTP/SDK backends. Migration SHALL support dry-run, conflict detection, explicit retirement of sanitized legacy direct-provider fields, a hash-bound resolution file with per-field `canonical`, `legacy`, `remove`, or explicit manual value choices and operator rationale, pre-apply backup of sanitized Hippo-exclusive inputs, idempotent apply, and rollback. Any prohibited direct-provider field with a non-empty value—including credential, credential env name, OAuth state, secret path, or provider URL—SHALL block as `operator-redaction-required`; Hippo SHALL identify only its field/path and MUST NOT copy, back up, apply, resolve, or log it. Migration MAY resume only after the operator sanitizes the source outside Hippo. Incomplete, unresolved, stale-plan, unsafe, or conflicting profile configuration SHALL fail closed before processing or requeue begins.
@@ -193,26 +196,3 @@ The production recovery manifest SHALL enumerate every remaining batch and assig
 #### Scenario: Producer release does not over-claim consumption
 - **WHEN** all deterministic producer/release gates pass but no supported client completes an offered-to-Read trace
 - **THEN** `v0.1.1` MAY publish with automatic consumption downgraded, but Issue #34 SHALL remain open and release notes MUST state the unproven capability
-
-## MODIFIED Requirements
-
-### Requirement: Janitor hygiene lint for untitled titles
-
-Janitor scan SHALL perform read-only hygiene lint for a knowledge record whose
-frontmatter `title` equals `untitled`, emitting rule `title-untitled`. A
-registry-valid remote-form project ID containing `/` is canonical rich metadata
-and MUST NOT emit `raw-remote-key`; filesystem safety is enforced separately by
-the collision-resistant project directory key. Lint MUST NOT modify files or
-write lifecycle events. For machine-readable compatibility, `run_scan` SHALL
-continue returning `lint` fields `untitled` and `raw_remote_key`, with
-`raw_remote_key` equal to zero under this contract.
-
-#### Scenario: Remote-form project remains clean
-
-- **WHEN** a knowledge slice has a semantic title and project `github.com/hamanpaul/paulsha-hippo`
-- **THEN** janitor SHALL emit no lint warning and `raw_remote_key` SHALL remain zero
-
-#### Scenario: Untitled remote-form project reports only its title
-
-- **WHEN** a knowledge slice has `title: untitled` and a registry-valid remote-form project
-- **THEN** janitor SHALL emit exactly one `title-untitled` warning without modifying the slice or lifecycle ledger

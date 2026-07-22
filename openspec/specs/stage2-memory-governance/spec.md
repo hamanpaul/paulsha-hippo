@@ -1000,24 +1000,24 @@ Stage 2 SHALL 提供一次性 rekey 遷移工具：模組 `paulshaclaw.memory.re
 - **WHEN** 同時給定 `--paths` 與 `--project`（或 `--instruction-root`）
 - **THEN** 命令 MUST 回傳 exit code 2 且 MUST NOT 產生 manifest
 
-### Requirement: Janitor hygiene lint for untitled and raw-remote keys
+### Requirement: Janitor hygiene lint for untitled titles
 
-janitor scan SHALL 對 knowledge records 執行 read-only lint：frontmatter `title` 等於 `untitled` → rule `title-untitled`；frontmatter `project` 含 `/`（raw-remote key）→ rule `raw-remote-key`。lint MUST NOT 修改任何檔案、MUST NOT 寫入 lifecycle 事件（告警不自動改）。`run_scan` 回傳的 summary MUST 含 `lint` 欄位 `{"untitled": <N>, "raw_remote_key": <M>}`（經 dream orchestrator 的 summary passthrough 落入 dream ledger `passes.janitor`），且每筆 finding MUST 以 `lint:<rule>: <path> (project=<key>)` 形式 append 至 warnings。lint 結果 MUST deterministic（按 record_id 排序）。乾淨樹 MUST 回傳零 counts 且無 `lint:` 開頭的 warnings。
+Janitor scan SHALL perform read-only hygiene lint for a knowledge record whose
+frontmatter `title` equals `untitled`, emitting rule `title-untitled`. A
+registry-valid remote-form project ID containing `/` is canonical rich metadata
+and MUST NOT emit `raw-remote-key`; filesystem safety is enforced separately by
+the collision-resistant project directory key. Lint MUST NOT modify files or
+write lifecycle events. For machine-readable compatibility, `run_scan` SHALL
+continue returning `lint` fields `untitled` and `raw_remote_key`, with
+`raw_remote_key` equal to zero under this contract.
 
-#### Scenario: untitled 與 raw-remote key 同時告警
+#### Scenario: Remote-form project remains clean
 
-- **WHEN** knowledge 樹含 1 筆 `title: untitled` 且 `project: github.com/hamanpaul/testpilot` 的 slice，執行 janitor scan
-- **THEN** `summary["lint"]` MUST 等於 `{"untitled": 1, "raw_remote_key": 1}`
-- **THEN** warnings MUST 含 2 筆 `lint:` 開頭的訊息
-- **THEN** 該 slice 檔案 MUST 原封不動、lifecycle ledger MUST 無 lint 相關事件
+- **WHEN** a knowledge slice has a semantic title and project `github.com/hamanpaul/paulsha-hippo`
+- **THEN** janitor SHALL emit no lint warning and `raw_remote_key` SHALL remain zero
 
-#### Scenario: 乾淨樹零告警
+#### Scenario: Untitled remote-form project reports only its title
 
-- **WHEN** knowledge 樹所有 slice 都有真標題且 project 為短 slug
-- **THEN** `summary["lint"]` MUST 等於 `{"untitled": 0, "raw_remote_key": 0}` 且無 `lint:` warnings
-
-#### Scenario: 告警進 dream ledger
-
-- **WHEN** dream run 的 janitor pass 掃到 lint findings
-- **THEN** dream ledger 該輪記錄的 `passes.janitor.lint` MUST 帶有非零 counts（經既有 summary passthrough，無需 orchestrator 改動）
+- **WHEN** a knowledge slice has `title: untitled` and a registry-valid remote-form project
+- **THEN** janitor SHALL emit exactly one `title-untitled` warning without modifying the slice or lifecycle ledger
 
