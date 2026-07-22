@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-34-atomization-release
+---
+
 # Issue #34 正確原子化 Release Implementation Plan
 
 > **Execution mode:** 由 master agent 維護 integration branch 與 todo/boundary；worker 一律使用 Codex 內建 subagent + 獨立 worktree/branch，不使用 coordinator skill。若執行介面可選模型，短生命週期 worker 優先使用 `gpt-5.3-codex-spark`；不可選時照實記錄，不宣稱已指定模型。
@@ -9,6 +14,10 @@
 **Release rule:** 本 repo `flat` profile 對這個 feature batch 使用 PATCH `0.1.1`。Final untagged candidate commit 必須先完成 `0.1.1` version、正式 changelog、docs 與 strict-valid active OpenSpec，再以 commit SHA + wheel SHA-256 識別；所有 artifact/upgrade/rollback/canary gate 跑這一顆 wheel。版號規範不接受 `-rc`，因此不得建立 `v0.1.1-rc.*`；通過後只把 `v0.1.1` tag 加到同一 commit，不改檔、不 rebuild。Evidence 完成後再用官方 OpenSpec archive 做 post-tag metadata closeout。
 
 **Scope stop:** 本 plan 停在 implementation/release 規格。撰寫 plan 時不得 probe 真 backend、requeue、cleanup、重啟服務、修改 runtime、commit、push、開 PR 或發 release。
+
+## Tasks
+
+以下 numbered sections 與 OpenSpec `tasks.md` 共同構成本 accepted implementation plan；執行狀態以 OpenSpec checklist 為準。
 
 ## 2026-07-22 architecture amendment — Issue #39
 
