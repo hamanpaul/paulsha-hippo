@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-34-atomization-release
+---
+
 ## Why
 
 Issue #34 顯示目前 Hippo 雖可由 dream service 寫出 knowledge 檔，仍不能保證把經驗正確原子化成可用筆記。現行 production profile 已觀察到 `promoted` note 同時為 `_unknown` project、generic title 且未進 retrieval index；另一個舊部署 profile 則因 package、hooks、service 與 backend 設定不同步，累積大量 split backlog。除此之外，CI 的 test-suite detection 會把實際存在的 pytest suite 判成不存在，導致近期綠燈沒有執行測試。
@@ -12,6 +17,10 @@ Code trace 另確認資料正確性缺口：importer 生成 session title 時覆
 - 已有 runtime evidence 只能證明首批 5 個 importer recovery 與三個 isolated installed canary。尚未閉合的 hard gates 包含：部署目前 candidate wheel、完成剩餘 production recovery batches、對審計基線中 53 個 high-risk sessions 給出完整 disposition，以及三輪真正由 systemd timer 觸發、各有新 ingress 與 accepted atom 的 scheduled canary。
 - 本 change 的 readiness matrix 是剩餘工作的單一權威清單；沒有 candidate commit、wheel SHA-256 與可重跑 evidence 的 checkbox 不得視為通過。
 - Issue #39 承接 distiller 架構收斂：Hippo 不再管理 API key/OAuth 或直連 provider HTTP，改以三梯隊 external CLI profiles 與 bounded deterministic fallback 作為唯一運行邊界。
+
+## Requirements
+
+本 proposal 的 accepted requirements 由下列 `What Changes`、capability delta 與 impact contract 共同構成；實作與 release 必須逐項對應 `tasks.md`，且 #34／#39 只在同一份 evidence-bound readiness matrix 全部閉合後一起結案。
 
 ## What Changes
 

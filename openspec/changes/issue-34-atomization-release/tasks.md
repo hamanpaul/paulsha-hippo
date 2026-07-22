@@ -1,3 +1,10 @@
+---
+status: accepted
+work_item: issue-34-atomization-release
+---
+
+# Tasks
+
 ## 0. Authority reset and verified baseline
 
 - [x] 0.1 Audit `v0.1.1`: confirm the stale local tag pointed to `d04ba59`, confirm that commit is outside `main` ancestry and no remote tag/GitHub release uses it, then remove the local tag without force-moving it. Recheck all three surfaces before publication.

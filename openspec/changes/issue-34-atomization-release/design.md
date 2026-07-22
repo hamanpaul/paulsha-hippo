@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-34-atomization-release
+---
+
 ## Context
 
 Issue #34 涵蓋兩種不同但相關的 deployment profile：
