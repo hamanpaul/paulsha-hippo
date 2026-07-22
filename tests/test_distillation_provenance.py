@@ -16,7 +16,11 @@ def test_provenance_keeps_model_truth_and_redacts_failure_evidence():
         "degraded-success",
     )
     provenance = provenance_from_result(
-        result, config_hash="config-hash", skill_hash="skill-hash", build="commit-hash"
+        result,
+        config_hash="config-hash",
+        skill_hash="skill-hash",
+        build="commit-hash",
+        attempts=[result] * 8,
     )
 
     assert provenance["requested_model"] == "local-model"
@@ -26,6 +30,8 @@ def test_provenance_keeps_model_truth_and_redacts_failure_evidence():
     assert "paul_chen" not in json.dumps(provenance)
     assert "\\x1b" not in json.dumps(provenance)
     assert "REDACTED" in provenance["stderr"]
+    assert len(provenance["attempts"]) == 6
+    assert all("super-secret" not in json.dumps(attempt) for attempt in provenance["attempts"])
 
 
 def test_distiller_provenance_round_trips_through_atom_frontmatter():
@@ -44,8 +50,29 @@ def test_distiller_provenance_round_trips_through_atom_frontmatter():
         "skill_hash": "skill",
         "hippo_version": "0.1.1",
         "build_commit": "commit",
+        "response_schema": "1",
         "stderr": "",
         "exit_code": 0,
+        "attempts": [
+            {
+                "profile_id": "claude",
+                "profile_revision": "2",
+                "tier": 1,
+                "priority": 1,
+                "attempt_index": 1,
+                "requested_model": "claude-sonnet",
+                "requested_effort": "high",
+                "observed_model": None,
+                "model_verification": "unverified",
+                "command_fingerprint": "abc",
+                "response_schema": "1",
+                "elapsed_seconds": 0.2,
+                "failure_category": "auth",
+                "fallback_reason": None,
+                "stderr": "login required",
+                "exit_code": 1,
+            }
+        ],
     }
     atom = slice_frontmatter.Slice(
         slice_id="sl-provenance",
@@ -78,6 +105,8 @@ def test_distiller_provenance_round_trips_through_atom_frontmatter():
     assert parsed["distiller"]["profile_id"] == "claude"
     assert parsed["distiller"]["tier"] == 1
     assert parsed["distiller"]["model_verification"] == "unverified"
+    assert parsed["distiller"]["response_schema"] == "1"
+    assert parsed["distiller"]["attempts"][0]["failure_category"] == "auth"
     assert slice_frontmatter.validate(parsed, atom.body) == []
 
 

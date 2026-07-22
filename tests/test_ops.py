@@ -105,11 +105,11 @@ class InitConcurrencyTests(unittest.TestCase):
             self.assertFalse(pb.is_alive(), "worker B 逾時未結束")
             # 不變量：有效 config 存在（B 寫入），未被 A 的 rollback 誤刪
             self.assertTrue(cfg.exists(), "有效 config 不得被並行交易 rollback 誤刪")
-            self.assertIn("selected_profile: claude", cfg.read_text(encoding="utf-8"))
             self.assertFalse(override.exists())
             import yaml
             config_data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-            self.assertEqual(config_data["external_agents"]["selected_profile"], "claude")
+            self.assertNotIn("selected_profile", config_data["external_agents"])
+            self.assertTrue(config_data["external_agents"]["profiles"])
             # 不殘留暫存檔
             self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
             self.assertEqual(
@@ -137,13 +137,18 @@ class InitTests(unittest.TestCase):
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
             import yaml
             data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-            self.assertEqual(data["external_agents"]["selected_profile"], "claude")
+            self.assertNotIn("selected_profile", data["external_agents"])
             self.assertTrue(data["external_agents"]["profiles"])
+            claude = next(
+                profile for profile in data["external_agents"]["profiles"]
+                if profile["id"] == "claude"
+            )
+            self.assertEqual(claude["argv"][0], "/fake/abs/claude")
             self.assertEqual(data["memory_root"], f"{tmp}/memory")
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
             self.assertFalse(override.exists())
 
-    def test_init_each_argv_preset_selects_canonical_profile(self):
+    def test_init_each_argv_preset_configures_canonical_profile(self):
         from paulsha_hippo import backends
         for name in ("claude-headless", "codex-headless", "agy-headless"):
             with self.subTest(backend=name), TemporaryDirectory() as tmp:
@@ -165,7 +170,12 @@ class InitTests(unittest.TestCase):
                     "codex-headless": "codex",
                     "agy-headless": "agy",
                 }[name]
-                self.assertEqual(data["external_agents"]["selected_profile"], expected)
+                self.assertNotIn("selected_profile", data["external_agents"])
+                configured = next(
+                    profile for profile in data["external_agents"]["profiles"]
+                    if profile["id"] == expected
+                )
+                self.assertEqual(configured["argv"][0], "/fake/abs/" + name.removesuffix("-headless"))
                 self.assertFalse(
                     (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
                      / "atomizer.override.yaml").exists()
@@ -1114,12 +1124,12 @@ class FixBackendMigrationTests(unittest.TestCase):
             # 第二輪 no-op：備份仍是第一輪存下的原始裸命令版
             self.assertIn("  - claude\n", backup.read_text(encoding="utf-8"))
 
-    def test_fix_backend_without_canonical_config_is_noop(self):
+    def test_fix_backend_without_canonical_config_fails_closed(self):
         with TemporaryDirectory() as tmp:
             with mock.patch.dict("os.environ", self._env(tmp)), \
                  mock.patch.object(ops, "_probe_backend_service_effective",
                                    return_value=("- distiller backend：✓ mocked", False)):
-                self.assertEqual(ops.run_doctor(fix_backend=True), 0)
+                self.assertEqual(ops.run_doctor(fix_backend=True), 1)
 
     def test_fix_backend_unresolvable_everywhere_fails(self):
         with TemporaryDirectory() as tmp:
@@ -1165,7 +1175,7 @@ class InitBackendChoicesTests(unittest.TestCase):
 
 
 class SuperviseCliWiringTests(unittest.TestCase):
-    def test_supervise_cli_forwards_once_and_overrides(self):
+    def test_supervise_cli_forwards_once_and_runtime_options(self):
         from paulsha_hippo import cli as memory_cli
         captured: dict = {}
 
@@ -1177,11 +1187,11 @@ class SuperviseCliWiringTests(unittest.TestCase):
             rc = memory_cli.main([
                 "dream", "supervise", "--interval", "5", "--once",
                 "--memory-root", "/mr", "--max-load", "99.5",
-                "--promoter", "identity", "--agent-command", "python x.py",
+                "--promoter", "identity",
             ])
         self.assertEqual(rc, 0)
         self.assertTrue(captured["once"])
         self.assertEqual(captured["interval"], 5)
         self.assertEqual(captured["extra_argv"], [
             "--memory-root", "/mr", "--max-load", "99.5",
-            "--promoter", "identity", "--agent-command", "python x.py"])
+            "--promoter", "identity"])

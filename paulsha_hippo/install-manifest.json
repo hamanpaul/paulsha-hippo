@@ -1,10 +1,44 @@
 {
-  "schema_version": "1",
+  "schema_version": "2",
+  "required_surfaces": [
+    "config",
+    "hooks",
+    "service",
+    "timer",
+    "registry-producer"
+  ],
+  "owned_surfaces": [
+    {
+      "id": "config",
+      "mode": "target-root",
+      "authority": "manifest-entries"
+    },
+    {
+      "id": "hooks",
+      "mode": "runtime",
+      "authority": "default-runtime-plan"
+    },
+    {
+      "id": "service",
+      "mode": "runtime",
+      "authority": "default-runtime-plan"
+    },
+    {
+      "id": "timer",
+      "mode": "runtime",
+      "authority": "default-runtime-plan"
+    },
+    {
+      "id": "registry-producer",
+      "mode": "runtime",
+      "authority": "default-runtime-plan"
+    }
+  ],
   "entries": [
     {
       "path": "config.yaml",
       "source": "atomizer/atomizer.yaml",
-      "kind": "exclusive"
+      "kind": "create-only"
     }
   ]
 }

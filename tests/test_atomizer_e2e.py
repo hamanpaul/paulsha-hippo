@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paulsha_hippo import cli as memory_cli
+from paulsha_hippo import paths
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.atomizer import pipeline
 from paulsha_hippo.atomizer.agent_exec import FakeAgentClient
@@ -164,23 +165,19 @@ class AtomizerE2ETests(unittest.TestCase):
             _seed(root)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            override = root / "atomizer.override.yaml"
             stub = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "fake-agent.py"
-            override.write_text(
-                "\n".join(
-                    (
-                        'known_projects_file: "' + str(projects) + '"',
-                        "agent_exec:",
-                        "  command:",
-                        f"    - {sys.executable}",
-                        f"    - {stub}",
-                        "  timeout_seconds: 300",
-                        "  model: fake-agent",
-                    )
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            import yaml
+            canonical = paths.atomizer_config_path()
+            document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+            document["known_projects_file"] = str(projects)
+            document["external_agents"]["profiles"] = [{
+                "id": "fake-agent", "enabled": True, "tier": 1, "priority": 1,
+                "traits": ["test"], "task_classes": ["atomization"],
+                "model": "fake", "supported_models": ["fake"],
+                "effort": "medium", "supported_efforts": ["medium"],
+                "argv": [sys.executable, str(stub)],
+            }]
+            canonical.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
             buf = io.StringIO()
 
             with redirect_stdout(buf):
@@ -191,8 +188,6 @@ class AtomizerE2ETests(unittest.TestCase):
                         "2026-05-31T03:00:00Z",
                         "--promoter",
                         "llm",
-                        "--override",
-                        str(override),
                     ]
                 )
 

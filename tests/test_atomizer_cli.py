@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from paulsha_hippo import cli
+from paulsha_hippo import paths
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.atomizer import cli as atomizer_cli
 
@@ -74,18 +75,16 @@ class AtomizeCliLlmTests(unittest.TestCase):
 
             self.assertEqual(atomizer_cli._known_projects(str(path)), ["paulshaclaw"])
 
-    def test_agent_command_override_uses_shared_resolution(self):
+    def test_promoter_uses_canonical_profiles(self):
         cfg, _ = atomizer_config.load_config(override_path=None)
-        args = Namespace(promoter="llm", agent_command="scripts/build_release_artifact.py")
+        args = Namespace(promoter="llm")
 
         with TemporaryDirectory() as tmp:
             with mock.patch.object(atomizer_cli, "ExternalAgentRouter") as router:
                 atomizer_cli._build_promoter(args, cfg, Path(tmp))
 
         profiles = router.call_args.args[0]
-        command = profiles[0].render_argv()
-        self.assertTrue(Path(command[0]).is_absolute())
-        self.assertTrue(str(command[0]).endswith("scripts/build_release_artifact.py"))
+        self.assertEqual(tuple(profiles), cfg.external_profiles)
 
     def test_promoter_llm_uses_stub_agent(self):
         with TemporaryDirectory() as tmp:
@@ -95,9 +94,21 @@ class AtomizeCliLlmTests(unittest.TestCase):
             raw.write_text(_RAW, encoding="utf-8")
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            override = root / "atomizer.override.yaml"
-            override.write_text(f'known_projects_file: "{projects}"\n', encoding="utf-8")
             stub = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "fake-agent.py"
+            import yaml
+            canonical = paths.atomizer_config_path()
+            document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+            document["known_projects_file"] = str(projects)
+            document["external_agents"]["profiles"] = [{
+                "id": "test-agent", "enabled": True, "tier": 1, "priority": 1,
+                "traits": ["test"], "task_classes": ["atomization"],
+                "model": "test", "supported_models": ["test"],
+                "effort": "medium", "supported_efforts": ["medium"],
+                "argv": [sys.executable, str(stub)],
+            }]
+            canonical.write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+            )
             buf = io.StringIO()
 
             with redirect_stdout(buf):
@@ -108,10 +119,6 @@ class AtomizeCliLlmTests(unittest.TestCase):
                         "2026-06-02T03:00:00Z",
                         "--promoter",
                         "llm",
-                        "--override",
-                        str(override),
-                        "--agent-command",
-                        f"{sys.executable} {stub}",
                     ]
                 )
 
@@ -130,7 +137,7 @@ class AtomizeCliLlmTests(unittest.TestCase):
         from pathlib import Path
         from paulsha_hippo.atomizer import cli, config as cfgmod
         cfg, _ = cfgmod.load_config()
-        args = argparse.Namespace(promoter="llm", agent_command=None)
+        args = argparse.Namespace(promoter="llm")
         promoter = cli._build_promoter(args, cfg, Path("/tmp/does-not-matter"))
         from paulsha_hippo.agent_profiles import ExternalAgentRouter
         self.assertIsInstance(promoter._agent._inner, ExternalAgentRouter)

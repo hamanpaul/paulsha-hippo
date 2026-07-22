@@ -1,3 +1,6 @@
+from pathlib import Path
+import shutil
+
 import pytest
 
 from paulsha_hippo.importer import title
@@ -21,4 +24,8 @@ def _disable_live_external_agent(monkeypatch):
 def _isolate_runtime_config(monkeypatch, tmp_path):
     """Never let unit tests consume this workstation's deployed Hippo config."""
 
-    monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(tmp_path / "hippo-config"))
+    root = tmp_path / "hippo-config"
+    root.mkdir()
+    source = Path(__file__).resolve().parents[1] / "paulsha_hippo" / "atomizer" / "atomizer.yaml"
+    shutil.copyfile(source, root / "config.yaml")
+    monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(root))

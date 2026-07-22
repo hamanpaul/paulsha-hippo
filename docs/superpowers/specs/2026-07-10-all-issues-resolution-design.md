@@ -1,5 +1,10 @@
 # 全 open issue 清零：master spec（2026-07-10）
 
+> **歷史基線／已局部取代：** backend/provider 相關設計已由
+> `openspec/changes/issue-34-atomization-release/` 的 accepted #34/#39 契約取代。
+> 現行 Hippo 只呼叫 canonical external CLI profiles；本文中的
+> `openai-compatible`、provider credential 或 direct HTTP smoke 不可作為現行指引。
+
 > 解決 repo 全部 9 個 open issues（#9 #10 #14 #15 #16 #17 #18 #19 #20）的單一設計文件。
 > 實作由 ultracode workflow 編排：6 個 code PR（相依拓撲 pipeline、驗收後自動 merge）→ runtime 恢復序列 → 收口批次。
 > 根因分析來源：Codex（gpt-5.6-sol, xhigh）2026-07-10 實地唯讀調查，關鍵結論已逐項對照程式碼。

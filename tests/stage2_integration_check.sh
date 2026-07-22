@@ -8,6 +8,26 @@ TMP_DIR="$TMP_BASE/stage2-$(date +%s)-$$"
 mkdir -p "$TMP_DIR"
 trap 'rm -rf -- "$TMP_DIR"; rmdir -- "$TMP_BASE" 2>/dev/null || true' EXIT
 
+# Runtime CLIs require one managed canonical config.  Keep this integration
+# check hermetic and disable every external profile until the dedicated fake
+# agent section below supplies its own config root.
+STAGE2_CONFIG_ROOT="$TMP_DIR/hippo-config"
+mkdir -p "$STAGE2_CONFIG_ROOT"
+cp "$ROOT_DIR/paulsha_hippo/atomizer/atomizer.yaml" "$STAGE2_CONFIG_ROOT/config.yaml"
+STAGE2_CONFIG_PATH="$STAGE2_CONFIG_ROOT/config.yaml" python3 - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+path = Path(os.environ["STAGE2_CONFIG_PATH"])
+document = yaml.safe_load(path.read_text(encoding="utf-8"))
+for profile in document["external_agents"]["profiles"]:
+    profile["enabled"] = False
+path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+PY
+export HIPPO_CONFIG_ROOT="$STAGE2_CONFIG_ROOT"
+
 require_text() {
   local label="$1"
   local file="$2"
@@ -143,21 +163,36 @@ cat >"$ATOMIZE_LLM_ROOT/projects.yaml" <<'EOF'
 projects:
   - paulshaclaw
 EOF
-cat >"$ATOMIZE_LLM_ROOT/atomizer.override.yaml" <<EOF
-promoter: llm
-known_projects_file: "$ATOMIZE_LLM_ROOT/projects.yaml"
-agent_exec:
-  command:
-    - python3
-    - $ROOT_DIR/tests/fixtures/atomizer/fake-agent.py
-  timeout_seconds: 300
-  model: fake-agent
-EOF
-PYTHONPATH="$ROOT_DIR" python3 -m paulsha_hippo.cli atomize \
+ATOMIZE_CONFIG_ROOT="$ATOMIZE_LLM_ROOT/hippo-config"
+mkdir -p "$ATOMIZE_CONFIG_ROOT"
+cp "$ROOT_DIR/paulsha_hippo/atomizer/atomizer.yaml" "$ATOMIZE_CONFIG_ROOT/config.yaml"
+PYTHONPATH="$ROOT_DIR" ATOMIZE_CONFIG_ROOT="$ATOMIZE_CONFIG_ROOT" \
+  ATOMIZE_PROJECTS="$ATOMIZE_LLM_ROOT/projects.yaml" \
+  ATOMIZE_AGENT="$ROOT_DIR/tests/fixtures/atomizer/fake-agent.py" \
+  python3 - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+config_path = Path(os.environ["ATOMIZE_CONFIG_ROOT"]) / "config.yaml"
+document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+document["known_projects_file"] = os.environ["ATOMIZE_PROJECTS"]
+document["external_agents"]["profiles"] = [{
+    "id": "fake-agent", "enabled": True, "tier": 1, "priority": 1,
+    "traits": ["test"], "task_classes": ["atomization"],
+    "model": "fake-agent", "supported_models": ["fake-agent"],
+    "effort": "medium", "supported_efforts": ["medium"],
+    "timeout": 300,
+    "argv": ["python3", os.environ["ATOMIZE_AGENT"]],
+}]
+config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+PY
+HIPPO_CONFIG_ROOT="$ATOMIZE_CONFIG_ROOT" PYTHONPATH="$ROOT_DIR" \
+  python3 -m paulsha_hippo.cli atomize \
   --memory-root "$ATOMIZE_LLM_ROOT" \
   --now "2026-05-31T03:00:00Z" \
   --promoter llm \
-  --override "$ATOMIZE_LLM_ROOT/atomizer.override.yaml" \
   --dry-run | grep -Fq '"slices": 1'
 
 echo "[stage2] dream dry-run + bundle over fixtures"

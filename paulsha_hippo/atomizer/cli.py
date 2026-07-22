@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
 from .agent_exec import CachingAgentClient
-from ..agent_profiles import AgentProfile, ExternalAgentRouter
+from ..agent_profiles import ExternalAgentRouter
 from . import config as atomizer_config
 from . import pipeline
 from .llm_promoter import LLMPromoter
@@ -77,39 +76,14 @@ def _build_promoter(
     if promoter_name != "llm":
         return IdentityPromoter()
 
-    explicit_command = getattr(args, "agent_command", None)
-    if explicit_command is not None:
-        command = list(atomizer_config.resolve_command_argv(shlex.split(explicit_command)))
-        custom_profile = AgentProfile.from_mapping(
-            {
-                "id": "custom-local",
-                "tier": 3,
-                "priority": 0,
-                "traits": ["custom", "fallback"],
-                "task_classes": ["atomization"],
-                "model": config.agent_exec_model,
-                "effort": "medium",
-                "supported_efforts": ["medium"],
-                "argv": command,
-            }
-        )
-        inner = ExternalAgentRouter(
-            (custom_profile,),
-            task_class="atomization",
-            deadline_seconds=config.router_deadline_seconds,
-            max_attempts=1,
-            max_agent_calls=1,
-        )
-        model = config.agent_exec_model
-    else:
-        inner = ExternalAgentRouter(
-            config.external_profiles,
-            task_class="atomization",
-            deadline_seconds=config.router_deadline_seconds,
-            max_attempts=config.router_max_attempts,
-            max_agent_calls=config.router_max_agent_calls,
-        )
-        model = config.external_profiles[0].model if config.external_profiles else "unknown"
+    inner = ExternalAgentRouter(
+        config.external_profiles,
+        task_class="atomization",
+        deadline_seconds=config.router_deadline_seconds,
+        max_attempts=config.router_max_attempts,
+        max_agent_calls=config.router_max_agent_calls,
+    )
+    model = config.external_profiles[0].model if config.external_profiles else "unknown"
     cached_client = CachingAgentClient(
         inner,
         _cache_dir(memory_root),
@@ -147,8 +121,7 @@ def prepare_pipeline_inputs(
     promoter: Promoter | None = None
     error: Exception | None = None
     try:
-        override = args.override if getattr(args, "override", None) else atomizer_config._DEFAULT_SENTINEL
-        config, config_hash = atomizer_config.load_config(override_path=override)
+        config, config_hash = atomizer_config.load_config()
         promoter = _build_promoter(args, config, memory_root, config_hash)
     except Exception as exc:  # noqa: BLE001 —初始化失敗需入 park 鏈並被記錄
         error = exc

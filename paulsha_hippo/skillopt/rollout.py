@@ -20,6 +20,14 @@ def make_atomize_rollout(
         cfg, _ = load_config()
 
     projects = list(known_projects)
+    configured_model = next(
+        (
+            profile.model
+            for profile in cfg.external_profiles
+            if profile.enabled and "atomization" in profile.task_classes
+        ),
+        "unknown",
+    )
 
     def rollout(skill_text: str, fragments: list[Fragment]) -> list[Slice]:
         if not fragments:
@@ -29,7 +37,7 @@ def make_atomize_rollout(
             agent_client,
             skill_text,
             projects,
-            model=cfg.agent_exec_model,
+            model=configured_model,
         )
         return promoter.promote(fragments, cfg)
 

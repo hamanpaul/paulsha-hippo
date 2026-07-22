@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any
 
 from paulsha_hippo import paths
+from paulsha_hippo.config_migration import PROHIBITED_KEYS
 from paulsha_hippo.agent_profiles import (
     AgentProfile,
     FIXED_MAX_AGENT_CALLS,
@@ -139,6 +140,21 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
             result[key] = value
     
     return result
+
+
+def _nested_prohibited_fields(value: object, path: str = "") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}" if path else key
+            if key.casefold() in PROHIBITED_KEYS and child not in (None, "", [], {}, ()):
+                found.append(child_path)
+            found.extend(_nested_prohibited_fields(child, child_path))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, child in enumerate(value):
+            found.extend(_nested_prohibited_fields(child, f"{path}[{index}]"))
+    return sorted(set(found))
 
 
 def _resolve_override(override_path):
@@ -315,14 +331,18 @@ def load_config(
     Raises:
         AtomizerConfigError: If config is invalid or schema unsupported
     """
-    # Resolve the default config source.  The managed runtime config has a
-    # different filename from the package template, so keep the full path
-    # instead of resolving a directory and appending ``atomizer.yaml``.
+    # A no-argument call is the production runtime contract and must read the
+    # canonical managed file.  Explicit ``override_path=None`` is retained as
+    # an isolated package-template helper for unit tests and migration tools;
+    # production CLIs never pass it.
     using_canonical_runtime_config = False
     if default_dir is None:
-        canonical_path = paths.atomizer_config_path()
-        if canonical_path.is_file():
-            default_config_path = canonical_path
+        if override_path is _DEFAULT_SENTINEL:
+            default_config_path = paths.atomizer_config_path()
+            if not default_config_path.is_file():
+                raise AtomizerConfigError(
+                    f"Canonical runtime config not found: {default_config_path}; run hippo init"
+                )
             using_canonical_runtime_config = True
         else:
             default_config_path = DEFAULT_CONFIG_DIR / "atomizer.yaml"
@@ -339,13 +359,17 @@ def load_config(
     # Once the managed canonical file exists, the runtime must not silently
     # merge the legacy provider/override surface.  Explicit override paths stay
     # available for isolated tests and operator-reviewed dry runs.
-    resolved_override = (
-        None if using_canonical_runtime_config and override_path is _DEFAULT_SENTINEL
-        else _resolve_override(override_path)
-    )
+    resolved_override = None if using_canonical_runtime_config else _resolve_override(override_path)
     if resolved_override is not None and resolved_override.exists():
         override_data = _read_mapping(resolved_override)
         config_data = _deep_merge(config_data, override_data)
+
+    nested_prohibited = _nested_prohibited_fields(config_data)
+    if nested_prohibited:
+        raise AtomizerConfigError(
+            "operator-redaction-required: prohibited direct-provider fields: "
+            + ", ".join(nested_prohibited)
+        )
     
     # Validate schema version
     schema_version = str(config_data.get("schema_version", ""))
@@ -389,6 +413,10 @@ def load_config(
     default_phase = config_data.get("default_phase", "review")
 
     agent_exec_config = config_data.get("agent_exec", {})
+    if using_canonical_runtime_config and agent_exec_config not in (None, "", {}, []):
+        raise AtomizerConfigError(
+            "canonical runtime config must use external_agents.profiles; agent_exec is retired"
+        )
     if not isinstance(agent_exec_config, Mapping):
         raise AtomizerConfigError(
             f"agent_exec must be a mapping, got {type(agent_exec_config).__name__}"
@@ -500,11 +528,10 @@ def load_config(
         raise AtomizerConfigError("external_agents must be a mapping")
     try:
         external_profiles = profiles_from_config(external_agents.get("profiles"))
-        # A legacy ``agent_exec.command`` is still an external CLI surface, not
-        # a provider backend.  Preserve it as an explicit Tier-3 custom-local
-        # profile so old operator overrides continue to work while all runtime
-        # calls still pass through the same router and safety validation.
-        if agent_exec_command != DEFAULT_AGENT_EXEC_COMMAND:
+        # Explicit package-template tests may still exercise the former custom
+        # command compatibility parser.  Canonical runtime can never enter this
+        # branch because agent_exec is rejected above.
+        if not using_canonical_runtime_config and agent_exec_command != DEFAULT_AGENT_EXEC_COMMAND:
             custom = AgentProfile.from_mapping(
                 {
                     "id": "custom-local",

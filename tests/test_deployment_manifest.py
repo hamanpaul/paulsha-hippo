@@ -168,7 +168,8 @@ def test_runtime_transaction_records_fence_reload_probes_and_is_idempotent(tmp_p
     )
     assert second["status"] == "applied"
     assert second["idempotent"] is True
-    assert len(calls) == call_count
+    assert len(calls) == call_count + 2
+    assert [entry[0] for entry in calls[-2:]] == ["doctor", "probe"]
 
 
 def test_runtime_failure_rolls_back_filesystem_and_external_phases(tmp_path):
@@ -239,3 +240,53 @@ def test_shared_hash_drift_in_unowned_entry_is_preserved(tmp_path):
     assert second["idempotent"] is True
     assert json.loads(shared.read_text(encoding="utf-8")) == {"user": "operator-edit", "hippo": "new"}
     assert first["applied"][0]["kind"] == "shared-json"
+
+
+def test_create_only_preserves_existing_user_config_and_tracks_no_ownership(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    target = tmp_path / "target"
+    config = target / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("memory_root: /custom\nprofile: operator\n", encoding="utf-8")
+    _manifest(manifest, [{"path": "config.yaml", "kind": "create-only", "content": "default: true\n"}])
+
+    result = deployment.install_all(manifest_path=manifest, target_root=target, force=True)
+
+    assert result["status"] == "applied"
+    assert config.read_text(encoding="utf-8") == "memory_root: /custom\nprofile: operator\n"
+    state = json.loads((target / ".hippo-install-state.json").read_text(encoding="utf-8"))
+    assert state["entries"]["config.yaml"]["kind"] == "create-only"
+    assert state["entries"]["config.yaml"]["created_by_install"] is False
+
+
+def test_create_only_creates_missing_config_but_never_overwrites_later_edits(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    target = tmp_path / "target"
+    _manifest(manifest, [{"path": "config.yaml", "kind": "create-only", "content": "default: true\n"}])
+
+    deployment.install_all(manifest_path=manifest, target_root=target, force=True)
+    config = target / "config.yaml"
+    assert config.read_text(encoding="utf-8") == "default: true\n"
+    config.write_text("operator: edited\n", encoding="utf-8")
+
+    second = deployment.install_all(manifest_path=manifest, target_root=target, force=True)
+
+    assert second["idempotent"] is True
+    assert config.read_text(encoding="utf-8") == "operator: edited\n"
+
+
+def test_retired_create_only_entry_forgets_preexisting_file_without_removing_it(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    target = tmp_path / "target"
+    config = target / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("operator: keep\n", encoding="utf-8")
+    _manifest(manifest, [{"path": "config.yaml", "kind": "create-only", "content": "default: true\n"}])
+    deployment.install_all(manifest_path=manifest, target_root=target, force=True)
+    _manifest(manifest, [])
+
+    deployment.install_all(manifest_path=manifest, target_root=target, force=True)
+
+    assert config.read_text(encoding="utf-8") == "operator: keep\n"
+    state = json.loads((target / ".hippo-install-state.json").read_text(encoding="utf-8"))
+    assert "config.yaml" not in state["entries"]

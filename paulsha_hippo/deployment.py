@@ -68,9 +68,9 @@ EXTERNAL_INSTALL_PHASES = (
 )
 ROLLBACK_PHASE_ORDER = (
     "rollback_start_timer_service",
-    "rollback_daemon_reload",
     "rollback_reinstall_service",
     "rollback_reinstall_hooks",
+    "rollback_daemon_reload",
     "release_writers",
     "rollback_stop_timer_service",
 )
@@ -83,6 +83,31 @@ _SENSITIVE_ARG_RE = re.compile(
 )
 _SHELL_META = re.compile(r"[\n\r;&|`$()]|\x00")
 _FORBIDDEN_EXECUTABLES = {"sh", "bash", "zsh", "fish", "dash", "env", "sudo"}
+
+REQUIRED_OWNED_SURFACES = (
+    "config",
+    "hooks",
+    "service",
+    "timer",
+    "registry-producer",
+)
+_OWNED_SURFACE_MODES = {"target-root", "runtime"}
+_PROTECTED_SURFACES = {
+    "memory",
+    "raw",
+    "archive",
+    "inbox",
+    "knowledge",
+    "ledger",
+    "index",
+    "recovery",
+    "logs",
+    "locks",
+    "project-registry",
+    "external-agent",
+    "shell",
+    "credentials",
+}
 
 
 @dataclass(frozen=True)
@@ -126,6 +151,9 @@ class InstallRuntime:
     runner_location: str | Path | None = None
     rollback_runner_location: str | Path | None = None
     rollback_target_root: str | Path | None = None
+    plan_sha256: str | None = None
+    plan_source: str | Path | None = None
+    runtime_kind: str = "reviewed-override"
 
 
 class AllowlistedCommandRunner:
@@ -341,6 +369,8 @@ def _safe_result_details(result: object) -> dict[str, Any]:
         "profile_id",
         "artifact_sha256",
         "build_commit",
+        "runtime_kind",
+        "surface",
     }
     details: dict[str, Any] = {}
     for key in allowed:
@@ -566,6 +596,52 @@ def _load_entries(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return result
 
 
+def _load_owned_surfaces(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    """Validate the release-level ownership boundary before planning files.
+
+    File entries remain the only authority for bytes below ``target_root``.
+    Runtime surfaces are declarations for the separately reviewed fencing and
+    post-install runner; they make it impossible for a package manifest to
+    silently claim that ``config.yaml`` is the whole deployment unit.
+    """
+
+    raw_surfaces = manifest.get("owned_surfaces")
+    required = manifest.get("required_surfaces")
+    if raw_surfaces is None and required is None:
+        # Backward-compatible fixture manifests are deliberately treated as a
+        # config-only transaction.  The shipped release manifest opts into the
+        # complete surface contract below.
+        return ("config",)
+    if not isinstance(raw_surfaces, list) or not isinstance(required, list):
+        raise DeploymentError("owned surface declarations must be lists")
+    surface_ids: list[str] = []
+    for raw in raw_surfaces:
+        if not isinstance(raw, Mapping):
+            raise DeploymentError("owned surface declaration must be an object")
+        surface_id = raw.get("id")
+        mode = raw.get("mode")
+        if not isinstance(surface_id, str) or not surface_id or surface_id in surface_ids:
+            raise DeploymentError("owned surface IDs must be unique non-empty strings")
+        if surface_id in _PROTECTED_SURFACES:
+            raise DeploymentError(f"protected surface is not install-owned: {surface_id}")
+        if mode not in _OWNED_SURFACE_MODES:
+            raise DeploymentError(f"owned surface has unsupported mode: {surface_id}")
+        surface_ids.append(surface_id)
+    required_ids = [str(item) for item in required]
+    if len(required_ids) != len(set(required_ids)):
+        raise DeploymentError("required owned surface IDs must be unique")
+    missing = sorted(set(required_ids) - set(surface_ids))
+    if missing:
+        raise DeploymentError("required owned surface missing: " + ", ".join(missing))
+    missing_release = sorted(set(REQUIRED_OWNED_SURFACES) - set(required_ids))
+    if missing_release:
+        raise DeploymentError("required owned surface missing: " + ", ".join(missing_release))
+    unknown_required = sorted(set(required_ids) - set(REQUIRED_OWNED_SURFACES))
+    if unknown_required:
+        raise DeploymentError("unsupported required owned surface: " + ", ".join(unknown_required))
+    return tuple(surface_ids)
+
+
 def _shared_desired(entry: Mapping[str, Any]) -> dict[str, Any]:
     value = entry.get("owned_entries", {})
     if not isinstance(value, Mapping):
@@ -590,6 +666,10 @@ def _validate_runtime(runtime: InstallRuntime, *, target_root: Path, transaction
         raise DeploymentError("runtime must be an InstallRuntime")
     if not runtime.profile_id or _SENSITIVE_ARG_RE.search(runtime.profile_id):
         raise DeploymentError("runtime profile_id is invalid")
+    if runtime.runtime_kind not in {"package-default", "reviewed-override"}:
+        raise DeploymentError("runtime kind is invalid")
+    if runtime.plan_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", runtime.plan_sha256):
+        raise DeploymentError("runtime plan hash is invalid")
     command_timeout = _validate_timeout(runtime.command_timeout, "command_timeout")
     drain_timeout = _validate_timeout(runtime.drain_timeout, "drain_timeout")
     lock_timeout = _validate_timeout(runtime.lock_timeout, "lock_timeout")
@@ -742,7 +822,7 @@ def _bounded_lock(path: Path, *, timeout: float) -> Iterator[None]:
 def _entry_plan(entry: Mapping[str, Any], target_root: Path, package_root: Path, previous: Mapping[str, Any]) -> dict[str, Any]:
     relative, path = _entry_path(entry, target_root)
     kind = str(entry.get("kind", "exclusive"))
-    if kind not in {"exclusive", "shared-json"}:
+    if kind not in {"exclusive", "create-only", "shared-json"}:
         raise DeploymentError(f"unsupported ownership kind: {kind}")
     if kind == "shared-json":
         desired_owned = _shared_desired(entry)
@@ -778,6 +858,20 @@ def _entry_plan(entry: Mapping[str, Any], target_root: Path, package_root: Path,
     current = path.read_bytes() if path.is_file() else None
     previous_hash = previous.get("sha256") if isinstance(previous, Mapping) else None
     current_hash = _sha_bytes(current) if current is not None else None
+    if kind == "create-only":
+        return {
+            "path": relative.as_posix(),
+            "kind": kind,
+            "action": "create" if current is None else "keep",
+            "current_hash": current_hash,
+            "desired_hash": _sha_bytes(desired),
+            "previous_hash": previous_hash,
+            "created_by_install": bool(
+                previous.get("created_by_install", False)
+                if isinstance(previous, Mapping) and previous.get("kind") == "create-only"
+                else current is None
+            ),
+        }
     if current is None:
         action = "create"
     elif current == desired:
@@ -805,6 +899,7 @@ def plan_install(
 ) -> dict[str, Any]:
     manifest_file = Path(manifest_path).expanduser()
     manifest = _read_json(manifest_file)
+    owned_surfaces = _load_owned_surfaces(manifest)
     entries = _load_entries(manifest)
     target = _validate_target_root(target_root)
     package = Path(package_root).expanduser() if package_root else manifest_file.parent
@@ -818,6 +913,10 @@ def plan_install(
         raise DeploymentError("install state must not be a symlink")
     previous = _read_json(state_file) if state_file.exists() else {}
     previous_entries = previous.get("entries", {}) if isinstance(previous.get("entries", {}), Mapping) else {}
+    previous_surfaces = previous.get("owned_surfaces")
+    surface_conflicts = []
+    if isinstance(previous_surfaces, list) and tuple(previous_surfaces) != owned_surfaces:
+        surface_conflicts.append("owned-surfaces")
     rows = [_entry_plan(entry, target, package, previous_entries.get(str(entry.get("path")), {})) for entry in entries]
     desired_paths = {row["path"] for row in rows}
     for path_text, old in previous_entries.items():
@@ -827,7 +926,8 @@ def plan_install(
         if _is_protected(relative):
             raise DeploymentError(f"protected stale path is not install-owned: {path_text}")
         target_path = _target_path(target, relative)
-        if str(old.get("kind", "exclusive")) == "shared-json":
+        old_kind = str(old.get("kind", "exclusive"))
+        if old_kind == "shared-json":
             current = _read_shared(target_path)
             owned = old.get("owned_entries", {}) if isinstance(old.get("owned_entries", {}), Mapping) else {}
             conflicts = [key for key, value in owned.items() if key in current and current[key] != value]
@@ -850,22 +950,35 @@ def plan_install(
             continue
         current_hash = _sha_bytes(target_path.read_bytes()) if target_path.is_file() else None
         old_hash = old.get("sha256")
+        if old_kind == "create-only" and old.get("created_by_install") is not True:
+            rows.append({
+                "path": path_text,
+                "kind": "create-only",
+                "action": "forget",
+                "current_hash": current_hash,
+                "previous_hash": old_hash,
+            })
+            continue
         rows.append({
             "path": path_text,
-            "kind": str(old.get("kind", "exclusive")),
+            "kind": old_kind,
             "action": "remove" if current_hash in {old_hash, None} else "conflict",
             "current_hash": current_hash,
             "previous_hash": old_hash,
         })
     conflicts = [row["path"] for row in rows if row.get("action") == "conflict" or row.get("conflicts")]
+    conflicts.extend(surface_conflicts)
     state_required = not state_file.exists()
     return {
-        "schema_version": "1",
+        "schema_version": str(manifest.get("schema_version", "1")),
         "manifest": str(manifest_file),
+        "manifest_sha256": _sha_bytes(manifest_file.read_bytes()),
         "target_root": str(target.resolve()),
         "state_path": str(state_file),
+        "state_sha256": _sha_bytes(state_file.read_bytes()) if state_file.is_file() else None,
+        "owned_surfaces": list(owned_surfaces),
         "force_required": state_required or any(
-            row["action"] in {"create", "update", "remove", "shared-remove"} for row in rows
+            row["action"] in {"create", "update", "remove", "shared-remove", "forget"} for row in rows
         ),
         "state_required": state_required,
         "conflicts": conflicts,
@@ -962,14 +1075,26 @@ def _state_payload(manifest: Mapping[str, Any], plan: Mapping[str, Any], target:
         path_text = str(entry["path"])
         row = plan_rows[path_text]
         destination = _target_path(target, _safe_relative(path_text))
-        if entry.get("kind", "exclusive") == "shared-json":
+        kind = str(entry.get("kind", "exclusive"))
+        if kind == "shared-json":
             owned = _shared_desired(entry)
             sha256 = _sha_bytes(_json_bytes(_read_shared(destination))) if destination.exists() else None
             state_entries[path_text] = {"kind": "shared-json", "owned_entries": owned, "sha256": sha256}
+        elif kind == "create-only":
+            sha256 = _sha_bytes(destination.read_bytes()) if destination.is_file() else row.get("desired_hash")
+            state_entries[path_text] = {
+                "kind": "create-only",
+                "created_by_install": bool(row.get("created_by_install", row.get("action") == "create")),
+                "sha256": sha256,
+            }
         else:
             sha256 = _sha_bytes(destination.read_bytes()) if destination.is_file() else row.get("desired_hash")
             state_entries[path_text] = {"kind": "exclusive", "sha256": sha256}
-    return {"schema_version": "1", "entries": state_entries}
+    return {
+        "schema_version": "2",
+        "owned_surfaces": list(_load_owned_surfaces(manifest)),
+        "entries": state_entries,
+    }
 
 
 def _owned_snapshot(current: Mapping[str, Any], keys: Mapping[str, Any]) -> dict[str, Any]:
@@ -1009,7 +1134,7 @@ def _apply_filesystem(
     applied: list[dict[str, Any]] = []
     for row in plan.get("entries", []):
         action = str(row.get("action", "keep"))
-        if action == "keep":
+        if action in {"keep", "forget"}:
             continue
         relative = _safe_relative(str(row["path"]))
         path = _target_path(target, relative)
@@ -1287,6 +1412,7 @@ def _new_journal(
         "manifest_sha256": _sha_bytes(manifest_path.read_bytes()),
         "target_root": str(target),
         "transaction_root": str(transaction_root),
+        "owned_surfaces": list(plan.get("owned_surfaces", ())),
         "plan": dict(plan),
         "state_path": str(state_path),
         "state_existed": state_existed,
@@ -1298,6 +1424,9 @@ def _new_journal(
         "runtime": {
             "enabled": runtime is not None,
             "profile_id": runtime.profile_id if runtime is not None else None,
+            "kind": runtime.runtime_kind if runtime is not None else None,
+            "plan_sha256": runtime.plan_sha256 if runtime is not None else None,
+            "plan_source": str(runtime.plan_source) if runtime is not None and runtime.plan_source else None,
             "command_runner": runtime_info.get("command_boundary") if runtime_info else None,
             "rollback_runner": runtime_info.get("rollback_boundary") if runtime_info else None,
         },
@@ -1323,6 +1452,9 @@ def apply_install(
     target = _validate_target_root(str(plan["target_root"]))
     manifest_file = Path(manifest_path).expanduser().resolve()
     manifest = _read_json(manifest_file)
+    planned_manifest_sha = plan.get("manifest_sha256")
+    if planned_manifest_sha and planned_manifest_sha != _sha_bytes(manifest_file.read_bytes()):
+        raise DeploymentError("manifest drift requires a fresh reviewed plan")
     package = Path(package_root).expanduser().resolve() if package_root else manifest_file.parent
     if dry_run:
         dry_root = _validate_transaction_root(
@@ -1338,17 +1470,46 @@ def apply_install(
             "rollback_phase_order": list(ROLLBACK_PHASE_ORDER),
             "plan": dict(plan),
         }
-    if not plan.get("force_required") and Path(str(plan["state_path"])).is_file():
-        return {
-            "status": "applied",
-            "idempotent": True,
-            "mutation": False,
-            "transaction": None,
-            "applied": [],
-        }
+    state_file = Path(str(plan["state_path"])).expanduser().resolve()
     token = secrets.token_hex(8)
     requested_tx = transaction_root or (Path(tempfile.gettempdir()) / f"hippo-install-{token}")
     tx_root = _validate_transaction_root(requested_tx, target_root=target)
+    if not plan.get("force_required") and state_file.is_file():
+        planned_state_sha = plan.get("state_sha256")
+        if planned_state_sha != _sha_bytes(state_file.read_bytes()):
+            raise DeploymentError("install state drift requires a fresh reviewed plan")
+        runtime_healthy = runtime is None
+        if runtime is not None:
+            _validate_runtime(runtime, target_root=target, transaction_root=tx_root)
+            context = InstallContext(
+                manifest_path=manifest_file,
+                target_root=target,
+                transaction_root=tx_root,
+                journal_path=tx_root / "transaction.json",
+                profile_id=runtime.profile_id,
+                phase="idempotence-check",
+            )
+            try:
+                _gate_phase(runtime.doctor_static, context, phase="doctor_static")
+                _gate_phase(
+                    runtime.profile_probe,
+                    context,
+                    phase="profile_probe",
+                    profile_id=runtime.profile_id,
+                )
+                runtime_healthy = True
+            except Exception:
+                runtime_healthy = False
+        if runtime_healthy:
+            return {
+                "status": "applied",
+                "idempotent": True,
+                "mutation": False,
+                "transaction": None,
+                "applied": [],
+            }
+        if not force:
+            raise DeploymentError("--force is required to repair live install surfaces")
     tx_root.mkdir(parents=True, exist_ok=True)
     journal = tx_root / "transaction.json"
     if journal.is_symlink():

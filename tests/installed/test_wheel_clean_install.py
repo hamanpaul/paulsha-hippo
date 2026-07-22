@@ -29,6 +29,7 @@ def test_installed_config_and_manifest_assets_are_packaged(installed_hippo: tupl
         "from importlib.resources import files; "
         "root=files('paulsha_hippo'); "
         "assert (root/'atomizer'/'atomizer.yaml').is_file(); "
-        "assert (root/'install-manifest.json').is_file()"
+        "assert (root/'install-manifest.json').is_file(); "
+        "assert (root/'install-runtime-plan.json').is_file()"
     )
     subprocess.run([str(executable), "-c", code], cwd="/tmp", env=isolated_env, check=True)

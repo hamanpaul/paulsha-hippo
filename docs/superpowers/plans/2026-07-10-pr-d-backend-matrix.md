@@ -1,5 +1,11 @@
 # PR-D Backend 矩陣（#10）Implementation Plan
 
+> **歷史文件／已取代：** 本計畫中的 `atomizer.override.yaml`、`agent_exec`、
+> `--agent-command`、`openai-compatible` 與 repo 內 provider/API-key 管理已由
+> `openspec/changes/issue-34-atomization-release/` 的 accepted 設計取代。
+> 現行 runtime 只讀 Hippo canonical `config.yaml`，並透過宣告式 external CLI
+> agent profiles 路由；本文件僅保留歷史脈絡，不可作為操作或實作指引。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把蒸餾 backend 從三個硬編碼檔位升級為宣告式 preset registry：codex/copilot headless 依本機實測 argv 接線、gemini（僅 rc=41 auth 失敗觀察、無 round-trip 實證）與 antigravity 誠實標 unavailable；`init --backend` 選單化、`doctor` per-preset probe、mock 情境矩陣＋真蒸餾 smoke＋openai-compatible integration smoke＋supervise 無 systemd E2E 全鏈補齊，#10 以 `Refs` 收斂——gemini 固定缺項由收口批次拆新 issue 後關單。

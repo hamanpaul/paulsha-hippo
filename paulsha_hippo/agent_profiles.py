@@ -26,6 +26,21 @@ FIXED_TIMEOUT_SECONDS = 300
 FIXED_MAX_OUTPUT_TOKENS = 2_048
 FIXED_MAX_ATTEMPTS = 6
 FIXED_MAX_AGENT_CALLS = 6
+FALLBACK_ON = (
+    "ineligible",
+    "auth",
+    "rate_limit",
+    "quota",
+    "capacity",
+    "context_capability",
+    "timeout",
+    "transport",
+    "process",
+    "empty_output",
+    "invalid_output",
+)
+ALLOWED_FALLBACK_CATEGORIES = frozenset(FALLBACK_ON)
+NON_FALLBACK_CATEGORIES = frozenset({"policy", "config", "schema", "unsafe", "budget"})
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
 _ALLOWED_PLACEHOLDERS = {"MODEL", "EFFORT"}
@@ -64,6 +79,9 @@ class AgentRunError(RuntimeError):
         self.profile_id = profile_id
         self.exit_code = exit_code
         self.stderr = stderr
+
+
+ResponseValidator = Callable[[str], object]
 
 
 def sanitize_stderr(value: object, *, limit: int = 500) -> str:
@@ -116,19 +134,7 @@ class AgentProfile:
     no_custom_instructions: bool = True
     no_user_interaction: bool = True
     no_remote: bool = True
-    fallback_on: tuple[str, ...] = (
-        "ineligible",
-        "auth",
-        "rate_limit",
-        "quota",
-        "capacity",
-        "context_capability",
-        "timeout",
-        "transport",
-        "process",
-        "empty_output",
-        "invalid_output",
-    )
+    fallback_on: tuple[str, ...] = FALLBACK_ON
     metadata: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
@@ -219,7 +225,10 @@ class AgentProfile:
             provider_context=provider_context,
             revision=str(raw.get("revision", "1")),
             enabled=enabled,
-            fallback_on=_tuple_strings(raw.get("fallback_on", cls.fallback_on), f"profile {profile_id}.fallback_on"),
+            fallback_on=_validate_fallback_on(
+                raw.get("fallback_on", FALLBACK_ON),
+                f"profile {profile_id}.fallback_on",
+            ),
             # Unknown values are intentionally not retained: profile objects are
             # later serialized into provenance/cache identity and must not become
             # an accidental secret/config sink.
@@ -252,6 +261,7 @@ class AgentProfile:
         if not all((self.zero_tool, self.no_mcp, self.no_custom_instructions, self.no_user_interaction, self.no_remote)):
             return False, "unsafe_restriction"
         executable = self.render_argv()[0]
+        path = effective_path(path)
         if Path(executable).is_absolute():
             if not Path(executable).is_file() or not os.access(executable, os.X_OK):
                 return False, "executable"
@@ -286,6 +296,26 @@ def _validate_argv(argv: tuple[str, ...], profile_id: str) -> tuple[str, ...]:
     if any(token in _FORBIDDEN_TOKENS for token in argv):
         raise ProfileConfigError(f"profile {profile_id}: permission bypass is forbidden")
     return argv
+
+
+def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
+    values = _tuple_strings(value, field_name)
+    if len(set(values)) != len(values):
+        raise ProfileConfigError(f"{field_name} must not contain duplicate categories")
+    forbidden = sorted(set(values) & NON_FALLBACK_CATEGORIES)
+    if forbidden:
+        raise ProfileConfigError(
+            f"{field_name} contains non-fallback categories: {', '.join(forbidden)}"
+        )
+    unknown = sorted(set(values) - ALLOWED_FALLBACK_CATEGORIES)
+    if unknown:
+        raise ProfileConfigError(
+            f"{field_name} is outside the immutable fallback allowlist: "
+            + ", ".join(unknown)
+        )
+    # Canonical order prevents configuration ordering from changing routing or
+    # cache identity.  The tuple is immutable once it enters the frozen profile.
+    return tuple(category for category in FALLBACK_ON if category in values)
 
 
 def default_profiles() -> tuple[AgentProfile, ...]:
@@ -338,6 +368,14 @@ def validate_profiles(profiles: Sequence[AgentProfile]) -> None:
         raise ProfileConfigError("same-tier priorities must be unique")
     for profile in profiles:
         _validate_argv(profile.argv, profile.id)
+        canonical_fallback = _validate_fallback_on(
+            profile.fallback_on,
+            f"profile {profile.id}.fallback_on",
+        )
+        if tuple(profile.fallback_on) != canonical_fallback:
+            raise ProfileConfigError(
+                f"profile {profile.id}.fallback_on is not in canonical immutable order"
+            )
 
 
 def fingerprint_argv(argv: Sequence[str]) -> str:
@@ -396,6 +434,7 @@ class AgentRunResult:
     exit_code: int | None = None
     fallback_reason: str | None = None
     priority: int = 0
+    response_schema: str = RESPONSE_SCHEMA_VERSION
 
 
 def classify_failure(stderr: object, *, exit_code: int | None = None) -> str:
@@ -437,8 +476,15 @@ def child_environment(extra: Mapping[str, str] | None = None, *, path: str | Non
     return result
 
 
+def effective_path(path: str | None = None) -> str:
+    """Resolve the one PATH used by eligibility checks and child execution."""
+    return str(path or child_environment().get("PATH", os.defpath))
+
+
 class ExternalAgentRouter:
     """Deterministic tier/priority fallback with bounded attempts and circuit state."""
+
+    response_schema = RESPONSE_SCHEMA_VERSION
 
     def __init__(
         self,
@@ -449,6 +495,7 @@ class ExternalAgentRouter:
         max_attempts: int = FIXED_MAX_ATTEMPTS,
         max_agent_calls: int = FIXED_MAX_AGENT_CALLS,
         executor: Callable[[AgentProfile, str, int], tuple[str, str, int | None]] | None = None,
+        execution_path: str | None = None,
     ) -> None:
         validate_profiles(profiles)
         self.profiles = tuple(sorted(profiles, key=lambda profile: (profile.tier, profile.priority, profile.id)))
@@ -456,6 +503,7 @@ class ExternalAgentRouter:
         self.deadline_seconds = int(deadline_seconds)
         self.max_attempts = int(max_attempts)
         self.max_agent_calls = int(max_agent_calls)
+        self.execution_path = effective_path(execution_path)
         if self.deadline_seconds <= 0 or self.max_attempts <= 0 or self.max_agent_calls <= 0:
             raise ProfileConfigError("router budgets must be positive")
         self._circuit_open_until: dict[str, float] = {}
@@ -474,7 +522,11 @@ class ExternalAgentRouter:
         """
         payload = {
             "router_contract": ROUTER_CONTRACT_VERSION,
+            "response_schema": RESPONSE_SCHEMA_VERSION,
             "task_class": self.task_class,
+            "execution_path_hash": hashlib.sha256(
+                self.execution_path.encode("utf-8")
+            ).hexdigest(),
             "deadline_seconds": self.deadline_seconds,
             "max_attempts": self.max_attempts,
             "max_agent_calls": self.max_agent_calls,
@@ -487,6 +539,7 @@ class ExternalAgentRouter:
                     "model": profile.model,
                     "effort": profile.effort,
                     "command_fingerprint": profile.command_fingerprint(),
+                    "fallback_on": profile.fallback_on,
                 }
                 for profile in self.profiles
             ],
@@ -507,87 +560,44 @@ class ExternalAgentRouter:
         from .atomizer.agent_exec import AgentExecClient
 
         client = AgentExecClient(
-            list(profile.render_argv()), timeout=timeout, profile=profile
+            list(profile.render_argv()),
+            timeout=timeout,
+            env={"PATH": self.execution_path},
+            profile=profile,
         )
         return client.run_with_evidence(prompt)
 
-    def run(self, prompt: str) -> str:
-        self.last_result = None
-        started = time.monotonic()
-        attempts: list[AgentRunResult] = []
-        calls = 0
-        for profile in self.profiles:
-            if len(attempts) >= self.max_attempts or calls >= self.max_agent_calls:
-                break
-            if time.monotonic() - started >= self.deadline_seconds:
-                break
-            open_until = self._circuit_open_until.get(profile.id, 0.0)
-            if open_until > time.monotonic():
-                continue
-            eligible, reason = profile.eligible(task_class=self.task_class)
-            if not eligible:
-                attempts.append(AgentRunResult(
-                    profile.id, profile.revision, profile.tier, len(attempts) + 1,
-                    profile.model, profile.effort, None, "unavailable", profile.command_fingerprint(),
-                    0.0, "ineligible", reason, None, None, priority=profile.priority,
-                ))
-                continue
-            index = len(attempts) + 1
-            calls += 1
-            attempt_started = time.monotonic()
-            try:
-                remaining = max(
-                    1, int(self.deadline_seconds - (time.monotonic() - started))
-                )
-                raw, stderr, exit_code = self._run_one(
-                    profile, prompt, index, min(profile.timeout, remaining)
-                )
-                elapsed = time.monotonic() - attempt_started
-                if not str(raw).strip():
-                    raise AgentRunError("external agent produced empty output", category="empty_output", profile_id=profile.id, stderr=stderr)
-                result = AgentRunResult(
-                    profile.id, profile.revision, profile.tier, index, profile.model, profile.effort,
-                    None, "unverified", profile.command_fingerprint(), elapsed,
-                    None, sanitize_stderr(stderr), exit_code,
-                    None if not attempts else "degraded-success", priority=profile.priority,
-                )
-                self.last_result = result
-                attempts.append(result)
-                self.attempts = tuple(attempts)
-                return str(raw)
-            except Exception as exc:
-                if not isinstance(exc, AgentRunError):
-                    # Avoid a module-level import cycle: agent_exec imports the
-                    # profile contract, while the router lazily invokes it.
-                    category = str(getattr(exc, "category", "process"))
-                    exc = AgentRunError(
-                        str(exc),
-                        category=category,
-                        profile_id=profile.id,
-                        exit_code=getattr(exc, "exit_code", None),
-                        stderr=getattr(exc, "stderr", ""),
-                    )
-                category = exc.category if exc.category in profile.fallback_on else "policy"
-                self._last_error = exc
-                result = AgentRunResult(
-                    profile.id, profile.revision, profile.tier, index, profile.model, profile.effort,
-                    None, "unavailable", profile.command_fingerprint(), time.monotonic() - attempt_started,
-                    category, sanitize_stderr(exc.stderr), exc.exit_code,
-                    priority=profile.priority,
-                )
-                attempts.append(result)
-                self._circuit_open_until[profile.id] = time.monotonic() + 60.0
-                if category not in profile.fallback_on:
-                    break
-        self.attempts = tuple(attempts)
-        if not attempts and self._last_error is not None:
+    @staticmethod
+    def _validate_response(
+        profile: AgentProfile,
+        raw: str,
+        response_validator: ResponseValidator | None,
+    ) -> None:
+        if response_validator is None:
+            return
+        try:
+            response_validator(raw)
+        except Exception as exc:
             raise AgentRunError(
-                str(self._last_error),
-                category=self._last_error.category,
-                profile_id=self._last_error.profile_id,
-                exit_code=self._last_error.exit_code,
-                stderr=self._last_error.stderr,
-            )
+                "external agent response failed response-schema validation",
+                category="invalid_output",
+                profile_id=profile.id,
+                stderr=sanitize_stderr(exc),
+            ) from exc
+
+    @staticmethod
+    def _transition_category(profile: AgentProfile, error: AgentRunError) -> str:
+        category = str(error.category or "process")
+        if category in NON_FALLBACK_CATEGORIES:
+            return category
+        if category not in ALLOWED_FALLBACK_CATEGORIES:
+            return "policy"
+        if category not in profile.fallback_on:
+            return "policy"
+        return category
+
+    def _raise_exhausted(self, attempts: list[AgentRunResult]) -> None:
+        self.attempts = tuple(attempts)
         last = attempts[-1] if attempts else None
         category = last.failure_category if last else "ineligible"
         detail = "external agent fallback exhausted"
@@ -615,10 +625,173 @@ class ExternalAgentRouter:
             stderr=last.stderr if last else "",
         )
 
+    def run(
+        self,
+        prompt: str,
+        *,
+        response_validator: ResponseValidator | None = None,
+    ) -> str:
+        return self.run_session((prompt,), response_validator=response_validator)[0]
+
+    def run_session(
+        self,
+        prompts: Sequence[str],
+        *,
+        response_validator: ResponseValidator | None = None,
+    ) -> tuple[str, ...]:
+        """Run a frozen prompt session with one profile pinned for all chunks.
+
+        A profile is considered successful only after every prompt validates.  If
+        a later chunk fails, all earlier outputs are discarded and the next
+        profile receives the original prompt sequence from chunk zero.  The
+        deadline and agent-call budget belong to this whole session.
+        """
+        frozen_prompts = tuple(str(prompt) for prompt in prompts)
+        if not frozen_prompts:
+            return ()
+        self.last_result = None
+        self.attempts = ()
+        self._last_error = None
+        started = time.monotonic()
+        attempts: list[AgentRunResult] = []
+        calls = 0
+        for profile in self.profiles:
+            if len(attempts) >= self.max_attempts or calls >= self.max_agent_calls:
+                break
+            if time.monotonic() - started >= self.deadline_seconds:
+                break
+            if self._circuit_open_until.get(profile.id, 0.0) > time.monotonic():
+                continue
+            eligible, reason = profile.eligible(
+                task_class=self.task_class,
+                path=self.execution_path,
+            )
+            if not eligible:
+                # Disabled or task-mismatched profiles are declaratively absent
+                # from this route.  An enabled task profile that cannot execute
+                # is a real fallback transition and must remain in provenance,
+                # while still consuming zero agent calls.
+                if profile.enabled and self.task_class in profile.task_classes:
+                    attempts.append(
+                        AgentRunResult(
+                            profile.id,
+                            profile.revision,
+                            profile.tier,
+                            len(attempts) + 1,
+                            profile.model,
+                            profile.effort,
+                            None,
+                            "unavailable",
+                            profile.command_fingerprint(),
+                            0.0,
+                            "ineligible",
+                            sanitize_stderr(reason),
+                            None,
+                            None,
+                            profile.priority,
+                            RESPONSE_SCHEMA_VERSION,
+                        )
+                    )
+                continue
+            attempt_index = len(attempts) + 1
+            attempt_started = time.monotonic()
+            outputs: list[str] = []
+            try:
+                for prompt in frozen_prompts:
+                    remaining_seconds = self.deadline_seconds - (time.monotonic() - started)
+                    if remaining_seconds <= 0:
+                        raise AgentRunError(
+                            "external agent session deadline exhausted",
+                            category="budget",
+                            profile_id=profile.id,
+                        )
+                    if calls >= self.max_agent_calls:
+                        raise AgentRunError(
+                            "external agent session call budget exhausted",
+                            category="budget",
+                            profile_id=profile.id,
+                        )
+                    calls += 1
+                    raw, stderr, exit_code = self._run_one(
+                        profile,
+                        prompt,
+                        calls,
+                        min(profile.timeout, max(1, int(remaining_seconds))),
+                    )
+                    raw = str(raw)
+                    if not raw.strip():
+                        raise AgentRunError(
+                            "external agent produced empty output",
+                            category="empty_output",
+                            profile_id=profile.id,
+                            stderr=stderr,
+                            exit_code=exit_code,
+                        )
+                    self._validate_response(profile, raw, response_validator)
+                    outputs.append(raw)
+                result = AgentRunResult(
+                    profile.id,
+                    profile.revision,
+                    profile.tier,
+                    attempt_index,
+                    profile.model,
+                    profile.effort,
+                    None,
+                    "unverified",
+                    profile.command_fingerprint(),
+                    time.monotonic() - attempt_started,
+                    None,
+                    "",
+                    0,
+                    None if not attempts else "degraded-success",
+                    profile.priority,
+                    RESPONSE_SCHEMA_VERSION,
+                )
+                attempts.append(result)
+                self.last_result = result
+                self.attempts = tuple(attempts)
+                return tuple(outputs)
+            except Exception as caught:
+                if not isinstance(caught, AgentRunError):
+                    caught = AgentRunError(
+                        str(caught),
+                        category=str(getattr(caught, "category", "process")),
+                        profile_id=profile.id,
+                        exit_code=getattr(caught, "exit_code", None),
+                        stderr=getattr(caught, "stderr", ""),
+                    )
+                category = self._transition_category(profile, caught)
+                self._last_error = caught
+                result = AgentRunResult(
+                    profile.id,
+                    profile.revision,
+                    profile.tier,
+                    attempt_index,
+                    profile.model,
+                    profile.effort,
+                    None,
+                    "unavailable",
+                    profile.command_fingerprint(),
+                    time.monotonic() - attempt_started,
+                    category,
+                    sanitize_stderr(caught.stderr or caught),
+                    caught.exit_code,
+                    None,
+                    profile.priority,
+                    RESPONSE_SCHEMA_VERSION,
+                )
+                attempts.append(result)
+                self._circuit_open_until[profile.id] = time.monotonic() + 60.0
+                if category not in ALLOWED_FALLBACK_CATEGORIES or category not in profile.fallback_on:
+                    break
+        self._raise_exhausted(attempts)
+
 
 __all__ = [
     "AgentProfile", "AgentRunError", "AgentRunResult", "ExternalAgentRouter",
+    "ALLOWED_FALLBACK_CATEGORIES", "FALLBACK_ON", "NON_FALLBACK_CATEGORIES",
     "ProfileConfigError", "ROUTER_CONTRACT_VERSION", "RESPONSE_SCHEMA_VERSION",
-    "cache_identity", "child_environment", "classify_failure", "default_profiles", "fingerprint_argv",
+    "ResponseValidator", "cache_identity", "child_environment", "classify_failure",
+    "default_profiles", "effective_path", "fingerprint_argv",
     "profiles_from_config", "sanitize_stderr", "validate_profiles",
 ]

@@ -1,4 +1,4 @@
-"""#15 review F2 E2E：atomizer config 無效（malformed override）時，dream run
+"""#15 review F2 E2E：canonical atomizer config 無效時，dream run
 不得讓例外逃出失敗邊界——eligible split sessions 立即 park（含證據）、
 dream ledger 記 error record、process 正常收斂（exit 0），timer 不再整輪重複失敗。
 """
@@ -17,7 +17,7 @@ from paulsha_hippo import cli
 from paulsha_hippo.ledger import dream as dream_ledger
 from paulsha_hippo.ledger import processing
 
-_MALFORMED_OVERRIDE = (
+_MALFORMED_CANONICAL = (
     'schema_version: "1"\n'
     "agent_exec:\n"
     "  command: not-a-list\n"  # 必須是 list → AtomizerConfigError
@@ -27,16 +27,17 @@ _MALFORMED_OVERRIDE = (
 class DreamConfigFailureE2ETests(unittest.TestCase):
     def _env(self, tmp: str) -> dict[str, str]:
         return {
+            "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-config",
             "PSC_CONFIG_ROOT": f"{tmp}/cfg/.config/paulshaclaw",
             "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
             "PSC_MEMORY_ROOT": f"{tmp}/memory",
         }
 
-    def _write_malformed_override(self, tmp: str) -> None:
-        cfg_dir = Path(tmp) / "cfg" / ".config" / "paulshaclaw"
+    def _write_malformed_config(self, tmp: str) -> None:
+        cfg_dir = Path(tmp) / "hippo-config"
         cfg_dir.mkdir(parents=True, exist_ok=True)
-        (cfg_dir / "atomizer.override.yaml").write_text(
-            _MALFORMED_OVERRIDE, encoding="utf-8"
+        (cfg_dir / "config.yaml").write_text(
+            _MALFORMED_CANONICAL, encoding="utf-8"
         )
 
     def _seed_split_session(self, root: Path) -> None:
@@ -45,11 +46,11 @@ class DreamConfigFailureE2ETests(unittest.TestCase):
             now="2026-07-09T00:00:00Z", config_hash="h", fragments=2,
         )
 
-    def test_malformed_override_parks_split_sessions_and_records_error(self):
+    def test_malformed_canonical_config_parks_split_sessions_and_records_error(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "memory"
             root.mkdir(parents=True)
-            self._write_malformed_override(tmp)
+            self._write_malformed_config(tmp)
             self._seed_split_session(root)
 
             buf = io.StringIO()
@@ -64,13 +65,13 @@ class DreamConfigFailureE2ETests(unittest.TestCase):
             self.assertIn("atomize:AtomizerConfigError", payload["errors"])
             atomize = payload["passes"]["atomize"]
             self.assertEqual(atomize["error"], "AtomizerConfigError")
-            self.assertIn("agent_exec.command", atomize["error_message"])
+            self.assertIn("agent_exec is retired", atomize["error_message"])
 
             # spec「config 無效立即 parked」：failure category＋證據齊備
             self.assertEqual(processing.state_of(root, "claude:s1"), "parked")
             event = processing.fold_events(root)["claude:s1"]
             self.assertEqual(event["failure_category"], "backend_unavailable")
-            self.assertIn("agent_exec.command", event["error"])
+            self.assertIn("agent_exec is retired", event["error"])
             evidence = root / "runtime" / "queue" / "_failed" / "claude__s1.json"
             self.assertTrue(evidence.exists())
             evidence_payload = json.loads(evidence.read_text(encoding="utf-8"))
@@ -90,7 +91,7 @@ class DreamConfigFailureE2ETests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "memory"
             root.mkdir(parents=True)
-            self._write_malformed_override(tmp)
+            self._write_malformed_config(tmp)
             self._seed_split_session(root)
 
             for round_now in ("2026-07-10T00:00:00Z", "2026-07-10T01:00:00Z"):
@@ -106,11 +107,11 @@ class DreamConfigFailureE2ETests(unittest.TestCase):
             ]
             self.assertEqual(len(parked_events), 1)
 
-    def test_dry_run_with_malformed_override_is_mutation_free(self):
+    def test_dry_run_with_malformed_canonical_config_is_mutation_free(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "memory"
             root.mkdir(parents=True)
-            self._write_malformed_override(tmp)
+            self._write_malformed_config(tmp)
             self._seed_split_session(root)
 
             buf = io.StringIO()

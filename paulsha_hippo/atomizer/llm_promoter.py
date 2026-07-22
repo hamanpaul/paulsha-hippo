@@ -7,8 +7,19 @@ import re
 from dataclasses import replace
 
 from . import budget, llm_output, slice_frontmatter
-from ..agent_profiles import AgentRunError, AgentRunResult
-from .agent_exec import AgentClient, AgentExecError, AgentUnavailableError, CachingAgentClient
+from ..agent_profiles import (
+    AgentRunError,
+    AgentRunResult,
+    ExternalAgentRouter,
+    RESPONSE_SCHEMA_VERSION,
+)
+from .agent_exec import (
+    AgentClient,
+    AgentExecError,
+    AgentTransientError,
+    AgentUnavailableError,
+    CachingAgentClient,
+)
 from .provenance import provenance_from_result, safe_provenance, sha256_text
 from .config import AtomizerConfig, is_safe_path_component
 from ..noise import is_generic_title
@@ -17,6 +28,26 @@ from .slice_frontmatter import Slice
 from .splitter import Fragment
 
 _LOG = logging.getLogger("paulsha_hippo.atomizer")
+
+_PROMOTE_FAILURE_CATEGORIES = {
+    "transient": "transient",
+    "process": "transient",
+    "timeout": "transient",
+    "transport": "transient",
+    "rate_limit": "transient",
+    "quota": "transient",
+    "capacity": "transient",
+    "invalid_output": "invalid_output",
+    "empty_output": "invalid_output",
+    "ineligible": "backend_unavailable",
+    "auth": "backend_unavailable",
+    "context_capability": "backend_unavailable",
+    "policy": "backend_unavailable",
+    "config": "backend_unavailable",
+    "schema": "backend_unavailable",
+    "unsafe": "backend_unavailable",
+    "budget": "backend_unavailable",
+}
 
 
 class PromoteError(Exception):
@@ -40,11 +71,18 @@ class PromoteError(Exception):
 
 def _failure_category(exc: Exception) -> str:
     if isinstance(exc, AgentRunError):
-        return exc.category
+        return _PROMOTE_FAILURE_CATEGORIES.get(exc.category, "backend_unavailable")
     if isinstance(exc, AgentUnavailableError):
         return "backend_unavailable"
     if isinstance(exc, AgentExecError):
-        return "transient"
+        category = str(getattr(exc, "category", "transient") or "transient")
+        # AgentTransientError is the legacy typed wrapper used by callers that
+        # do not provide a more specific subprocess category. Keep the
+        # fine-grained process category in attempts/provenance while exposing
+        # the pipeline's coarse transient category at this boundary.
+        if isinstance(exc, AgentTransientError) and category == "process":
+            category = "transient"
+        return _PROMOTE_FAILURE_CATEGORIES.get(category, "backend_unavailable")
     return "invalid_output"
 
 
@@ -59,12 +97,14 @@ class LLMPromoter(Promoter):
         *,
         model: str = "unknown",
         config_hash: str = "",
+        response_schema: str = RESPONSE_SCHEMA_VERSION,
     ) -> None:
         self._agent = agent_client
         self._skill = skill_text
         self._projects = list(known_projects)
         self._model = model
         self._config_hash = config_hash
+        self._response_schema = response_schema
         self.last_disposition = "findings"
         self.no_findings_reasons: tuple[str, ...] = ()
         self._last_chunk_cache_keys: tuple[str, ...] = ()
@@ -80,21 +120,73 @@ class LLMPromoter(Promoter):
         return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
     @classmethod
-    def cache_key_for_fragments(cls, fragments: list[Fragment]) -> str:
+    def cache_key_for_fragments(
+        cls,
+        fragments: list[Fragment],
+        *,
+        response_schema: str = RESPONSE_SCHEMA_VERSION,
+    ) -> str:
         if not fragments:
             raise PromoteError("llm promote failed: cannot build cache key for empty fragment list")
         first = fragments[0]
         session_key = f"{first.source_agent}:{first.source_session}"
-        return f"{session_key}__{cls._fragments_hash(fragments)}"
+        bound_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "fragments_hash": cls._fragments_hash(fragments),
+                    "response_schema": response_schema,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return f"{session_key}__{bound_hash}"
 
     @classmethod
-    def cache_key_for_prompt(cls, fragments: list[Fragment], prompt_text: str) -> str:
+    def cache_key_for_prompt(
+        cls,
+        fragments: list[Fragment],
+        prompt_text: str,
+        *,
+        response_schema: str = RESPONSE_SCHEMA_VERSION,
+    ) -> str:
         """Bind transient LLM cache to the complete rendered prompt contract."""
         if not fragments:
             raise PromoteError("llm promote failed: cannot cache an empty chunk")
         first = fragments[0]
-        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        prompt_hash = hashlib.sha256(
+            json.dumps(
+                {"prompt": prompt_text, "response_schema": response_schema},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         return f"{first.source_agent}:{first.source_session}__{prompt_hash}"
+
+    def _router(self) -> ExternalAgentRouter | None:
+        candidate = self._agent
+        if isinstance(candidate, CachingAgentClient):
+            candidate = candidate._inner
+        return candidate if isinstance(candidate, ExternalAgentRouter) else None
+
+    def _response_validator(self):
+        return lambda raw: llm_output.parse_response(raw, self._projects)
+
+    def _router_result(self) -> AgentRunResult | None:
+        result = getattr(self._agent, "last_result", None)
+        if result is None and isinstance(self._agent, CachingAgentClient):
+            result = getattr(self._agent._inner, "last_result", None)
+        return result if isinstance(result, AgentRunResult) else None
+
+    def _router_attempts(self) -> tuple[AgentRunResult, ...]:
+        router = self._router()
+        if router is not None:
+            return tuple(
+                attempt
+                for attempt in getattr(router, "attempts", ())
+                if isinstance(attempt, AgentRunResult)
+            )
+        return ()
 
     def _cache_namespace(self) -> str:
         provider = getattr(self._agent, "cache_namespace", None)
@@ -104,11 +196,14 @@ class LLMPromoter(Promoter):
         if not fragments:
             raise PromoteError("llm promote failed: cannot cache an empty chunk")
         if not self._cache_namespace() and not self._config_hash:
-            return self.cache_key_for_prompt(fragments, prompt_text)
+            return self.cache_key_for_prompt(
+                fragments, prompt_text, response_schema=self._response_schema
+            )
         first = fragments[0]
         payload = {
             "operation": "atomization",
             "prompt": prompt_text,
+            "response_schema": self._response_schema,
             "agent_namespace": self._cache_namespace(),
             "config_hash": self._config_hash,
             "skill_hash": sha256_text(self._skill),
@@ -122,12 +217,15 @@ class LLMPromoter(Promoter):
         if not fragments:
             raise PromoteError("llm promote failed: cannot build cache key for empty fragment list")
         if not self._cache_namespace() and not self._config_hash:
-            return self.cache_key_for_fragments(fragments)
+            return self.cache_key_for_fragments(
+                fragments, response_schema=self._response_schema
+            )
         prompt_hash = self._fragments_hash(fragments)
         first = fragments[0]
         payload = {
             "operation": "atomization-session",
             "fragments_hash": prompt_hash,
+            "response_schema": self._response_schema,
             "agent_namespace": self._cache_namespace(),
             "config_hash": self._config_hash,
             "skill_hash": sha256_text(self._skill),
@@ -153,6 +251,7 @@ class LLMPromoter(Promoter):
         if not isinstance(self._agent, CachingAgentClient) or not fragments:
             return
         self._agent.clear_cache_key(self._bound_cache_key_for_fragments(fragments))
+        self.clear_last_chunk_caches()
 
     def clear_last_chunk_caches(self) -> None:
         if not isinstance(self._agent, CachingAgentClient):
@@ -176,26 +275,34 @@ class LLMPromoter(Promoter):
         self.last_raw_output = ""
         last_error: Exception | None = None
         attempted = 0
+        validator = self._response_validator()
+        router = self._router()
         for attempt in range(1, attempts + 1):
             attempted = attempt
             try:
                 if isinstance(self._agent, CachingAgentClient):
-                    raw = self._agent.run_cached(prompt_text, cache_key)
+                    raw = self._agent.run_cached(
+                        prompt_text,
+                        cache_key,
+                        response_validator=validator if router is not None else None,
+                        response_schema=self._response_schema if router is not None else None,
+                    )
+                elif router is not None:
+                    raw = router.run(prompt_text, response_validator=validator)
                 else:
                     raw = self._agent.run(prompt_text)
                 self.last_raw_output = raw
-                router_result = getattr(self._agent, "last_result", None)
-                if router_result is None and isinstance(self._agent, CachingAgentClient):
-                    router_result = getattr(self._agent._inner, "last_result", None)
-                if isinstance(router_result, AgentRunResult):
+                router_result = self._router_result()
+                if router_result is not None:
                     self.last_provenance = safe_provenance(
                         provenance_from_result(
                             router_result,
                             config_hash=self._config_hash,
                             skill_hash=sha256_text(self._skill),
+                            attempts=self._router_attempts(),
                         )
                     )
-                return llm_output.parse_response(raw, self._projects)
+                return validator(raw)
             except (AgentExecError, AgentRunError, llm_output.LlmOutputError) as exc:
                 last_error = exc
                 if isinstance(exc, AgentUnavailableError):
@@ -250,6 +357,7 @@ class LLMPromoter(Promoter):
                     "session_atom_cache_key": cache_namespace,
                     "proposal_index": proposal_index,
                     "original_title": proposal.title,
+                    "response_schema": self._response_schema,
                     "prompt_hash": sha256_text(repair_prompt),
                     "config_hash": config_identity,
                     "skill_hash": sha256_text(self._skill),
@@ -303,6 +411,60 @@ class LLMPromoter(Promoter):
                 candidate = parsed[0].get("title", "")
         return re.sub(r"\s+", " ", str(candidate or "").strip())[:20]
 
+    def _run_session(
+        self,
+        chunks,
+    ) -> tuple[list[llm_output.ParsedResponse], tuple[str, ...]] | None:
+        """Use the router's session transaction when the client supports it."""
+        router = self._router()
+        if router is None or not callable(getattr(router, "run_session", None)):
+            return None
+        prompts = tuple(chunk.prompt for chunk in chunks)
+        base_keys = tuple(
+            self._bound_cache_key_for_prompt(
+                [part.as_fragment() for part in chunk.parts], chunk.prompt
+            )
+            for chunk in chunks
+        )
+        validator = self._response_validator()
+        self.last_raw_output = ""
+        try:
+            if isinstance(self._agent, CachingAgentClient):
+                raw_outputs = self._agent.run_session(
+                    prompts,
+                    cache_keys=base_keys,
+                    response_validator=validator,
+                    response_schema=self._response_schema,
+                )
+                cache_keys = tuple(self._agent.last_cache_keys or base_keys)
+            else:
+                raw_outputs = router.run_session(
+                    prompts,
+                    response_validator=validator,
+                )
+                cache_keys = base_keys
+            responses: list[llm_output.ParsedResponse] = []
+            for raw in raw_outputs:
+                self.last_raw_output = raw
+                responses.append(validator(raw))
+            router_result = self._router_result()
+            if router_result is not None:
+                self.last_provenance = safe_provenance(
+                    provenance_from_result(
+                        router_result,
+                        config_hash=self._config_hash,
+                        skill_hash=sha256_text(self._skill),
+                        attempts=self._router_attempts(),
+                    )
+                )
+            return responses, cache_keys
+        except (AgentExecError, AgentRunError, llm_output.LlmOutputError) as exc:
+            raise PromoteError(
+                f"llm promote failed after session attempt(s): {exc}",
+                category=_failure_category(exc),
+                attempts=len(self._router_attempts()),
+            ) from exc
+
     def promote(self, fragments: list[Fragment], config: AtomizerConfig) -> list[Slice]:
         if isinstance(fragments, Fragment):
             raise PromoteError("llm promote failed: expected per-session fragment list")
@@ -349,12 +511,19 @@ class LLMPromoter(Promoter):
         }
         responses: list[llm_output.ParsedResponse] = []
         chunk_cache_keys: list[str] = []
-        for chunk in chunks:
-            chunk_fragments = [part.as_fragment() for part in chunk.parts]
-            chunk_cache_keys.append(self._bound_cache_key_for_prompt(chunk_fragments, chunk.prompt))
-            responses.append(
-                self._run_chunk(chunk.prompt, chunk_fragments, config.chunk_retries)
-            )
+        session_result = self._run_session(chunks)
+        if session_result is not None:
+            responses, session_cache_keys = session_result
+            chunk_cache_keys.extend(session_cache_keys)
+        else:
+            for chunk in chunks:
+                chunk_fragments = [part.as_fragment() for part in chunk.parts]
+                chunk_cache_keys.append(
+                    self._bound_cache_key_for_prompt(chunk_fragments, chunk.prompt)
+                )
+                responses.append(
+                    self._run_chunk(chunk.prompt, chunk_fragments, config.chunk_retries)
+                )
         session_meta["distiller"] = self.last_provenance or safe_provenance(
             provenance_from_result(
                 None,

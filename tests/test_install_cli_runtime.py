@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from paulsha_hippo import cli, deployment
@@ -16,16 +17,30 @@ def _runtime_plan(tmp_path: Path) -> Path:
         for phase in deployment.ROLLBACK_PHASE_ORDER
     }
     path = tmp_path / "runtime.json"
-    path.write_text(
-        json.dumps({"commands": commands, "rollback_commands": rollback}),
-        encoding="utf-8",
-    )
+    payload = {
+        "schema_version": "1",
+        "runtime_kind": "reviewed-override",
+        "review": {"status": "approved"},
+        "commands": commands,
+        "rollback_commands": rollback,
+    }
+    manifest = Path(__file__).resolve().parents[1] / "paulsha_hippo" / "install-manifest.json"
+    payload["review"]["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    unsigned = dict(payload)
+    unsigned.pop("review")
+    canonical = (json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    payload["review"]["plan_sha256"] = hashlib.sha256(canonical).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
-def test_install_apply_without_runtime_plan_fails_before_mutation(tmp_path: Path):
+def test_install_dry_run_without_runtime_plan_uses_package_default(tmp_path: Path, capsys):
     target = tmp_path / "target"
-    assert cli.main(["install", "all", "--force", "--target-root", str(target)]) == 1
+    assert cli.main([
+        "install", "all", "--force", "--dry-run", "--target-root", str(target)
+    ]) == 0
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["status"] == "dry-run"
     assert not target.exists()
 
 

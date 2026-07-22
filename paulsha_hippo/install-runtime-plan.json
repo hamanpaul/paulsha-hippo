@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "runtime_kind": "package-default",
+  "review": {
+    "status": "approved",
+    "manifest_sha256": "5a068c6b8057f00a2cfadcdf48916ba1a0afb2bfa85e097d61678f89565ccb39",
+    "plan_sha256": "f7a87b24971d6bc4c8d742534930b1fb6c325ae203fe3b7312a617df37700d7c"
+  },
+  "profile_id": "package-default",
+  "commands": {
+    "stop_timer_service": ["@hippo-default-runtime@", "stop_timer_service"],
+    "drain_writers": ["@hippo-default-runtime@", "drain_writers"],
+    "reinstall_hooks": ["@hippo-default-runtime@", "reinstall_hooks"],
+    "reinstall_service": ["@hippo-default-runtime@", "reinstall_service"],
+    "daemon_reload": ["@hippo-default-runtime@", "daemon_reload"],
+    "start_timer_service": ["@hippo-default-runtime@", "start_timer_service"]
+  },
+  "rollback_commands": {
+    "rollback_start_timer_service": ["@hippo-default-runtime@", "rollback_start_timer_service"],
+    "rollback_daemon_reload": ["@hippo-default-runtime@", "rollback_daemon_reload"],
+    "rollback_reinstall_service": ["@hippo-default-runtime@", "rollback_reinstall_service"],
+    "rollback_reinstall_hooks": ["@hippo-default-runtime@", "rollback_reinstall_hooks"],
+    "release_writers": ["@hippo-default-runtime@", "release_writers"],
+    "rollback_stop_timer_service": ["@hippo-default-runtime@", "rollback_stop_timer_service"]
+  },
+  "command_timeout": 60,
+  "drain_timeout": 60,
+  "lock_timeout": 30,
+  "rollback_timeout": 60
+}

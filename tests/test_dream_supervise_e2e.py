@@ -31,16 +31,26 @@ class DreamSuperviseE2ETests(unittest.TestCase):
             raw.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(FIXTURE, raw)
 
-            # 隔離 HOME＋清掉 PSC_/HIPPO_ env：dream run 用預設 override 掛點
-            # （<HOME>/.config/paulshaclaw/atomizer.override.yaml），known_projects
-            # 指到 tmp 的 projects.yaml。
+            # 隔離 HOME＋清掉 PSC_/HIPPO_ env，建立唯一 canonical runtime config。
             home = root / "home"
-            override_dir = home / ".config" / "paulshaclaw"
-            override_dir.mkdir(parents=True, exist_ok=True)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            (override_dir / "atomizer.override.yaml").write_text(
-                f'known_projects_file: "{projects}"\n', encoding="utf-8")
+            import yaml
+            config_dir = home / ".config" / "paulsha-hippo"
+            config_dir.mkdir(parents=True)
+            source = _REPO_ROOT / "paulsha_hippo" / "atomizer" / "atomizer.yaml"
+            document = yaml.safe_load(source.read_text(encoding="utf-8"))
+            document["known_projects_file"] = str(projects)
+            document["external_agents"]["profiles"] = [{
+                "id": "fake-agent", "enabled": True, "tier": 1, "priority": 1,
+                "traits": ["test"], "task_classes": ["atomization"],
+                "model": "fake", "supported_models": ["fake"],
+                "effort": "medium", "supported_efforts": ["medium"],
+                "argv": [sys.executable, str(FAKE_AGENT)],
+            }]
+            (config_dir / "config.yaml").write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+            )
 
             clean_env = {k: v for k, v in os.environ.items()
                          if not k.startswith(("PSC_", "HIPPO_"))}
@@ -52,7 +62,6 @@ class DreamSuperviseE2ETests(unittest.TestCase):
                     "dream", "supervise", "--interval", "1", "--once",
                     "--memory-root", str(root),
                     "--max-load", "1000000",
-                    "--agent-command", f"{sys.executable} {FAKE_AGENT}",
                 ])
             self.assertEqual(rc, 0)
             self.assertEqual(processing.state_of(root, "claude:sess-e2e"), "promoted")

@@ -179,20 +179,21 @@ def run_init(*, memory_root: str | None, backend: str, model: str | None,
         "cg-headless": "cg", "co-gem-headless": "co-gem",
         "claude-gem-headless": "claude-gem", "custom-argv": "claude",
     }
-    selected_profile = profile_map.get(backend, "claude")
+    configured_profile = profile_map.get(backend, "claude")
     template["memory_root"] = root
     external = template.setdefault("external_agents", {})
     if not isinstance(external, dict):
         print("init: packaged external_agents 不是 mapping", file=sys.stderr)
         return 2
-    external["selected_profile"] = selected_profile
+    external.pop("selected_profile", None)
     external["ownership"] = "external-cli"
     profiles = external.get("profiles", [])
     if isinstance(profiles, list):
         for profile in profiles:
-            if isinstance(profile, dict) and profile.get("id") == selected_profile:
+            if isinstance(profile, dict) and profile.get("id") == configured_profile:
                 if model:
                     profile["model"] = model
+                    profile["supported_models"] = [model]
                 if resolved_preset_argv:
                     argv = profile.get("argv")
                     if isinstance(argv, list) and argv:
@@ -205,7 +206,7 @@ def run_init(*, memory_root: str | None, backend: str, model: str | None,
     committed = _commit_init_atomic(cfg, cfg_body, override, None)
 
     print(f"memory_root: {root}")
-    print(f"external agent profile: {selected_profile}")
+    print(f"configured external agent profile: {configured_profile}")
     print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
     print("下一步：hippo install hooks && hippo install service --enable")
     return 0
@@ -826,7 +827,7 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     )
 
 
-def _fix_backend_config() -> tuple[int, str]:
+def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
     """把 canonical config 中 enabled profile 的 argv[0] 固定為可執行絕對路徑。"""
     from paulsha_hippo.atomizer import config as atomizer_config
 
@@ -869,9 +870,9 @@ def _fix_backend_config() -> tuple[int, str]:
     if not changes:
         return 0, "fix-backend: enabled profiles 已為 service-effective，無可遷移"
 
-    backup = canonical.with_name(canonical.name + ".bak")
-    if not backup.exists():
-        shutil.copy2(canonical, backup)
+    backup_path = canonical.with_name(canonical.name + ".bak")
+    if backup and not backup_path.exists():
+        shutil.copy2(canonical, backup_path)
     rendered = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
     staged = _stage_temp(canonical, rendered)
     try:
@@ -882,7 +883,8 @@ def _fix_backend_config() -> tuple[int, str]:
         except FileNotFoundError:
             pass
     summary = ", ".join(f"{profile_id}:{before}→{after}" for profile_id, before, after in changes)
-    return 0, f"fix-backend: {summary}（備份：{backup}）"
+    suffix = f"（備份：{backup_path}）" if backup else "（由 install transaction snapshot 保護）"
+    return 0, f"fix-backend: {summary}{suffix}"
 
 
 # ---------------------------------------------------------------- install hooks

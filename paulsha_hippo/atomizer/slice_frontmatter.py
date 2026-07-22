@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from paulsha_hippo.lib.lifecycle import schema as stage3
 from .config import AtomizerConfig
+from .provenance import safe_provenance
 from .splitter import Fragment
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ def build_from_proposal(proposal: "SliceProposal", session_meta: dict[str, objec
         "source_agent": agent,
         "captured_at": captured_at,
         "provenance": dict(session_meta.get("provenance") or {}),
-        "distiller": dict(session_meta.get("distiller") or {}),
+        "distiller": safe_provenance(dict(session_meta.get("distiller") or {})),
         "supersedes": [],
         "distilled_from": f"{agent}:{session}",
         "session_title": str(session_meta.get("session_title", "")),
@@ -171,7 +172,8 @@ def render(slice_: Slice) -> str:
             "profile_id", "profile_revision", "tier", "attempt_index",
             "requested_model", "requested_effort", "observed_model",
             "model_verification", "command_fingerprint", "fallback_reason",
-            "config_hash", "skill_hash", "hippo_version", "build_commit",
+            "config_hash", "skill_hash", "hippo_version", "build_commit", "response_schema",
+            "attempts",
             "elapsed_seconds", "failure_category", "stderr", "exit_code",
         ):
             if key not in distiller:
@@ -179,6 +181,8 @@ def render(slice_: Slice) -> str:
             value = distiller[key]
             if value is None:
                 rendered = "null"
+            elif key == "attempts":
+                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
             elif isinstance(value, (bool, int, float)):
                 rendered = _scalar(value)
             else:

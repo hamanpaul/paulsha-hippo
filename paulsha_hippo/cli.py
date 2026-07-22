@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -118,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     install_all.add_argument(
         "--runtime-plan",
         default=None,
-        help="reviewed JSON writer/service/rollback command plan (required for apply)",
+        help="reviewed JSON writer/service/rollback override; omit to use the packaged live plan",
     )
     install_all.set_defaults(func=_ops_install_all)
 
@@ -202,9 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
     atomize = memory_subparsers.add_parser("atomize")
     atomize.add_argument("--memory-root", required=True)
     atomize.add_argument("--now", default=None)
-    atomize.add_argument("--override", default=None)
     atomize.add_argument("--promoter", choices=["identity", "llm"], default=None)
-    atomize.add_argument("--agent-command", default=None)
     atomize.add_argument(
         "--instruction-root", action="append", default=None,
         help="agent-instruction doc root/file; when given, drops doc-fragment slices "
@@ -237,7 +237,6 @@ def _build_parser() -> argparse.ArgumentParser:
     dream_run.add_argument("--max-load", type=float, default=1.0)
     dream_run.add_argument("--min-avail-mem-pct", type=_pct_arg, default=20.0)
     dream_run.add_argument("--promoter", choices=["identity", "llm"], default=None)
-    dream_run.add_argument("--agent-command", default=None)
     dream_run.add_argument(
         "--instruction-root", action="append", default=None,
         help="agent-instruction doc root/file; when given, the atomize pass drops "
@@ -255,8 +254,6 @@ def _build_parser() -> argparse.ArgumentParser:
                                  help="透傳 dream run --max-load（覆蓋內建 1.0）")
     dream_supervise.add_argument("--promoter", choices=["identity", "llm"], default=None,
                                  help="透傳 dream run --promoter（覆蓋內建 llm）")
-    dream_supervise.add_argument("--agent-command", default=None,
-                                 help="透傳 dream run --agent-command")
     dream_supervise.set_defaults(func=_dream_supervise)
 
     dream_status = dream_subparsers.add_parser("status")
@@ -360,8 +357,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--instruction-root", action="append", default=None,
         help="agent-instruction doc root/file; builds the doc-fragment guard corpus so "
              "instruction fragments are skipped (left for prune-noise) instead of retitled.")
-    retitle.add_argument("--agent-command", default=None,
-                         help="override the title-distillation external CLI command.")
     retitle.add_argument(
         "--project", action="append", default=None,
         help="restrict retitling to these project(s). Repeatable; omit to scan all projects.")
@@ -758,11 +753,8 @@ def _retitle_untitled(args: argparse.Namespace) -> int:
     apply = bool(getattr(args, "apply", False))
     corpus = corpus_for_roots(getattr(args, "instruction_root", None))
 
-    command = getattr(args, "agent_command", None)
-    title_kwargs = {"command": tuple(command.split())} if command else {}
-
     def distill(body: str):
-        title, _source = generate_atom_title(body, **title_kwargs)
+        title, _source = generate_atom_title(body)
         return title
 
     summary = retitle_mod.retitle_untitled(
@@ -1116,22 +1108,22 @@ def _ops_install_service(args) -> int:
 def _ops_install_all(args) -> int:
     from . import deployment
 
-    manifest = Path(args.manifest) if args.manifest else Path(__file__).resolve().parent / "install-manifest.json"
+    package_root = Path(__file__).resolve().parent
+    manifest = Path(args.manifest) if args.manifest else package_root / "install-manifest.json"
     target_root = Path(args.target_root) if args.target_root else paths.hippo_config_root()
     try:
-        if not args.dry_run and not args.runtime_plan:
-            raise deployment.DeploymentError(
-                "apply requires --runtime-plan for writer/service fencing and rollback"
-            )
-        runtime = (
-            _load_install_runtime(args.runtime_plan, deployment, target_root)
-            if args.runtime_plan
-            else None
+        runtime_plan = Path(args.runtime_plan) if args.runtime_plan else package_root / "install-runtime-plan.json"
+        runtime = _load_install_runtime(
+            runtime_plan,
+            deployment,
+            target_root,
+            manifest_path=manifest,
+            package_root=package_root,
         )
         result = deployment.install_all(
             manifest_path=manifest,
             target_root=target_root,
-            package_root=Path(__file__).resolve().parent,
+            package_root=package_root,
             force=bool(args.force),
             dry_run=bool(args.dry_run),
             transaction_root=args.transaction_root,
@@ -1144,7 +1136,23 @@ def _ops_install_all(args) -> int:
     return 0
 
 
-def _load_install_runtime(value: str, deployment, target_root: Path):
+def _install_plan_hash(payload: dict) -> str:
+    unsigned = dict(payload)
+    unsigned.pop("review", None)
+    canonical = (json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _load_install_runtime(
+    value: str | Path,
+    deployment,
+    target_root: Path,
+    *,
+    manifest_path: Path,
+    package_root: Path,
+):
     import io
     from contextlib import redirect_stderr, redirect_stdout
 
@@ -1157,6 +1165,7 @@ def _load_install_runtime(value: str, deployment, target_root: Path):
     if not isinstance(payload, dict):
         raise deployment.DeploymentError("install runtime plan root must be an object")
     allowed = {
+        "schema_version", "runtime_kind", "review",
         "commands", "rollback_commands", "profile_id", "command_timeout",
         "drain_timeout", "lock_timeout", "rollback_timeout",
     }
@@ -1165,26 +1174,80 @@ def _load_install_runtime(value: str, deployment, target_root: Path):
         raise deployment.DeploymentError(
             f"unknown install runtime plan field: {unknown[0]}"
         )
+    if str(payload.get("schema_version", "")) != "1":
+        raise deployment.DeploymentError("unsupported install runtime plan schema")
+    runtime_kind = str(payload.get("runtime_kind", "reviewed-override"))
+    if runtime_kind not in {"package-default", "reviewed-override"}:
+        raise deployment.DeploymentError("unsupported install runtime plan kind")
+    if runtime_kind == "package-default" and Path(value).resolve() != (
+        package_root / "install-runtime-plan.json"
+    ).resolve():
+        raise deployment.DeploymentError("package-default runtime plan must come from the release package")
+    review = payload.get("review")
+    if not isinstance(review, dict) or review.get("status") != "approved":
+        raise deployment.DeploymentError("install runtime plan requires approved review")
+    try:
+        manifest_sha256 = hashlib.sha256(manifest_path.resolve().read_bytes()).hexdigest()
+    except (OSError, UnicodeError) as exc:
+        raise deployment.DeploymentError("install manifest is unavailable for runtime review") from exc
+    if review.get("manifest_sha256") != manifest_sha256:
+        raise deployment.DeploymentError("install runtime plan is not bound to this manifest")
+    plan_sha256 = _install_plan_hash(payload)
+    if review.get("plan_sha256") != plan_sha256:
+        raise deployment.DeploymentError("install runtime plan review hash mismatch")
     commands = payload.get("commands")
     rollback_commands = payload.get("rollback_commands")
+    if runtime_kind == "package-default":
+        from . import install_runtime
+
+        executor = install_runtime.package_runtime_executor
+    else:
+        install_runtime = None
+        executor = None
     runner = deployment.AllowlistedCommandRunner(
-        commands, location=sys.executable, target_root=target_root
+        commands, executor=executor, location=sys.executable, target_root=target_root
     )
     rollback_runner = deployment.AllowlistedCommandRunner(
-        rollback_commands, location=sys.executable, target_root=target_root
+        rollback_commands, executor=executor, location=sys.executable, target_root=target_root
     )
 
-    def doctor_static(_context):
+    def doctor_static(context):
+        if runtime_kind == "package-default":
+            assert install_runtime is not None
+            return install_runtime.doctor_gate(context)
         sink = io.StringIO()
+        previous = os.environ.get("HIPPO_CONFIG_ROOT")
+        os.environ["HIPPO_CONFIG_ROOT"] = str(context.target_root)
         with redirect_stdout(sink), redirect_stderr(sink):
-            rc = ops.run_doctor(live_probe=False, probe_profiles=False)
+            try:
+                rc = ops.run_doctor(live_probe=False, probe_profiles=False)
+            finally:
+                if previous is None:
+                    os.environ.pop("HIPPO_CONFIG_ROOT", None)
+                else:
+                    os.environ["HIPPO_CONFIG_ROOT"] = previous
         return {"ok": rc == 0, "status": "passed" if rc == 0 else "failed"}
 
-    def profile_probe(_context, _profile_id):
+    def profile_probe(context, profile_id):
+        if runtime_kind == "package-default":
+            assert install_runtime is not None
+            return install_runtime.profile_gate(context, profile_id)
         sink = io.StringIO()
+        previous = os.environ.get("HIPPO_CONFIG_ROOT")
+        os.environ["HIPPO_CONFIG_ROOT"] = str(context.target_root)
         with redirect_stdout(sink), redirect_stderr(sink):
-            rc = ops.run_doctor(live_probe=False, probe_profiles=True)
-        return {"ok": rc == 0, "status": "passed" if rc == 0 else "failed"}
+            try:
+                rc = ops.run_doctor(live_probe=False, probe_profiles=True)
+            finally:
+                if previous is None:
+                    os.environ.pop("HIPPO_CONFIG_ROOT", None)
+                else:
+                    os.environ["HIPPO_CONFIG_ROOT"] = previous
+        return {
+            "ok": rc == 0,
+            "status": "passed" if rc == 0 else "failed",
+            "profile_id": profile_id,
+        }
 
     return deployment.InstallRuntime(
         commands=commands,
@@ -1201,6 +1264,9 @@ def _load_install_runtime(value: str, deployment, target_root: Path):
         runner_location=sys.executable,
         rollback_runner_location=sys.executable,
         rollback_target_root=target_root,
+        plan_sha256=plan_sha256,
+        plan_source=Path(value).resolve(),
+        runtime_kind=runtime_kind,
     )
 
 
@@ -1342,8 +1408,6 @@ def _dream_supervise(args) -> int:
         extra += ["--max-load", str(args.max_load)]
     if args.promoter:
         extra += ["--promoter", args.promoter]
-    if args.agent_command:
-        extra += ["--agent-command", args.agent_command]
     # dream run 的 argparse 對重複旗標 last-wins：extra 的 --promoter/--max-load
     # 覆蓋 run_dream_supervise 內建的 --require-idle --promoter llm 基底。
     return ops.run_dream_supervise(interval=args.interval, extra_argv=extra, once=args.once)
