@@ -40,6 +40,15 @@ def _needs_yaml_quotes(value: str) -> bool:
         return True
     if value[:2] in ("- ", "? ", ": ") or value in ("-", "?", ":"):
         return True
+    # A colon followed by whitespace, a flow delimiter, or end-of-scalar is a
+    # YAML mapping indicator.  The end-of-scalar case matters for fallback
+    # titles such as ``安裝 skill https:``; leaving it plain makes the whole
+    # inbox document unparsable on the next Dream pass.
+    for index, character in enumerate(value):
+        if character != ":":
+            continue
+        if index + 1 == len(value) or value[index + 1] in " \t[]{} ,":
+            return True
     return any(marker in value for marker in (": ", "#", "\"", "'", "\n", "\r"))
 
 

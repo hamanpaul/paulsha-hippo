@@ -90,6 +90,19 @@ class ImporterEscapingTests(unittest.TestCase):
         fm = _read_frontmatter_block(markdown)
         self.assertEqual(fm["title"], '{"verdict":"needs-attention"}')
 
+    def test_title_ending_in_colon_is_quoted_and_parseable(self):
+        session = {
+            "tool": "claude-code",
+            "session_id": "s-trailing-colon",
+            "assistant_summary": "semantic outcome remains separate",
+            "session_title": "安裝 brag skill https:",
+            "title_source": "fallback",
+        }
+        markdown = render_markdown(session, project="serialwrap")
+        self.assertIn('title: "安裝 brag skill https:"', markdown)
+        fm = _read_frontmatter_block(markdown)
+        self.assertEqual(fm["title"], "安裝 brag skill https:")
+
 
 class FrontmatterIoEscapingTests(unittest.TestCase):
     def test_dump_escapes_embedded_quotes_round_trip(self):
