@@ -137,11 +137,18 @@ def _authority_sources(
             raise RecoveryError(f"source authority escapes queue root: {source}")
         source_set = str(entry.get("source_set") or "")
         if source_set not in {"baseline", "ingress-drift"}:
-            raise RecoveryError(f"source authority has invalid source_set: {source}")
+            raise RecoveryError(
+                f"source authority has invalid source_set {source_set!r}: {source}"
+            )
         previous = source_sets.setdefault(str(source), source_set)
         if previous != source_set:
             raise RecoveryError(f"source authority disagrees on source_set: {source}")
-    if int(payload.get("source_count", len(source_sets))) != len(source_sets):
+    authority_source_count = payload.get("source_count", len(source_sets))
+    if isinstance(authority_source_count, bool) or not isinstance(
+        authority_source_count, int
+    ):
+        raise RecoveryError("source authority source_count must be an integer")
+    if authority_source_count != len(source_sets):
         raise RecoveryError("source authority source_count mismatch")
     sources = sorted(Path(source) for source in source_sets)
     for source in sources:

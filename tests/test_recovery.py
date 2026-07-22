@@ -244,6 +244,33 @@ def test_repinned_plan_fails_if_source_authority_manifest_drifts(tmp_path, monke
         recovery.apply_plan(repinned_path)
 
 
+@pytest.mark.parametrize("source_count", ["two", None, True])
+def test_source_authority_rejects_non_integer_source_count(
+    tmp_path, monkeypatch, source_count
+):
+    _seed_source(tmp_path)
+    authority_path = _plan(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["source_count"] = source_count
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    with pytest.raises(
+        recovery.RecoveryError, match="source authority source_count must be an integer"
+    ):
+        recovery.create_plan(tmp_path, source_manifest_path=authority_path)
+
+
+def test_source_authority_invalid_source_set_reports_value(tmp_path, monkeypatch):
+    _seed_source(tmp_path)
+    authority_path = _plan(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["entries"][0]["source_set"] = "surprise"
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    with pytest.raises(recovery.RecoveryError, match="invalid source_set 'surprise'"):
+        recovery.create_plan(tmp_path, source_manifest_path=authority_path)
+
+
 def test_transaction_root_includes_code_pin_and_preserves_prior_journal(tmp_path, monkeypatch):
     _seed_source(tmp_path)
     code_hash = {"value": "a" * 64}
