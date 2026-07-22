@@ -11,4 +11,6 @@ work_items:
         ref: 'issue-34-atomization-release'
       - kind: path
         ref: 'openspec/changes/issue-34-atomization-release/proposal.md'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-07-15-issue-34-atomization-release.md'
     excludes: []
