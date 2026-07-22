@@ -91,11 +91,11 @@ class SkillDocTests(unittest.TestCase):
 
         self.assertIn("## Output contract", body)
         _, output_contract = body.split("## Output contract", maxsplit=1)
-        self.assertIn("Return ONLY this canonical JSON object shape:", output_contract)
+        self.assertIn("Return ONLY a canonical JSON object.", output_contract)
         self.assertIn('"schema_version":1', output_contract)
-        self.assertIn('"disposition":"findings|no_findings"', output_contract)
-        self.assertIn('"reason":null|string', output_contract)
-        self.assertIn('"findings":[...]', output_contract)
+        self.assertIn('"disposition":"no_findings"', output_contract)
+        self.assertIn('"reason":"no durable findings"', output_contract)
+        self.assertIn('"findings":[]', output_contract)
         for field in (
             "title",
             "artifact_kind",
@@ -134,7 +134,7 @@ class SkillDocTests(unittest.TestCase):
         _, body = self._read_skill()
 
         _, output_contract = body.split("## Output contract", maxsplit=1)
-        self.assertIn("Return ONLY this canonical JSON object shape:", output_contract)
+        self.assertIn("Return ONLY a canonical JSON object.", output_contract)
         self.assertIn("The first character of your response must be `{` and the last character must be `}`.", output_contract)
         self.assertIn("Do NOT create files, write files, save files, or claim that you updated any file or index.", output_contract)
         self.assertIn("Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON object.", output_contract)

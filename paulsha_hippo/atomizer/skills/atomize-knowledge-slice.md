@@ -82,8 +82,9 @@ triggers:
 - 檢查所有 `title` 在同一批輸出內唯一且可互相引用。
 
 ## Output contract
-Return ONLY this canonical JSON object shape:
-`{"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}`
+Return ONLY a canonical JSON object.
+Valid no-findings example:
+`{"schema_version":1,"disposition":"no_findings","reason":"no durable findings","findings":[]}`
 The first character of your response must be `{` and the last character must be `}`.
 Do NOT create files, write files, save files, or claim that you updated any file or index.
 Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON object.
