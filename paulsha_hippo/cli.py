@@ -219,6 +219,11 @@ def _build_parser() -> argparse.ArgumentParser:
     recovery_plan = recovery_subparsers.add_parser("plan")
     recovery_plan.add_argument("--memory-root", required=True)
     recovery_plan.add_argument("--manifest", default=None)
+    recovery_plan.add_argument(
+        "--source-manifest",
+        default=None,
+        help="沿用既有 recovery manifest 的精確 frozen source set，並以目前 candidate 重建 pins",
+    )
     recovery_plan.add_argument("--batch-size", type=int, default=5)
     recovery_plan.add_argument("--baseline-count", type=int, default=None)
     recovery_plan.set_defaults(func=_recovery)
@@ -492,6 +497,7 @@ def _recovery(args: argparse.Namespace) -> int:
         manifest = recovery.create_plan(
             args.memory_root,
             manifest_path=args.manifest,
+            source_manifest_path=args.source_manifest,
             batch_size=args.batch_size,
             baseline_count=args.baseline_count,
         )

@@ -194,6 +194,83 @@ def test_plan_separates_frozen_baseline_from_later_ingress_drift(tmp_path, monke
     ]
 
 
+def test_plan_can_repin_exact_prior_source_authority_while_live_archive_grows(
+    tmp_path, monkeypatch
+):
+    baseline = _seed_source(tmp_path, session_id="baseline")
+    drift = _seed_source(tmp_path, session_id="reviewed-drift")
+    baseline.touch()
+    drift.touch()
+    authority_path = recovery.create_plan(
+        tmp_path, batch_size=5, baseline_count=1
+    )
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    active = _seed_source(tmp_path, session_id="active-after-review")
+
+    repinned_path = recovery.create_plan(
+        tmp_path,
+        batch_size=5,
+        source_manifest_path=authority_path,
+    )
+    repinned = json.loads(repinned_path.read_text(encoding="utf-8"))
+
+    assert repinned["source_count"] == 2
+    assert repinned["baseline_source_count"] == 1
+    assert repinned["ingress_drift_count"] == 1
+    assert {entry["source"] for entry in repinned["entries"]} == {
+        str(baseline.resolve()),
+        str(drift.resolve()),
+    }
+    assert str(active.resolve()) not in {entry["source"] for entry in repinned["entries"]}
+    assert repinned["source_scope"] == {
+        "mode": "authority-manifest",
+        "reference_manifest": str(authority_path.resolve()),
+        "reference_manifest_sha256": sha256(authority_path.read_bytes()).hexdigest(),
+        "reference_recovery_id": authority["recovery_id"],
+        "source_count": 2,
+    }
+    assert recovery.apply_plan(repinned_path)["complete"] is True
+
+
+def test_repinned_plan_fails_if_source_authority_manifest_drifts(tmp_path, monkeypatch):
+    _seed_source(tmp_path)
+    authority_path = _plan(tmp_path, monkeypatch)
+    repinned_path = recovery.create_plan(
+        tmp_path, source_manifest_path=authority_path
+    )
+    authority_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(recovery.RecoveryError, match="source authority manifest drift"):
+        recovery.apply_plan(repinned_path)
+
+
+@pytest.mark.parametrize("source_count", ["two", None, True])
+def test_source_authority_rejects_non_integer_source_count(
+    tmp_path, monkeypatch, source_count
+):
+    _seed_source(tmp_path)
+    authority_path = _plan(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["source_count"] = source_count
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    with pytest.raises(
+        recovery.RecoveryError, match="source authority source_count must be an integer"
+    ):
+        recovery.create_plan(tmp_path, source_manifest_path=authority_path)
+
+
+def test_source_authority_invalid_source_set_reports_value(tmp_path, monkeypatch):
+    _seed_source(tmp_path)
+    authority_path = _plan(tmp_path, monkeypatch)
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["entries"][0]["source_set"] = "surprise"
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    with pytest.raises(recovery.RecoveryError, match="invalid source_set 'surprise'"):
+        recovery.create_plan(tmp_path, source_manifest_path=authority_path)
+
+
 def test_transaction_root_includes_code_pin_and_preserves_prior_journal(tmp_path, monkeypatch):
     _seed_source(tmp_path)
     code_hash = {"value": "a" * 64}

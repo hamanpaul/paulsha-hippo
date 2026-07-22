@@ -23,6 +23,10 @@ wheel hash, until the main agent runs the artifact-bound and live checks.
 - Publication journals keep targets and relation edges invisible until a
   matching commit marker. Incomplete journals are recovered before the next
   atomization pass.
+- `hippo recovery plan --source-manifest <prior-manifest>` 沿用先前已審查的
+  frozen source set，但以目前安裝候選版重新產生 code/config/registry pins 與
+  planned artifacts；live archive 後續新增的 active session 不會擴張既定
+  recovery scope，authority manifest 自身漂移則 fail closed。
 
 ## Evidence boundary
 
