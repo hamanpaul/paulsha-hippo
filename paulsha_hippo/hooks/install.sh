@@ -287,12 +287,11 @@ def _command_parts(command):
 
 def _is_python_interpreter(token):
     name = token.rsplit("/", 1)[-1]
-    if name == "python":
+    if name in {"python", "python3"}:
         return True
-    if not name.startswith("python"):
+    if not name.startswith("python3."):
         return False
-    suffix = name[len("python"):]
-    return bool(suffix) and all(part.isdigit() for part in suffix.split("."))
+    return all(part.isdigit() for part in name[len("python"):].split("."))
 
 def _is_managed_claude_hook(hook, script_markers):
     """Check if hook is managed by paulsha-memory for any of the given script names."""
@@ -414,12 +413,11 @@ def _command_parts(command):
 
 def _is_python_interpreter(token):
     name = token.rsplit("/", 1)[-1]
-    if name == "python":
+    if name in {"python", "python3"}:
         return True
-    if not name.startswith("python"):
+    if not name.startswith("python3."):
         return False
-    suffix = name[len("python"):]
-    return bool(suffix) and all(part.isdigit() for part in suffix.split("."))
+    return all(part.isdigit() for part in name[len("python"):].split("."))
 
 def _managed_hook(command, status_msg):
     return {

@@ -802,7 +802,16 @@ class InstallerTest(unittest.TestCase):
                                             "claude_user_prompt_submit.py"
                                         ),
                                         "timeout": 10,
-                                    }
+                                    },
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"/usr/bin/python2 "
+                                            f"{self.memory_root}/hooks/"
+                                            "claude_user_prompt_submit.py"
+                                        ),
+                                        "timeout": 10,
+                                    },
                                 ],
                             }
                         ],
@@ -840,8 +849,18 @@ class InstallerTest(unittest.TestCase):
                 for hook in entry.get("hooks", [])
                 if marker in hook.get("command", "")
             ]
-            self.assertEqual(len(matching), 1)
-            self.assertEqual(matching[0].get("managedBy"), "paulsha-memory")
+            managed = [
+                hook for hook in matching
+                if hook.get("managedBy") == "paulsha-memory"
+            ]
+            self.assertEqual(len(managed), 1)
+            if event == "UserPromptSubmit":
+                self.assertTrue(
+                    any(
+                        hook.get("command", "").startswith("/usr/bin/python2 ")
+                        for hook in matching
+                    )
+                )
 
     # ------------------------------------------------------------------
     # Full install — Codex config
