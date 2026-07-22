@@ -301,7 +301,7 @@ class HookQueueWriterTest(unittest.TestCase):
         queue_file = self._queue_capture("claude-code", "claude-novenv-001")
         self.assertTrue(queue_file.exists())
 
-    def test_installed_interpreter_drives_background_importer_without_nested_venv(self):
+    def test_installed_interpreter_overrides_stale_nested_venv(self):
         from paulsha_hippo.hooks import (
             _wakeup_common,
             claude_session_end,
@@ -310,6 +310,10 @@ class HookQueueWriterTest(unittest.TestCase):
         )
 
         queue_path = self.memory_root / "runtime" / "queue" / "capture.json"
+        stale_python = self.memory_root / "hooks" / ".venv" / "bin" / "python"
+        stale_python.parent.mkdir(parents=True)
+        stale_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        stale_python.chmod(0o700)
         env = {"HIPPO_HOOK_PYTHON": sys.executable}
         fire_calls = (
             (claude_session_end._fire_importer, (self.memory_root, queue_path)),

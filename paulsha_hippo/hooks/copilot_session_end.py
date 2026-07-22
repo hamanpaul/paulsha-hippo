@@ -80,7 +80,11 @@ def _supplement_from_history(payload: dict, session_id: str, config_root: Path) 
 def _fire_importer(root: Path, queue_path: Path) -> None:
     venv_python = root / "hooks" / ".venv" / "bin" / "python"
     configured_python = Path(os.environ.get("HIPPO_HOOK_PYTHON", ""))
-    importer_python = venv_python if venv_python.exists() else configured_python
+    importer_python = configured_python if (
+        configured_python.is_absolute()
+        and configured_python.is_file()
+        and os.access(configured_python, os.X_OK)
+    ) else venv_python
     if not importer_python.is_absolute() or not importer_python.is_file() or not os.access(importer_python, os.X_OK):
         _log_warn(root, "hook importer interpreter unavailable; queue written but importer not triggered")
         return
