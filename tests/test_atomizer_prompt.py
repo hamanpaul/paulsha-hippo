@@ -22,7 +22,8 @@ def _frag(index, body):
 def _expected_output_footer() -> list[str]:
     return [
         "## Output",
-        'Return ONLY this canonical JSON object shape: {"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}',
+        'Return ONLY a canonical JSON object.',
+        'Valid no-findings example: {"schema_version":1,"disposition":"no_findings","reason":"no durable findings","findings":[]}',
         "Use disposition=findings with one or more findings and reason=null.",
         "Use disposition=no_findings only with findings=[] and a non-empty reason.",
         "The first character must be `{` and the last character must be `}`.",

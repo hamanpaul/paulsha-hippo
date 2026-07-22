@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from .splitter import Fragment
 
-_CANONICAL_RESPONSE_SCHEMA = (
-    '{"schema_version":1,"disposition":"findings|no_findings",'
-    '"reason":null|string,"findings":[...]}'
+_CANONICAL_RESPONSE_EXAMPLE = (
+    '{"schema_version":1,"disposition":"no_findings",'
+    '"reason":"no durable findings","findings":[]}'
 )
 
 
@@ -36,7 +36,8 @@ def build_prompt(skill_text: str, fragments: list[Fragment], known_projects: lis
         parts.append(fragment.body)
         parts.append("")
     parts.append("## Output")
-    parts.append(f"Return ONLY this canonical JSON object shape: {_CANONICAL_RESPONSE_SCHEMA}")
+    parts.append("Return ONLY a canonical JSON object.")
+    parts.append(f"Valid no-findings example: {_CANONICAL_RESPONSE_EXAMPLE}")
     parts.append("Use disposition=findings with one or more findings and reason=null.")
     parts.append("Use disposition=no_findings only with findings=[] and a non-empty reason.")
     parts.append("The first character must be `{` and the last character must be `}`.")

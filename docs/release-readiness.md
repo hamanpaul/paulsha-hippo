@@ -23,6 +23,12 @@ wheel hash, until the main agent runs the artifact-bound and live checks.
 - Publication journals keep targets and relation edges invisible until a
   matching commit marker. Incomplete journals are recovered before the next
   atomization pass.
+- Atomization treats a valid non-`_unknown` source project as authoritative even
+  when the generated registry is stale. Every proposal must also retain a
+  deterministic textual anchor to its declared source fragments; prompt/output
+  contract leakage rejects the complete response before publication. The
+  packaged atomization skill and runtime prompt use the same canonical response
+  object contract.
 - `hippo recovery plan --source-manifest <prior-manifest>` 沿用先前已審查的
   frozen source set，但以目前安裝候選版重新產生 code/config/registry pins 與
   planned artifacts；live archive 後續新增的 active session 不會擴張既定
