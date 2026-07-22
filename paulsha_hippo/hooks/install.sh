@@ -285,6 +285,14 @@ def _command_parts(command):
         parts = parts[1:]
     return parts
 
+def _is_python_interpreter(token):
+    name = token.rsplit("/", 1)[-1]
+    if name in {"python", "python3"}:
+        return True
+    if not name.startswith("python3."):
+        return False
+    return all(part.isdigit() for part in name[len("python"):].split("."))
+
 def _is_managed_claude_hook(hook, script_markers):
     """Check if hook is managed by paulsha-memory for any of the given script names."""
     if not isinstance(hook, dict):
@@ -297,7 +305,7 @@ def _is_managed_claude_hook(hook, script_markers):
     if not isinstance(command, str):
         return False
     parts = _command_parts(command)
-    if len(parts) != 2 or not parts[0].endswith("/hooks/.venv/bin/python"):
+    if len(parts) != 2 or not _is_python_interpreter(parts[0]):
         return False
     return any(parts[1].endswith(f"/hooks/{marker}") for marker in script_markers)
 
@@ -403,6 +411,14 @@ def _command_parts(command):
         parts = parts[1:]
     return parts
 
+def _is_python_interpreter(token):
+    name = token.rsplit("/", 1)[-1]
+    if name in {"python", "python3"}:
+        return True
+    if not name.startswith("python3."):
+        return False
+    return all(part.isdigit() for part in name[len("python"):].split("."))
+
 def _managed_hook(command, status_msg):
     return {
         "type": "command",
@@ -427,7 +443,7 @@ def _is_managed_codex_hook(hook, managed_marker):
     parts = _command_parts(command)
     return (
         len(parts) in {2, 3}
-        and parts[0].endswith("/hooks/.venv/bin/python")
+        and _is_python_interpreter(parts[0])
         and parts[1].endswith(f"/hooks/{managed_marker}")
         and (len(parts) == 2 or parts[2] == "--subagent")
     )

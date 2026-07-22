@@ -775,6 +775,93 @@ class InstallerTest(unittest.TestCase):
             ],
         )
 
+    def test_reinstall_replaces_unmarked_pipx_claude_consumption_hooks(self):
+        settings_path = self.config_root / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        pipx_python = "/opt/pipx/venvs/paulsha-hippo/bin/python"
+
+        def old_command(script):
+            return (
+                f"PSC_MEMORY_ROOT={self.memory_root} "
+                f"PSC_CONFIG_ROOT={self.config_root} "
+                f"HIPPO_HOOK_PYTHON={pipx_python} "
+                f"{pipx_python} {self.memory_root}/hooks/{script}"
+            )
+
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": old_command(
+                                            "claude_user_prompt_submit.py"
+                                        ),
+                                        "timeout": 10,
+                                    },
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"/usr/bin/python2 "
+                                            f"{self.memory_root}/hooks/"
+                                            "claude_user_prompt_submit.py"
+                                        ),
+                                        "timeout": 10,
+                                    },
+                                ],
+                            }
+                        ],
+                        "PostToolUse": [
+                            {
+                                "matcher": "Read",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": old_command(
+                                            "claude_post_tool_use.py"
+                                        ),
+                                        "timeout": 10,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = _run_install(self.base_args)
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        for event, marker in (
+            ("UserPromptSubmit", "claude_user_prompt_submit.py"),
+            ("PostToolUse", "claude_post_tool_use.py"),
+        ):
+            matching = [
+                hook
+                for entry in settings["hooks"][event]
+                for hook in entry.get("hooks", [])
+                if marker in hook.get("command", "")
+            ]
+            managed = [
+                hook for hook in matching
+                if hook.get("managedBy") == "paulsha-memory"
+            ]
+            self.assertEqual(len(managed), 1)
+            if event == "UserPromptSubmit":
+                self.assertTrue(
+                    any(
+                        hook.get("command", "").startswith("/usr/bin/python2 ")
+                        for hook in matching
+                    )
+                )
+
     # ------------------------------------------------------------------
     # Full install — Codex config
     # ------------------------------------------------------------------
@@ -998,10 +1085,12 @@ class InstallerTest(unittest.TestCase):
         new_memory_root = self.root / "memory-new"
         hooks_path = self.config_root / ".codex" / "hooks.json"
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        pipx_python = "/opt/pipx/venvs/paulsha-hippo/bin/python"
         old_stop = (
             f"PSC_MEMORY_ROOT={old_memory_root} "
             f"PSC_CONFIG_ROOT={self.config_root} "
-            f"{old_memory_root}/hooks/.venv/bin/python {old_memory_root}/hooks/codex_session_end.py"
+            f"HIPPO_HOOK_PYTHON={pipx_python} "
+            f"{pipx_python} {old_memory_root}/hooks/codex_session_end.py"
         )
         old_subagent = old_stop + " --subagent"
         hooks_path.write_text(
