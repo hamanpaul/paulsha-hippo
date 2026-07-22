@@ -27,6 +27,15 @@ must include tokenized, allowlisted argv for every deployment phase and for
 both rollback surface restores.  Missing phases are rejected before the
 artifact is switched; a plan without these commands is safe for dry-run only.
 
+The internal `artifact_switch` is only an atomic archive copy into the
+transaction target.  It is not a package deployment and must not be reported
+as one.  A release-ready command plan therefore has to include the reviewed,
+tokenized package switch itself, for example
+`pipx install --force <candidate-wheel>`, in the `artifact_switch` phase (and
+an equivalent old-wheel package switch in the rollback surface).  A plan that
+only copies an archive or restarts a service remains incomplete for a real
+release, even when its local artifact hash is correct.
+
 The apply phase order is fixed and journaled:
 
 ```text
@@ -48,6 +57,13 @@ files.  The default subprocess adapter uses `shell=False`; tests and a
 release orchestrator can inject a runner to perform the environment-specific
 fence, hook, service, and producer-wiring operations.
 
+The default adapter accepts empty stdout or exactly one UTF-8 JSON object no
+larger than 16 KiB.  The object may contain only scalar, allowlisted evidence
+keys; raw text, invalid JSON, nested values, unsupported fields, protected
+credential-shaped content, and oversized output fail closed.  The actual
+process return code is always retained as `returncode`, including when output
+validation fails.  Stderr is discarded and is never journaled.
+
 `project_registry_producer_wiring` is not permission to edit registry data.
 Its successful result must attest both that producer wiring was installed and
 that the atomizer consumed the generated registry contract.  The final
@@ -60,6 +76,13 @@ hippo upgrade prepare --plan <plan.json> --transaction-root <tx>
 hippo upgrade apply --manifest <tx>/upgrade.json --force
 hippo upgrade rollback --manifest <tx>/upgrade.json
 ```
+
+The CLI-generated `plan` is intentionally a commandless skeleton because
+environment-specific deployment argv is not guessed.  It is valid for plan,
+prepare, and dry-run inspection only; a release orchestrator must enrich it
+with every `phase_commands` and `rollback_commands` entry before a real
+`apply --force`.  The complete-plan gate rejects the skeleton before any
+artifact mutation.
 
 `plan` and `prepare` are non-deploying stages.  `apply --dry-run` validates the
 prepared candidate and reports the fixed phase order without invoking a

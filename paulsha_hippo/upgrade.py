@@ -17,12 +17,15 @@ import fcntl
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any
 
 
@@ -86,6 +89,9 @@ _MAX_TOTAL_COMMANDS = 64
 _MAX_ARGC = 32
 _MAX_ARG_BYTES = 4096
 _MAX_TIMEOUT_SECONDS = 300.0
+_MAX_RUNNER_STDOUT_BYTES = 16 * 1024
+_RUNNER_READ_BYTES = 4096
+_RUNNER_POLL_SECONDS = 0.05
 _SAFE_RESULT_KEYS = frozenset(
     {
         "artifact_sha256",
@@ -105,6 +111,7 @@ _SAFE_RESULT_KEYS = frozenset(
         "service_state",
         "status",
         "returncode",
+        "return_code",
         "ok",
         "success",
     }
@@ -112,6 +119,20 @@ _SAFE_RESULT_KEYS = frozenset(
 
 
 CommandRunner = Callable[..., Any]
+
+
+class _RunnerOutputError(UpgradeError):
+    """A bounded subprocess output error that retains only the exit code."""
+
+    def __init__(self, message: str, *, returncode: int):
+        super().__init__(message)
+        self.returncode = int(returncode)
+
+
+_SENSITIVE_OUTPUT_RE = re.compile(
+    r"(?i)(?:api[_-]?key|access[_-]?token|authorization|bearer|password|secret|"
+    r"credential|private[_-]?key|refresh[_-]?token)"
+)
 
 
 def _utc_now() -> str:
@@ -607,6 +628,18 @@ def _safe_reason(value: object) -> str:
     return text[:512]
 
 
+def _runner_exception_details(exc: BaseException) -> dict[str, Any]:
+    """Persist only a numeric exit code from a runner-side exception."""
+
+    value = getattr(exc, "returncode", None)
+    if isinstance(value, bool):
+        return {}
+    try:
+        return {"returncode": int(value)} if value is not None else {}
+    except (TypeError, ValueError, OverflowError):
+        return {}
+
+
 def _normalize_result(result: Any) -> tuple[bool, dict[str, Any], str | None]:
     if isinstance(result, bool):
         return result, {"ok": result}, None if result else "runner returned false"
@@ -683,6 +716,132 @@ def _invoke_runner(
     return callback(list(argv), **kwargs)
 
 
+def _bounded_subprocess(
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    env: Mapping[str, str],
+    cwd: str,
+) -> tuple[int, bytes, bool]:
+    """Run one argv and retain at most ``_MAX_RUNNER_STDOUT_BYTES + 1`` bytes."""
+
+    process = subprocess.Popen(
+        list(argv),
+        shell=False,
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        cwd=cwd,
+        env=dict(env),
+    )
+    stdout_pipe = process.stdout
+    selector = selectors.DefaultSelector()
+    if stdout_pipe is not None:
+        selector.register(stdout_pipe, selectors.EVENT_READ)
+    captured = bytearray()
+    oversized = False
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map() or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=1.0)
+                raise subprocess.TimeoutExpired(list(argv), timeout)
+            events = selector.select(min(remaining, _RUNNER_POLL_SECONDS))
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fd, _RUNNER_READ_BYTES)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                if len(captured) <= _MAX_RUNNER_STDOUT_BYTES:
+                    room = _MAX_RUNNER_STDOUT_BYTES + 1 - len(captured)
+                    captured.extend(chunk[:room])
+                    oversized = oversized or len(captured) > _MAX_RUNNER_STDOUT_BYTES
+        return int(process.wait()), bytes(captured), oversized
+    finally:
+        selector.close()
+        if stdout_pipe is not None and not stdout_pipe.closed:
+            stdout_pipe.close()
+
+
+def _parse_runner_stdout(
+    stdout: bytes,
+    *,
+    phase: str,
+    returncode: int,
+) -> dict[str, Any]:
+    """Parse only a small, scalar, allowlisted JSON object from stdout."""
+
+    if len(stdout) > _MAX_RUNNER_STDOUT_BYTES:
+        raise _RunnerOutputError(
+            f"{phase}: command stdout exceeds the bounded JSON limit",
+            returncode=returncode,
+        )
+    if not stdout.strip():
+        return {}
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _RunnerOutputError(
+            f"{phase}: command stdout is not UTF-8 JSON",
+            returncode=returncode,
+        ) from exc
+    if _SENSITIVE_OUTPUT_RE.search(text):
+        raise _RunnerOutputError(
+            f"{phase}: command stdout contains protected data",
+            returncode=returncode,
+        )
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-standard JSON constant: {value}")
+
+    try:
+        payload = json.loads(text, parse_constant=reject_constant)
+    except (TypeError, ValueError) as exc:
+        raise _RunnerOutputError(
+            f"{phase}: command stdout is not valid JSON",
+            returncode=returncode,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _RunnerOutputError(
+            f"{phase}: command stdout JSON must be an object",
+            returncode=returncode,
+        )
+    if set(payload) - _SAFE_RESULT_KEYS:
+        raise _RunnerOutputError(
+            f"{phase}: command stdout JSON contains unsupported fields",
+            returncode=returncode,
+        )
+    for value in payload.values():
+        if not isinstance(value, (str, int, float, bool)) and value is not None:
+            raise _RunnerOutputError(
+                f"{phase}: command stdout JSON contains unsupported values",
+                returncode=returncode,
+            )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise _RunnerOutputError(
+                f"{phase}: command stdout JSON contains a non-finite number",
+                returncode=returncode,
+            )
+    return _safe_result_details(payload)
+
+
 def _default_runner(
     argv: Sequence[str],
     *,
@@ -695,18 +854,24 @@ def _default_runner(
     if not argv:
         raise UpgradeError(f"{phase}: no allowlisted command is configured")
     try:
-        completed = subprocess.run(
-            list(argv),
-            shell=False,
-            check=False,
-            capture_output=True,
+        returncode, stdout, oversized = _bounded_subprocess(
+            argv,
             timeout=timeout,
+            env=env,
             cwd=cwd,
-            env=dict(env),
         )
     except subprocess.TimeoutExpired as exc:
         raise UpgradeError(f"{phase}: command timed out") from exc
-    return {"returncode": int(completed.returncode)}
+    if oversized:
+        raise _RunnerOutputError(
+            f"{phase}: command stdout exceeds the bounded JSON limit",
+            returncode=returncode,
+        )
+    result = _parse_runner_stdout(stdout, phase=phase, returncode=returncode)
+    # The process exit code is authoritative even if a command emitted a
+    # contradictory JSON returncode field.
+    result["returncode"] = returncode
+    return result
 
 
 def _record_history(manifest: dict[str, Any], event: str, **fields: Any) -> None:
@@ -794,7 +959,15 @@ def _execute_phase(
             )
         except Exception as exc:
             reason = _safe_reason(exc) if isinstance(exc, UpgradeError) else f"runner exception: {type(exc).__name__}"
-            attempt = {"index": index, "argv": list(argv), "status": "failed", "reason": reason, "started_at": started, "finished_at": _utc_now()}
+            attempt = {
+                "index": index,
+                "argv": list(argv),
+                "status": "failed",
+                "result": _runner_exception_details(exc),
+                "reason": reason,
+                "started_at": started,
+                "finished_at": _utc_now(),
+            }
             evidence.setdefault("attempts", []).append(attempt)
             evidence["status"] = "failed"
             evidence["failure"] = {"reason": reason, "at": _utc_now()}
@@ -945,7 +1118,7 @@ def _run_rollback_phases(
                 ok, details, reason = _normalize_result(raw)
             except Exception as exc:
                 reason = _safe_reason(exc) if isinstance(exc, UpgradeError) else f"runner exception: {type(exc).__name__}"
-                ok, details = False, {}
+                ok, details = False, _runner_exception_details(exc)
             attempt = {
                 "index": index,
                 "argv": list(argv),
