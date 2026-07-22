@@ -827,15 +827,42 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     )
 
 
+def _env_shebang_interpreter(path: Path) -> str | None:
+    """Return a simple ``/usr/bin/env NAME`` interpreter, if present."""
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline(256).decode("ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith("#!"):
+        return None
+    parts = first[2:].strip().split()
+    if (
+        len(parts) == 2
+        and parts[0] in {"/usr/bin/env", "/bin/env"}
+        and re.fullmatch(r"[A-Za-z0-9._+-]+", parts[1])
+    ):
+        return parts[1]
+    return None
+
+
 def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
-    """把 canonical config 中 enabled profile 的 argv[0] 固定為可執行絕對路徑。"""
+    """Make enabled profile commands executable in the service environment.
+
+    Besides pinning ``argv[0]``, an external CLI with a simple
+    ``#!/usr/bin/env <interpreter>`` shebang is rewritten to an absolute
+    interpreter plus an absolute script path when systemd cannot resolve that
+    interpreter.  This keeps launcher/auth ownership external and uses no
+    shell wrapper.
+    """
+    from paulsha_hippo.agent_profiles import profiles_from_config
     from paulsha_hippo.atomizer import config as atomizer_config
 
     canonical = paths.atomizer_config_path()
     if not canonical.is_file():
         return 0, f"fix-backend: canonical config 不存在（{canonical}），無可遷移"
     try:
-        atomizer_config.load_config(override_path=None)
+        atomizer_config.load_config()
         import yaml
 
         document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
@@ -849,6 +876,7 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
         return 1, "fix-backend: external_agents.profiles 不是 list"
 
     changes: list[tuple[str, str, str]] = []
+    service_path = _service_effective_path_env()
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("enabled", True) is not True:
             continue
@@ -857,9 +885,25 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
         if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
             return 1, f"fix-backend: profile {profile_id} argv 無效"
         argv0 = argv[0]
-        if Path(argv0).is_absolute() or shutil.which(
-            argv0, path=_service_effective_path_env()
-        ) is not None:
+        absolute_command = Path(argv0)
+        service_command = argv0 if (
+            absolute_command.is_absolute()
+            and absolute_command.is_file()
+            and os.access(argv0, os.X_OK)
+        ) else shutil.which(argv0, path=service_path)
+        interactive_command = service_command or shutil.which(argv0)
+        if interactive_command is not None:
+            interpreter = _env_shebang_interpreter(Path(interactive_command))
+            if interpreter and shutil.which(interpreter, path=service_path) is None:
+                try:
+                    interpreter_path = resolve_backend_argv([interpreter])[0]
+                except BackendUnavailableError as exc:
+                    return 1, f"fix-backend: profile {profile_id}: {exc}"
+                command_path = os.path.abspath(interactive_command)
+                argv[:] = [interpreter_path, command_path, *argv[1:]]
+                changes.append((profile_id, argv0, f"{interpreter_path} {command_path}"))
+                continue
+        if service_command is not None:
             continue
         try:
             resolved = resolve_backend_argv([argv0])[0]
@@ -869,6 +913,11 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
         changes.append((profile_id, argv0, resolved))
     if not changes:
         return 0, "fix-backend: enabled profiles 已為 service-effective，無可遷移"
+
+    try:
+        profiles_from_config(profiles)
+    except Exception as exc:
+        return 1, f"fix-backend: migrated profiles 無效：{exc}"
 
     backup_path = canonical.with_name(canonical.name + ".bak")
     if backup and not backup_path.exists():
