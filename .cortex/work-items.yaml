@@ -9,4 +9,6 @@ work_items:
         ref: 'hamanpaul/paulsha-hippo#39'
       - kind: openspec
         ref: 'issue-34-atomization-release'
+      - kind: path
+        ref: 'openspec/changes/issue-34-atomization-release/proposal.md'
     excludes: []
