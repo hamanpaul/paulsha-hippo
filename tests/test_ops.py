@@ -1195,6 +1195,45 @@ class FixBackendMigrationTests(unittest.TestCase):
             self.assertEqual(canonical.read_bytes(), original)
             self.assertFalse(canonical.with_name(canonical.name + ".bak").exists())
 
+    def test_fix_backend_snapshots_service_path_once_for_all_profiles(self):
+        import yaml
+
+        with TemporaryDirectory() as tmp:
+            canonical = self._write_config(tmp)
+            document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+            enabled_ids = {"claude", "codex"}
+            executables = {}
+            for profile in document["external_agents"]["profiles"]:
+                profile["enabled"] = profile["id"] in enabled_ids
+                if profile["enabled"]:
+                    profile["argv"][0] = profile["id"]
+                    executable = Path(tmp) / "interactive-bin" / profile["id"]
+                    executable.parent.mkdir(parents=True, exist_ok=True)
+                    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    executable.chmod(0o755)
+                    executables[profile["id"]] = str(executable)
+            canonical.write_text(
+                yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+
+            def fake_which(cmd, path=None):
+                if cmd in executables:
+                    return None if path is not None else executables[cmd]
+                return None
+
+            with mock.patch.dict("os.environ", self._env(tmp)), \
+                 mock.patch.object(
+                     ops,
+                     "_service_effective_path_env",
+                     return_value="/usr/bin:/bin",
+                 ) as service_path, \
+                 mock.patch.object(ops.shutil, "which", side_effect=fake_which):
+                code, _ = ops._fix_backend_config()
+
+            self.assertEqual(code, 0)
+            service_path.assert_called_once_with()
+
     def test_fix_backend_without_canonical_config_fails_closed(self):
         with TemporaryDirectory() as tmp:
             with mock.patch.dict("os.environ", self._env(tmp)), \

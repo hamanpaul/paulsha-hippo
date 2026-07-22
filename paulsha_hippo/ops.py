@@ -876,6 +876,7 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
         return 1, "fix-backend: external_agents.profiles 不是 list"
 
     changes: list[tuple[str, str, str]] = []
+    service_path = _service_effective_path_env()
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("enabled", True) is not True:
             continue
@@ -884,7 +885,6 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
         if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
             return 1, f"fix-backend: profile {profile_id} argv 無效"
         argv0 = argv[0]
-        service_path = _service_effective_path_env()
         absolute_command = Path(argv0)
         service_command = argv0 if (
             absolute_command.is_absolute()
