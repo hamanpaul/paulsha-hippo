@@ -21,7 +21,7 @@ from .agent_exec import (
     CachingAgentClient,
 )
 from .provenance import provenance_from_result, safe_provenance, sha256_text
-from .config import AtomizerConfig, is_safe_path_component
+from .config import AtomizerConfig, is_safe_path_component, is_valid_project_id
 from ..noise import is_generic_title
 from .promoter import Promoter
 from .slice_frontmatter import Slice
@@ -47,6 +47,17 @@ _PROMOTE_FAILURE_CATEGORIES = {
     "schema": "backend_unavailable",
     "unsafe": "backend_unavailable",
     "budget": "backend_unavailable",
+}
+
+_GROUNDING_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{2,}")
+_GROUNDING_CJK_RE = re.compile(r"[\u3400-\u9fff]+")
+_GROUNDING_STOP_WORDS = {
+    "and", "are", "for", "from", "into", "one", "only", "that", "the",
+    "their", "then", "this", "use", "with",
+}
+_OUTPUT_CONTRACT_MARKERS = {
+    "disposition", "findings", "json", "markdown", "no_findings",
+    "reason", "schema_version",
 }
 
 
@@ -169,8 +180,77 @@ class LLMPromoter(Promoter):
             candidate = candidate._inner
         return candidate if isinstance(candidate, ExternalAgentRouter) else None
 
-    def _response_validator(self):
-        return lambda raw: llm_output.parse_response(raw, self._projects)
+    @staticmethod
+    def _grounding_units(value: object) -> set[str]:
+        text = str(value or "")
+        units = {
+            token.casefold()
+            for token in _GROUNDING_WORD_RE.findall(text)
+            if token.casefold() not in _GROUNDING_STOP_WORDS
+        }
+        for run in _GROUNDING_CJK_RE.findall(text):
+            units.update(run[index:index + 2] for index in range(len(run) - 1))
+        return units
+
+    @classmethod
+    def _validate_grounding(
+        cls,
+        response: llm_output.ParsedResponse,
+        fragments: list[Fragment],
+    ) -> llm_output.ParsedResponse:
+        if response.disposition != "findings":
+            return response
+        fragments_by_index: dict[int, list[Fragment]] = {}
+        for fragment in fragments:
+            fragments_by_index.setdefault(fragment.fragment_index, []).append(fragment)
+        for index, proposal in enumerate(response.findings):
+            referenced = [
+                fragment
+                for fragment_index in proposal.source_fragment_indices
+                if fragment_index in fragments_by_index
+                for fragment in fragments_by_index[fragment_index]
+            ]
+            # Preserve the existing lenient out-of-range attribution contract:
+            # when every model-supplied index is invalid, the whole session is
+            # the only honest source authority available.
+            if not referenced:
+                referenced = list(fragments)
+            source_text = "\n".join(fragment.body for fragment in referenced)
+            # Tags are model-selected metadata, not source evidence.  Counting
+            # them would let an unrelated body pass by copying one source noun
+            # into a tag.
+            proposal_text = "\n".join((proposal.title, proposal.body))
+            source_units = cls._grounding_units(source_text)
+            proposal_units = cls._grounding_units(proposal_text)
+            leaked_contract = (
+                proposal_units & _OUTPUT_CONTRACT_MARKERS
+            ) - source_units
+            if len(leaked_contract) >= 3 or not (source_units & proposal_units):
+                raise llm_output.LlmOutputError(
+                    f"proposal {index} not grounded in declared source fragments"
+                )
+        return response
+
+    def _known_projects_for_fragments(self, fragments: list[Fragment]) -> list[str]:
+        projects = list(self._projects)
+        if fragments:
+            source_project = fragments[0].project
+            if (
+                source_project != "_unknown"
+                and is_valid_project_id(source_project)
+                and source_project not in projects
+            ):
+                projects.append(source_project)
+        return projects
+
+    def _response_validator(self, fragments: list[Fragment]):
+        known_projects = self._known_projects_for_fragments(fragments)
+
+        def validate(raw: str) -> llm_output.ParsedResponse:
+            response = llm_output.parse_response(raw, known_projects)
+            return self._validate_grounding(response, fragments)
+
+        return validate
 
     def _router_result(self) -> AgentRunResult | None:
         result = getattr(self._agent, "last_result", None)
@@ -275,7 +355,7 @@ class LLMPromoter(Promoter):
         self.last_raw_output = ""
         last_error: Exception | None = None
         attempted = 0
-        validator = self._response_validator()
+        validator = self._response_validator(chunk_fragments)
         router = self._router()
         for attempt in range(1, attempts + 1):
             attempted = attempt
@@ -426,7 +506,12 @@ class LLMPromoter(Promoter):
             )
             for chunk in chunks
         )
-        validator = self._response_validator()
+        session_fragments = [
+            part.as_fragment()
+            for chunk in chunks
+            for part in chunk.parts
+        ]
+        validator = self._response_validator(session_fragments)
         self.last_raw_output = ""
         try:
             if isinstance(self._agent, CachingAgentClient):
@@ -493,7 +578,7 @@ class LLMPromoter(Promoter):
             chunks = budget.pack_prompt_chunks(
                 skill_text=self._skill,
                 fragments=fragments,
-                known_projects=self._projects,
+                known_projects=self._known_projects_for_fragments(fragments),
                 context_window=config.context_window,
                 max_input_tokens=config.max_input_tokens,
                 max_prompt_argv_bytes=config.max_prompt_argv_bytes,
@@ -549,7 +634,7 @@ class LLMPromoter(Promoter):
             for proposal in response.findings:
                 if (
                     first.project != "_unknown"
-                    and first.project in self._projects
+                    and is_valid_project_id(first.project)
                     and proposal.project != first.project
                 ):
                     _LOG.warning(

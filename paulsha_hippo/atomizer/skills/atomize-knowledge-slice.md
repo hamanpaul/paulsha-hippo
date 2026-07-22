@@ -82,12 +82,16 @@ triggers:
 - 檢查所有 `title` 在同一批輸出內唯一且可互相引用。
 
 ## Output contract
-Return ONLY an inline JSON array.
-The first character of your response must be `[` and the last character must be `]`.
+Return ONLY this canonical JSON object shape:
+`{"schema_version":1,"disposition":"findings|no_findings","reason":null|string,"findings":[...]}`
+The first character of your response must be `{` and the last character must be `}`.
 Do NOT create files, write files, save files, or claim that you updated any file or index.
-Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON array.
+Do NOT return prose, narration, summaries, markdown fences, or any text before or after the JSON object.
 
-Each item in the array must be an object with these fields:
+Use `disposition=findings` with one or more items in `findings` and `reason=null`.
+Use `disposition=no_findings` only with `findings=[]` and a non-empty string `reason`.
+
+Each item in `findings` must be an object with these fields:
 
 - `title`: slice 標題；短、穩定、可被其他 slices 以 `target_title` 參照。
 - `artifact_kind`: 必須是下列其中之一：`research`、`spec`、`roadmap`、`test`、`task`、`todo`、`plan`、`report`、`review`、`ship-record`、`gate-report`。
@@ -99,5 +103,5 @@ Each item in the array must be an object with these fields:
   - `{ "type": "relates_to", "target_title": "<another slice title>" }`
   - `{ "type": "mentions", "entity": "<stable entity name>" }`
 
-Inline example shape (for reference only; your actual response must still be only the array):
-`[{"title":"example overview","artifact_kind":"report","project":"paulshaclaw","tags":["atomizer","overview"],"body":"Distilled markdown content.","source_fragment_indices":[0,1],"relations":[{"type":"relates_to","target_title":"example detail"},{"type":"mentions","entity":"BRCM"}]}]`
+Inline example shape (for reference only; your actual response must still be only the object):
+`{"schema_version":1,"disposition":"findings","reason":null,"findings":[{"title":"example overview","artifact_kind":"report","project":"paulshaclaw","tags":["atomizer","overview"],"body":"Distilled markdown content.","source_fragment_indices":[0,1],"relations":[{"type":"relates_to","target_title":"example detail"},{"type":"mentions","entity":"BRCM"}]}]}`

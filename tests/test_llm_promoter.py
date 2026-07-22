@@ -31,7 +31,7 @@ _TWO = (
 )
 _MERGE = (
     '[{"title":"m","artifact_kind":"report","project":"paulshaclaw","tags":[],'
-    '"body":"merged","source_fragment_indices":[0,1],"relations":[]}]'
+    '"body":"merged body","source_fragment_indices":[0,1],"relations":[]}]'
 )
 
 
@@ -58,7 +58,7 @@ def _frag(index: int) -> Fragment:
         captured_at="2026-06-02T00:00:00Z",
         provenance={"repo": "r", "commit": "c", "path": "p"},
         fragment_index=index,
-        body=f"b{index}",
+        body=f"body {chr(ord('a') + index)}",
     )
 
 
@@ -275,12 +275,12 @@ class LLMPromoterTests(unittest.TestCase):
 
         valid_0 = (
             '[{"title":"specific finding zero","artifact_kind":"report",'
-            '"project":"paulshaclaw","tags":[],"body":"body zero",'
+            '"project":"paulshaclaw","tags":[],"body":"body a",'
             '"source_fragment_indices":[0],"relations":[]}]'
         )
         valid_1 = (
             '[{"title":"specific finding one","artifact_kind":"report",'
-            '"project":"paulshaclaw","tags":[],"body":"body one",'
+            '"project":"paulshaclaw","tags":[],"body":"body b",'
             '"source_fragment_indices":[1],"relations":[]}]'
         )
         calls: list[tuple[str, str]] = []
