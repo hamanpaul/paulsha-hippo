@@ -337,6 +337,42 @@ class HookQueueWriterTest(unittest.TestCase):
                 [sys.executable, "-m", "paulsha_hippo"],
             )
 
+    def test_invalid_installed_interpreter_falls_back_to_nested_venv(self):
+        from paulsha_hippo.hooks import (
+            _wakeup_common,
+            claude_session_end,
+            codex_session_end,
+            copilot_session_end,
+        )
+
+        queue_path = self.memory_root / "runtime" / "queue" / "capture.json"
+        nested_python = self.memory_root / "hooks" / ".venv" / "bin" / "python"
+        nested_python.parent.mkdir(parents=True)
+        nested_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        nested_python.chmod(0o700)
+        env = {"HIPPO_HOOK_PYTHON": str(self.memory_root / "missing-python")}
+        fire_calls = (
+            (claude_session_end._fire_importer, (self.memory_root, queue_path)),
+            (codex_session_end._fire_importer, (self.memory_root, queue_path)),
+            (copilot_session_end._fire_importer, (self.memory_root, queue_path)),
+            (_wakeup_common.fire_importer, (self.memory_root, "codex", queue_path)),
+        )
+        with mock.patch.dict(os.environ, env), mock.patch("subprocess.Popen") as popen:
+            for fire, args in fire_calls:
+                fire(*args)
+
+        self.assertEqual(popen.call_count, 4)
+        for call in popen.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[0], str(nested_python))
+            self.assertEqual(argv[1:3], ["-m", "paulsha_hippo.importer.cli"])
+
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(
+                _wakeup_common.hippo_invocation(self.memory_root),
+                [str(nested_python), "-m", "paulsha_hippo"],
+            )
+
 
 # ---------------------------------------------------------------------------
 # Installer / Uninstaller tests
