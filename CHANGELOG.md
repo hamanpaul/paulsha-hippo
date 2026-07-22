@@ -45,6 +45,7 @@
 - `hippo doctor` 新增 runtime 健康報告：global dream lock（`runtime/locks/dream.lock`）持鎖狀態＋dream/supervise 進程清單（PID/start time/cmdline/cwd），標記非 canonical 實例（interpreter-mismatch／cwd-missing／cwd-temp-worktree）；只報告，不自動 kill（#19）
 
 ### Fixed
+- Importer 會引用 YAML 中以冒號結尾或接 flow delimiter 的 scalar，避免 fallback session title 讓 inbox frontmatter 無法解析並在每輪 Dream 重複隔離。
 - Atomizer 以合法的 non-`_unknown` source project 作為歸屬 authority，即使 generated registry 尚未列出該 project 也不再降級成 `_unknown`；LLM proposal 必須與其宣告的 source fragments 有可驗證文字錨點，atomization skill 與 canonical response contract 已同步，output-contract／agent-instruction 汙染會使整份 response fail-closed，不再發布成知識 atom。
 - Atomizer distillation provenance 未顯式傳入 build 時，改讀取與 CLI／Dream 相同的 embedded/env build identity，不再於已安裝 wheel 的 promoted atom 與 processing ledger 留下 `build_commit: unknown`。
 - Recovery planning 可用 `--source-manifest` 沿用既有 manifest 的精確 frozen source set，再以目前 candidate 重建 pins/planned artifacts；避免 live archive 持續新增或更新中的 session 擴張既定 recovery scope 並永久觸發 target drift，authority manifest 變動則 fail closed。
