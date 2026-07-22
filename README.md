@@ -31,7 +31,7 @@
 蒸餾失敗顯性化：backend 不可用／重試超限的 session 進 `parked`（證據在 `runtime/queue/_failed/`），修復後 `hippo requeue` 恢復；`dream run` 以 global lock 保證單一 writer，並發第二實例記 log 後跳過。
 維運：`hippo doctor`（含 dream lock 持鎖狀態與 dream/supervise 進程健康報告——PID/start/cmdline、非 canonical 標記，只報告不自動 kill）；`hippo locks cleanup-legacy --memory-root <root> [--apply]`（legacy per-session lock 一次性清理，預設 dry-run，僅維護窗口使用）。
 
-設定：runtime distiller 唯一來源為 `~/.config/paulsha-hippo/atomizer.yaml`；`HIPPO_*` 僅覆寫路徑。外部 CLI 自行負責登入、OAuth/API key 與 launcher，Hippo 不讀取 credential store。
+設定：runtime distiller 唯一來源為 `~/.config/paulsha-hippo/config.yaml`；`HIPPO_*` 僅覆寫路徑。外部 CLI 自行負責登入與 launcher，Hippo 不讀取外部 agent 的認證狀態。
 Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。
 蒸餾只使用宣告式 external headless profiles：Tier 1 `claude`/`codex`、Tier 2 `agy`/`cg`、Tier 3 `co-gem`/`claude-gem`/custom local。每個 profile 自訂 traits、task classes、model、effort 與 tokenized argv；prompt 一律走 stdin，fallback 順序與 bounded budget 見 `docs/backend-matrix.md`。
 

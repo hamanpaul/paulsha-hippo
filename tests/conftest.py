@@ -15,3 +15,10 @@ def _disable_live_external_agent(monkeypatch):
         raise RuntimeError("external agent disabled in tests")
 
     monkeypatch.setattr(title, "_default_runner", _offline)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_config(monkeypatch, tmp_path):
+    """Never let unit tests consume this workstation's deployed Hippo config."""
+
+    monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(tmp_path / "hippo-config"))

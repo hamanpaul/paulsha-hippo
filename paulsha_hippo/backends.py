@@ -52,6 +52,7 @@ PRESETS: dict[str, BackendPreset] = {
         required_executable="copilot",
         doctor_probe=["copilot", "--version"],
         capabilities=frozenset({"argv-stdin"}),
+        available=False,
     ),
     # unavailable：無成功 round-trip 實證（2026-07-10 僅 rc=41 觀察），依 spec
     # §8 不猜 argv——候選 argv 記錄於模組 docstring 與 docs/backend-matrix.md，
@@ -74,7 +75,7 @@ PRESETS: dict[str, BackendPreset] = {
     ),
     "agy-headless": BackendPreset(
         name="agy-headless",
-        argv_template=["agy", "--headless", "--stdin"],
+        argv_template=["agy", "--mode", "plan", "--sandbox", "--print"],
         required_executable="agy",
         doctor_probe=["agy", "--version"],
         capabilities=frozenset({"argv-stdin"}),
@@ -85,6 +86,7 @@ PRESETS: dict[str, BackendPreset] = {
         required_executable="cg",
         doctor_probe=["cg", "--version"],
         capabilities=frozenset({"argv-stdin"}),
+        available=False,
     ),
     "co-gem-headless": BackendPreset(
         name="co-gem-headless",
@@ -92,6 +94,7 @@ PRESETS: dict[str, BackendPreset] = {
         required_executable="co-gem",
         doctor_probe=["co-gem", "--version"],
         capabilities=frozenset({"argv-stdin"}),
+        available=False,
     ),
     "claude-gem-headless": BackendPreset(
         name="claude-gem-headless",
@@ -99,6 +102,7 @@ PRESETS: dict[str, BackendPreset] = {
         required_executable="claude-gem",
         doctor_probe=["claude-gem", "--version"],
         capabilities=frozenset({"argv-stdin"}),
+        available=False,
     ),
     "custom-argv": BackendPreset(
         name="custom-argv",

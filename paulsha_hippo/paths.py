@@ -129,7 +129,7 @@ def config_path(*parts: PathPart) -> Path:
 
 def atomizer_config_path() -> Path:
     """Canonical Hippo-owned runtime distiller config path."""
-    return hippo_config_root() / "atomizer.yaml"
+    return hippo_config_root() / "config.yaml"
 
 
 def projects_config_path(memory_root_value: str | Path | None = None) -> Path:

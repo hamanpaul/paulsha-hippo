@@ -315,20 +315,21 @@ def load_config(
     Raises:
         AtomizerConfigError: If config is invalid or schema unsupported
     """
-    # Resolve default config directory
+    # Resolve the default config source.  The managed runtime config has a
+    # different filename from the package template, so keep the full path
+    # instead of resolving a directory and appending ``atomizer.yaml``.
     using_canonical_runtime_config = False
     if default_dir is None:
         canonical_path = paths.atomizer_config_path()
         if canonical_path.is_file():
-            config_dir = canonical_path.parent
+            default_config_path = canonical_path
             using_canonical_runtime_config = True
         else:
-            config_dir = DEFAULT_CONFIG_DIR
+            default_config_path = DEFAULT_CONFIG_DIR / "atomizer.yaml"
     else:
-        config_dir = Path(default_dir)
+        default_config_path = Path(default_dir) / "atomizer.yaml"
     
     # Load default config
-    default_config_path = config_dir / "atomizer.yaml"
     if not default_config_path.exists():
         raise AtomizerConfigError(f"Default config not found: {default_config_path}")
     

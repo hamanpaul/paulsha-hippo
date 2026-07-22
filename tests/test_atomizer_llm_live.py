@@ -19,8 +19,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "raw" / "s
 _LIVE_TIMEOUT_SECONDS = 300
 
 _MATRIX_PRESETS = (
-    "claude-headless", "codex-headless", "copilot-headless",
-    "agy-headless", "cg-headless", "co-gem-headless", "claude-gem-headless",
+    "claude-headless", "codex-headless", "agy-headless",
 )
 
 

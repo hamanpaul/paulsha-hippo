@@ -41,6 +41,7 @@ PROHIBITED_KEYS = frozenset(
         "upstream-url",
     }
 )
+RETIRED_RUNTIME_ROOTS = frozenset({"distiller", "agent_exec"})
 
 
 class MigrationError(ValueError):
@@ -96,6 +97,42 @@ def _prohibited_fields(value: object, path: str = "") -> list[str]:
 
 def _semantic(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(left))
+    for key, value in right.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
+            result[key] = _merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _retire_provider_surface(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop retired transport fields after non-empty credential checks passed."""
+    result: dict[str, Any] = {}
+    for key, child in value.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if lowered in RETIRED_RUNTIME_ROOTS or lowered in PROHIBITED_KEYS:
+            continue
+        if isinstance(child, Mapping):
+            result[key_text] = _retire_provider_surface(child)
+        elif isinstance(child, list):
+            result[key_text] = [
+                _retire_provider_surface(item) if isinstance(item, Mapping) else copy.deepcopy(item)
+                for item in child
+            ]
+        else:
+            result[key_text] = copy.deepcopy(child)
+    return result
+
+
+def _canonical_target(source: Mapping[str, Any]) -> dict[str, Any]:
+    template_path = Path(__file__).resolve().parent / "atomizer" / "atomizer.yaml"
+    template, _ = _read_document(template_path)
+    return _merge(template, _retire_provider_surface(source))
 
 
 def _semantic_diff(left: Mapping[str, Any], right: Mapping[str, Any], path: str = "") -> list[str]:
@@ -263,13 +300,16 @@ def apply_migration(
         raise MigrationError("migration source drift")
     if _prohibited_fields(source_data):
         raise MigrationError("operator-redaction-required")
+    target_data = _canonical_target(source_data)
+    target_semantic_hash = _hash_bytes(_semantic(target_data).encode("utf-8"))
     report: dict[str, Any] = {
         "status": "dry-run" if dry_run else "applied",
         "source": source,
         "canonical_path": str(canonical),
         "source_hash": source_hash,
         "plan_hash": current.plan_hash,
-        "semantic_hash": _hash_bytes(_semantic(source_data).encode("utf-8")),
+        "semantic_hash": target_semantic_hash,
+        "retired_roots": sorted(RETIRED_RUNTIME_ROOTS),
     }
     if dry_run:
         return report
@@ -277,13 +317,40 @@ def apply_migration(
     try:
         import yaml
 
-        rendered = yaml.safe_dump(copy.deepcopy(source_data), sort_keys=False, allow_unicode=True)
+        rendered = yaml.safe_dump(copy.deepcopy(target_data), sort_keys=False, allow_unicode=True)
     except ImportError as exc:
         raise MigrationError("PyYAML is required for config migration") from exc
-    fd, tmp_name = tempfile.mkstemp(prefix=".hippo-config-", dir=str(canonical.parent), text=True)
+    rendered_bytes = rendered.encode("utf-8")
+    if canonical.is_file():
+        existing_data, existing_hash = _read_document(canonical)
+        if _semantic(existing_data) == _semantic(target_data):
+            return {**report, "status": "no-op", "applied_hash": existing_hash, "backup": None}
+        backup_dir = canonical.parent / ".hippo-migration" / current.plan_hash
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / "canonical.preimage.yaml"
+        raw_preimage = canonical.read_bytes()
+        fd, backup_tmp = tempfile.mkstemp(prefix=".preimage-", dir=str(backup_dir))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw_preimage)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(backup_tmp, 0o600)
+            os.replace(backup_tmp, backup_path)
+        finally:
+            try:
+                os.unlink(backup_tmp)
+            except FileNotFoundError:
+                pass
+        report["backup"] = str(backup_path)
+        report["backup_hash"] = existing_hash
+    else:
+        report["backup"] = None
+        report["backup_hash"] = _hash_bytes(b"")
+    fd, tmp_name = tempfile.mkstemp(prefix=".hippo-config-", dir=str(canonical.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(rendered)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(rendered_bytes)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, canonical)
@@ -292,7 +359,41 @@ def apply_migration(
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+    report["applied_hash"] = _hash_bytes(rendered_bytes)
     return report
+
+
+def rollback_migration(report: Mapping[str, Any] | str | Path) -> dict[str, Any]:
+    value = (
+        json.loads(Path(report).read_text(encoding="utf-8"))
+        if isinstance(report, (str, Path))
+        else dict(report)
+    )
+    canonical = Path(str(value.get("canonical_path", "")))
+    applied_hash = str(value.get("applied_hash", ""))
+    if not canonical.is_file() or _hash_bytes(canonical.read_bytes()) != applied_hash:
+        raise MigrationError("canonical config drift blocks rollback")
+    backup = value.get("backup")
+    if backup:
+        backup_path = Path(str(backup))
+        if not backup_path.is_file() or _hash_bytes(backup_path.read_bytes()) != value.get("backup_hash"):
+            raise MigrationError("migration backup is missing or drifted")
+        payload = backup_path.read_bytes()
+        fd, tmp_name = tempfile.mkstemp(prefix=".hippo-rollback-", dir=str(canonical.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, canonical)
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        return {"status": "rolled-back", "restored_hash": value["backup_hash"]}
+    canonical.unlink()
+    return {"status": "rolled-back", "restored_hash": None}
 
 
 __all__ = [
@@ -301,4 +402,5 @@ __all__ = [
     "PROHIBITED_KEYS",
     "apply_migration",
     "plan_migration",
+    "rollback_migration",
 ]

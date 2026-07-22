@@ -2,7 +2,7 @@
   "schema_version": "1",
   "entries": [
     {
-      "path": "atomizer.yaml",
+      "path": "config.yaml",
       "source": "atomizer/atomizer.yaml",
       "kind": "exclusive"
     }

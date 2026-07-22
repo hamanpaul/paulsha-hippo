@@ -86,12 +86,16 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_p = memory_subparsers.add_parser("doctor", help="健檢：路徑契約/hooks/服務/backend")
     doctor_p.add_argument(
         "--fix-backend", action="store_true",
-        help="冪等遷移：override 中 service-effective 解析不到的裸 backend 命令改寫為絕對路徑"
+        help="冪等遷移：canonical config 中 enabled profile 的裸命令改寫為絕對路徑"
              "（先備份）；隱含 --probe-live 以真實 smoke probe 驗證遷移結果")
     doctor_p.add_argument(
         "--probe-live", action="store_true",
         help="對 configured backend 實際送一次 bounded smoke prompt（真實喚起，60s timeout、"
              "可能產生 API 成本；亦可 HIPPO_DOCTOR_LIVE_PROBE=1）。預設僅做解析檢查")
+    doctor_p.add_argument(
+        "--probe-profiles", action="store_true",
+        help="逐一實跑所有 enabled Dream external profiles；任一失敗即 fail closed（可能產生成本）",
+    )
     doctor_p.set_defaults(func=_ops_doctor)
 
     install_p = memory_subparsers.add_parser("install")
@@ -111,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
     install_all.add_argument("--manifest", default=None)
     install_all.add_argument("--target-root", default=None)
     install_all.add_argument("--transaction-root", default=None)
+    install_all.add_argument(
+        "--runtime-plan",
+        default=None,
+        help="reviewed JSON writer/service/rollback command plan (required for apply)",
+    )
     install_all.set_defaults(func=_ops_install_all)
 
     upgrade = memory_subparsers.add_parser(
@@ -122,6 +131,11 @@ def _build_parser() -> argparse.ArgumentParser:
     upgrade_plan.add_argument("--target-root", required=True)
     upgrade_plan.add_argument("--profile-id", default="candidate")
     upgrade_plan.add_argument("--artifact-name", default="hippo.whl")
+    upgrade_plan.add_argument(
+        "--command-plan",
+        default=None,
+        help="reviewed JSON phase/rollback argv plan; omit for dry-run skeleton",
+    )
     upgrade_plan.add_argument("--out", required=True)
     upgrade_plan.set_defaults(func=_upgrade)
     upgrade_prepare = upgrade_sub.add_parser("prepare")
@@ -136,6 +150,29 @@ def _build_parser() -> argparse.ArgumentParser:
     upgrade_rollback = upgrade_sub.add_parser("rollback")
     upgrade_rollback.add_argument("--manifest", required=True)
     upgrade_rollback.set_defaults(func=_upgrade)
+
+    config = memory_subparsers.add_parser(
+        "config", help="canonical runtime config migration and rollback"
+    )
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_migrate = config_sub.add_parser(
+        "migrate", help="plan/apply a hash-bound legacy config migration"
+    )
+    migrate_sub = config_migrate.add_subparsers(dest="migrate_command", required=True)
+    migrate_plan = migrate_sub.add_parser("plan")
+    migrate_plan.add_argument("--canonical", default=None)
+    migrate_plan.add_argument("--legacy", default=None)
+    migrate_plan.add_argument("--out", default=None)
+    migrate_plan.set_defaults(func=_config_migrate)
+    migrate_apply = migrate_sub.add_parser("apply")
+    migrate_apply.add_argument("--plan", required=True)
+    migrate_apply.add_argument("--resolution", default=None)
+    migrate_apply.add_argument("--dry-run", action="store_true")
+    migrate_apply.add_argument("--out", default=None)
+    migrate_apply.set_defaults(func=_config_migrate)
+    migrate_rollback = migrate_sub.add_parser("rollback")
+    migrate_rollback.add_argument("--report", required=True)
+    migrate_rollback.set_defaults(func=_config_migrate)
 
     dry_run = memory_subparsers.add_parser("dry-run-policy")
     dry_run.add_argument("session_id")
@@ -1060,6 +1097,7 @@ def _ops_doctor(args) -> int:
     return ops.run_doctor(
         fix_backend=getattr(args, "fix_backend", False),
         live_probe=getattr(args, "probe_live", False),
+        probe_profiles=getattr(args, "probe_profiles", False),
     )
 
 
@@ -1081,6 +1119,15 @@ def _ops_install_all(args) -> int:
     manifest = Path(args.manifest) if args.manifest else Path(__file__).resolve().parent / "install-manifest.json"
     target_root = Path(args.target_root) if args.target_root else paths.hippo_config_root()
     try:
+        if not args.dry_run and not args.runtime_plan:
+            raise deployment.DeploymentError(
+                "apply requires --runtime-plan for writer/service fencing and rollback"
+            )
+        runtime = (
+            _load_install_runtime(args.runtime_plan, deployment, target_root)
+            if args.runtime_plan
+            else None
+        )
         result = deployment.install_all(
             manifest_path=manifest,
             target_root=target_root,
@@ -1088,6 +1135,7 @@ def _ops_install_all(args) -> int:
             force=bool(args.force),
             dry_run=bool(args.dry_run),
             transaction_root=args.transaction_root,
+            runtime=runtime,
         )
     except deployment.DeploymentError as exc:
         print(json.dumps({"status": "blocked", "reason": str(exc)}, ensure_ascii=False, sort_keys=True))
@@ -1096,16 +1144,78 @@ def _ops_install_all(args) -> int:
     return 0
 
 
+def _load_install_runtime(value: str, deployment, target_root: Path):
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from . import ops
+
+    try:
+        payload = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise deployment.DeploymentError("invalid install runtime plan") from exc
+    if not isinstance(payload, dict):
+        raise deployment.DeploymentError("install runtime plan root must be an object")
+    allowed = {
+        "commands", "rollback_commands", "profile_id", "command_timeout",
+        "drain_timeout", "lock_timeout", "rollback_timeout",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise deployment.DeploymentError(
+            f"unknown install runtime plan field: {unknown[0]}"
+        )
+    commands = payload.get("commands")
+    rollback_commands = payload.get("rollback_commands")
+    runner = deployment.AllowlistedCommandRunner(
+        commands, location=sys.executable, target_root=target_root
+    )
+    rollback_runner = deployment.AllowlistedCommandRunner(
+        rollback_commands, location=sys.executable, target_root=target_root
+    )
+
+    def doctor_static(_context):
+        sink = io.StringIO()
+        with redirect_stdout(sink), redirect_stderr(sink):
+            rc = ops.run_doctor(live_probe=False, probe_profiles=False)
+        return {"ok": rc == 0, "status": "passed" if rc == 0 else "failed"}
+
+    def profile_probe(_context, _profile_id):
+        sink = io.StringIO()
+        with redirect_stdout(sink), redirect_stderr(sink):
+            rc = ops.run_doctor(live_probe=False, probe_profiles=True)
+        return {"ok": rc == 0, "status": "passed" if rc == 0 else "failed"}
+
+    return deployment.InstallRuntime(
+        commands=commands,
+        rollback_commands=rollback_commands,
+        command_runner=runner,
+        rollback_runner=rollback_runner,
+        doctor_static=doctor_static,
+        profile_probe=profile_probe,
+        profile_id=str(payload.get("profile_id", "default")),
+        command_timeout=float(payload.get("command_timeout", 60.0)),
+        drain_timeout=float(payload.get("drain_timeout", 60.0)),
+        lock_timeout=float(payload.get("lock_timeout", 30.0)),
+        rollback_timeout=float(payload.get("rollback_timeout", 60.0)),
+        runner_location=sys.executable,
+        rollback_runner_location=sys.executable,
+        rollback_target_root=target_root,
+    )
+
+
 def _upgrade(args: argparse.Namespace) -> int:
     from . import upgrade as upgrade_tx
 
     try:
         if args.upgrade_command == "plan":
+            command_plan = _load_upgrade_command_plan(args.command_plan, upgrade_tx)
             result = upgrade_tx.plan_upgrade(
                 args.candidate,
                 target_root=args.target_root,
                 profile_id=args.profile_id,
                 artifact_name=args.artifact_name,
+                **command_plan,
             )
             out = Path(args.out)
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,6 +1230,69 @@ def _upgrade(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "blocked", "reason": str(exc)}, ensure_ascii=False, sort_keys=True))
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _load_upgrade_command_plan(value: str | None, upgrade_tx) -> dict[str, object]:
+    if value is None:
+        return {}
+    try:
+        payload = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise upgrade_tx.UpgradeError("invalid upgrade command plan") from exc
+    if not isinstance(payload, dict):
+        raise upgrade_tx.UpgradeError("upgrade command plan root must be an object")
+    allowed = {
+        "phase_commands",
+        "rollback_commands",
+        "command_timeout",
+        "max_commands",
+        "allowed_executables",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise upgrade_tx.UpgradeError(
+            f"unknown upgrade command plan field: {unknown[0]}"
+        )
+    return payload
+
+
+def _config_migrate(args: argparse.Namespace) -> int:
+    from . import config_migration
+
+    try:
+        if args.migrate_command == "plan":
+            canonical = Path(args.canonical) if args.canonical else paths.atomizer_config_path()
+            legacy = (
+                Path(args.legacy)
+                if args.legacy
+                else paths.config_path("atomizer.override.yaml")
+            )
+            result = config_migration.plan_migration(canonical, legacy).as_dict()
+        elif args.migrate_command == "apply":
+            result = config_migration.apply_migration(
+                args.plan,
+                resolution=args.resolution,
+                dry_run=bool(args.dry_run),
+            )
+        else:
+            result = config_migration.rollback_migration(args.report)
+    except config_migration.MigrationError as exc:
+        print(
+            json.dumps(
+                {"status": "blocked", "reason": str(exc)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 1
+    rendered = json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    out = getattr(args, "out", None)
+    if out:
+        output_path = Path(out)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered, encoding="utf-8")
+    print(rendered, end="")
     return 0
 
 

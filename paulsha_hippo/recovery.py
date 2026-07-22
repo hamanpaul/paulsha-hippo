@@ -68,9 +68,9 @@ def _code_hash() -> str:
 def _config_paths(memory_root: Path) -> list[Path]:
     candidates = [
         Path(__file__).resolve().parent / "atomizer" / "atomizer.yaml",
+        paths.atomizer_config_path(),
         paths.projects_config_path(memory_root),
         paths.project_registry_path(memory_root),
-        memory_root / "config" / "atomizer.override.yaml",
         memory_root / "config" / "policy.override.yaml",
     ]
     return [path for path in candidates if path.is_file()]

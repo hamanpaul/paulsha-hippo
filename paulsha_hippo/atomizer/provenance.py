@@ -54,6 +54,7 @@ def provenance_from_result(
             "profile_id": "unknown",
             "profile_revision": "unknown",
             "tier": None,
+            "priority": None,
             "attempt_index": None,
             "requested_model": None,
             "requested_effort": None,
@@ -70,6 +71,7 @@ def provenance_from_result(
         "profile_id": result.profile_id,
         "profile_revision": result.profile_revision,
         "tier": result.tier,
+        "priority": result.priority,
         "attempt_index": result.attempt_index,
         "requested_model": result.requested_model,
         "requested_effort": result.requested_effort,
@@ -95,7 +97,7 @@ def provenance_hash(value: Mapping[str, Any]) -> str:
 def safe_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
     """只保留 schema 欄位，避免外部 CLI 回傳任意 raw data 落入 note。"""
     allowed = {
-        "profile_id", "profile_revision", "tier", "attempt_index", "requested_model",
+        "profile_id", "profile_revision", "tier", "priority", "attempt_index", "requested_model",
         "requested_effort", "observed_model", "model_verification", "command_fingerprint",
         "config_hash", "skill_hash", "hippo_version", "build_commit", "fallback_reason",
         "elapsed_seconds", "failure_category", "stderr", "exit_code",

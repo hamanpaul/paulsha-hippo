@@ -7,7 +7,8 @@ state blocks the transaction, even when `--force` is present.
 
 ```text
 hippo install all --force --dry-run --target-root <config-root>
-hippo install all --force --target-root <config-root>
+hippo install all --force --target-root <config-root> \
+  --runtime-plan <reviewed-runtime.json>
 ```
 
 The transaction writes an owned state file and a write-ahead journal below the
@@ -21,6 +22,13 @@ Protected paths include memory/raw/archive/knowledge, processing and dream
 ledgers, retrieval indexes, recovery manifests, generated project registry,
 shell startup files, external launcher/config roots, and credential stores.
 Unknown stale-looking files are preserved.
+
+A real apply requires a reviewed runtime plan containing tokenized commands
+for every writer/service phase and every compensation phase.  Omitting it
+fails before mutation.  Dry-run may omit the plan to inspect filesystem
+ownership alone.  The plan is validated without a shell, inherited manager
+environment, or command interpolation; doctor and enabled-profile probes are
+mandatory post-apply gates.
 
 The independent artifact runner is a staged, resumable transaction.  A plan
 must include tokenized, allowlisted argv for every deployment phase and for
@@ -71,7 +79,8 @@ effective-profile result must attest the requested profile ID and candidate
 artifact SHA-256.  Mismatches fail closed.
 
 ```text
-hippo upgrade plan --candidate <wheel> --target-root <artifact-root> --out <plan.json>
+hippo upgrade plan --candidate <wheel> --target-root <artifact-root> \
+  --command-plan <reviewed-commands.json> --out <plan.json>
 hippo upgrade prepare --plan <plan.json> --transaction-root <tx>
 hippo upgrade apply --manifest <tx>/upgrade.json --force
 hippo upgrade rollback --manifest <tx>/upgrade.json

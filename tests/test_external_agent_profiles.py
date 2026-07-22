@@ -43,6 +43,16 @@ def test_default_profiles_have_three_deterministic_tiers_and_traits():
     ]
     assert all(profile.task_classes for profile in profiles)
     assert all(profile.provider_context >= 32768 for profile in profiles)
+    claude, codex, agy = profiles[:3]
+    assert ("--tools", "") in tuple(zip(claude.argv, claude.argv[1:]))
+    assert "--safe-mode" in claude.argv
+    assert "--reasoning-effort" not in codex.argv
+    assert "model_reasoning_effort=high" in codex.argv
+    assert "atomization" not in agy.task_classes
+    assert [profile.id for profile in profiles if profile.enabled] == [
+        "claude", "codex", "agy"
+    ]
+    assert codex.supported_efforts == ("high",)
 
 
 @pytest.mark.parametrize(
@@ -61,6 +71,23 @@ def test_profile_rejects_shell_prompt_and_permission_bypass(argv):
         _profile("unsafe", argv=argv)
 
 
+def test_profile_rejects_option_shaped_model_and_effort_values():
+    base = {
+        "id": "unsafe-value",
+        "tier": 1,
+        "priority": 1,
+        "traits": ["test"],
+        "task_classes": ["atomization"],
+        "model": "--help",
+        "supported_models": ["--help"],
+        "effort": "medium",
+        "supported_efforts": ["medium"],
+        "argv": [sys.executable, str(STUB), "{MODEL}", "{EFFORT}"],
+    }
+    with pytest.raises(ProfileConfigError, match="unsafe value"):
+        AgentProfile.from_mapping(base)
+
+
 def test_minimal_environment_does_not_inherit_parent_or_accept_credentials(monkeypatch):
     monkeypatch.setenv("PRIVATE_AGENT_SECRET", "must-not-cross")
     env = child_environment({"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "2048"})
@@ -68,6 +95,43 @@ def test_minimal_environment_does_not_inherit_parent_or_accept_credentials(monke
     assert "PRIVATE_AGENT_SECRET" not in env
     with pytest.raises(ProfileConfigError):
         child_environment({"AGENT_API_KEY": "no"})
+
+
+def test_disabled_profile_is_ineligible():
+    raw = {
+        "id": "disabled", "tier": 1, "priority": 1, "traits": ["test"],
+        "task_classes": ["atomization"], "model": "m", "effort": "medium",
+        "supported_efforts": ["medium"], "argv": [sys.executable, str(STUB)],
+        "enabled": False,
+    }
+    profile = AgentProfile.from_mapping(raw)
+    assert profile.eligible() == (False, "disabled")
+
+
+def test_eligibility_uses_service_effective_path(tmp_path):
+    executable = tmp_path / "profile-agent"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    profile = _profile("service-agent", argv=("profile-agent",))
+    assert profile.eligible(path=str(tmp_path)) == (True, "eligible")
+    assert profile.eligible(path="/definitely/missing") == (False, "executable")
+
+
+@pytest.mark.parametrize(
+    ("stderr", "category"),
+    [
+        ("authentication failed; login required", "auth"),
+        ("quota exceeded", "quota"),
+        ("model overloaded", "capacity"),
+        ("context length exceeded", "context_capability"),
+        ("network connection failed", "transport"),
+        ("unknown failure", "process"),
+    ],
+)
+def test_failure_classification_is_bounded(stderr, category):
+    from paulsha_hippo.agent_profiles import classify_failure
+
+    assert classify_failure(stderr) == category
 
 
 def test_router_falls_back_by_tier_and_marks_degraded_success():
@@ -86,6 +150,43 @@ def test_router_falls_back_by_tier_and_marks_degraded_success():
     assert router.last_result is not None
     assert router.last_result.fallback_reason == "degraded-success"
     assert router.attempts[0].failure_category == "process"
+
+
+def test_router_policy_failure_does_not_fallback():
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    profiles = (_profile("first", tier=1), _profile("second", tier=2))
+    calls: list[str] = []
+
+    def execute(profile, prompt, attempt):
+        calls.append(profile.id)
+        raise AgentRunError("unsafe contract", category="policy")
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    with pytest.raises(AgentRunError, match="fallback exhausted"):
+        router.run("same frozen prompt")
+    assert calls == ["first"]
+    assert len(router.attempts) == 1
+
+
+def test_router_reuses_exact_frozen_prompt_and_bounds_calls():
+    profiles = tuple(
+        _profile(f"p{index}", tier=index, priority=1)
+        for index in (1, 2, 3)
+    )
+    prompts: list[str] = []
+
+    def execute(profile, prompt, attempt):
+        prompts.append(prompt)
+        raise RuntimeError("unavailable")
+
+    router = ExternalAgentRouter(
+        profiles, executor=execute, max_attempts=2, max_agent_calls=2
+    )
+    with pytest.raises(Exception, match="fallback exhausted"):
+        router.run("immutable input")
+    assert prompts == ["immutable input", "immutable input"]
+    assert len(router.attempts) == 2
 
 
 def test_cache_identity_is_profile_specific():

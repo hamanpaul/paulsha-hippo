@@ -3,11 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import asdict
 from pathlib import Path
 
-from ..agent_profiles import AgentProfile, AgentRunResult, child_environment, sanitize_stderr
+from ..agent_profiles import (
+    AgentProfile,
+    AgentRunResult,
+    child_environment,
+    classify_failure,
+    sanitize_stderr,
+)
 
 
 class AgentExecError(Exception):
@@ -62,16 +69,20 @@ class AgentExecClient(AgentClient):
         except Exception as exc:
             raise AgentUnavailableError(str(exc)) from exc
         try:
-            completed = subprocess.run(
-                self._command,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-                shell=False,
-                env=env,
-            )
+            # An empty working directory prevents checkout-local AGENTS/CLAUDE
+            # files from becoming implicit input or a tool target.
+            with tempfile.TemporaryDirectory(prefix="hippo-agent-") as cwd:
+                completed = subprocess.run(
+                    self._command,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout,
+                    check=False,
+                    shell=False,
+                    env=env,
+                    cwd=cwd,
+                )
         except FileNotFoundError as exc:
             raise AgentUnavailableError(
                 f"agent command not found: {self._command[0]}"
@@ -90,7 +101,9 @@ class AgentExecClient(AgentClient):
         if completed.returncode != 0:
             raise AgentTransientError(
                 f"agent exited with code {completed.returncode}",
-                category="process",
+                category=classify_failure(
+                    stderr, exit_code=completed.returncode
+                ),
                 stderr=stderr,
                 exit_code=completed.returncode,
             )

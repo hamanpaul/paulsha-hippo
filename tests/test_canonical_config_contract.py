@@ -8,7 +8,7 @@ from paulsha_hippo.atomizer.config import load_config
 def test_managed_canonical_config_is_the_default_runtime_source(monkeypatch, tmp_path: Path):
     config_root = tmp_path / "hippo-config"
     config_root.mkdir()
-    (config_root / "atomizer.yaml").write_text(
+    (config_root / "config.yaml").write_text(
         "schema_version: 1\n"
         "split:\n  boundary_patterns: ['^#']\n  max_fragment_chars: 8000\n"
         "promoter: identity\n",

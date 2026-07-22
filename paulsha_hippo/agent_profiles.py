@@ -78,10 +78,15 @@ def sanitize_stderr(value: object, *, limit: int = 500) -> str:
     return " ".join(text.split())[:limit]
 
 
-def _tuple_strings(value: object, field_name: str) -> tuple[str, ...]:
+def _tuple_strings(
+    value: object, field_name: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, Sequence):
         raise ProfileConfigError(f"{field_name} must be a list of strings")
-    if any(not isinstance(item, str) or not item.strip() for item in value):
+    if any(
+        not isinstance(item, str) or (not allow_empty and not item.strip())
+        for item in value
+    ):
         raise ProfileConfigError(f"{field_name} must be a list of non-empty strings")
     result = tuple(item.strip() for item in value)
     if not result:
@@ -100,9 +105,11 @@ class AgentProfile:
     effort: str
     supported_efforts: tuple[str, ...]
     argv: tuple[str, ...]
+    supported_models: tuple[str, ...] = ()
     timeout: int = FIXED_TIMEOUT_SECONDS
     provider_context: int = MIN_PROVIDER_CONTEXT
     revision: str = "1"
+    enabled: bool = True
     native_fallback_disabled: bool = True
     zero_tool: bool = True
     no_mcp: bool = True
@@ -113,7 +120,9 @@ class AgentProfile:
         "ineligible",
         "auth",
         "rate_limit",
+        "quota",
         "capacity",
+        "context_capability",
         "timeout",
         "transport",
         "process",
@@ -153,9 +162,32 @@ class AgentProfile:
         if not isinstance(model, str) or not model.strip() or not isinstance(effort, str) or not effort.strip():
             raise ProfileConfigError(f"profile {profile_id}: model/effort must be non-empty strings")
         supported = _tuple_strings(raw["supported_efforts"], f"profile {profile_id}.supported_efforts")
+        supported_models = _tuple_strings(
+            raw.get("supported_models", [model]),
+            f"profile {profile_id}.supported_models",
+        )
+        for field_name, values in (
+            ("supported_models", supported_models),
+            ("supported_efforts", supported),
+        ):
+            if any(
+                value.startswith("-")
+                or any(char.isspace() or char in _SHELL_META or char in "{}\x00" for char in value)
+                for value in values
+            ):
+                raise ProfileConfigError(
+                    f"profile {profile_id}: {field_name} contains an unsafe value"
+                )
+        if model not in supported_models:
+            raise ProfileConfigError(f"profile {profile_id}: model is not supported")
         if effort not in supported:
             raise ProfileConfigError(f"profile {profile_id}: effort is not supported")
-        argv = _validate_argv(_tuple_strings(raw["argv"], f"profile {profile_id}.argv"), profile_id)
+        argv = _validate_argv(
+            _tuple_strings(
+                raw["argv"], f"profile {profile_id}.argv", allow_empty=True
+            ),
+            profile_id,
+        )
         timeout = int(raw.get("timeout", FIXED_TIMEOUT_SECONDS))
         provider_context = int(raw.get("provider_context", MIN_PROVIDER_CONTEXT))
         if timeout != FIXED_TIMEOUT_SECONDS:
@@ -169,6 +201,9 @@ class AgentProfile:
         for field_name in bool_fields:
             if raw.get(field_name, True) is not True:
                 raise ProfileConfigError(f"profile {profile_id}: {field_name} must be true")
+        enabled = raw.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ProfileConfigError(f"profile {profile_id}: enabled must be boolean")
         return cls(
             id=profile_id,
             tier=tier,
@@ -179,9 +214,11 @@ class AgentProfile:
             effort=effort.strip(),
             supported_efforts=supported,
             argv=argv,
+            supported_models=supported_models,
             timeout=timeout,
             provider_context=provider_context,
             revision=str(raw.get("revision", "1")),
+            enabled=enabled,
             fallback_on=_tuple_strings(raw.get("fallback_on", cls.fallback_on), f"profile {profile_id}.fallback_on"),
             # Unknown values are intentionally not retained: profile objects are
             # later serialized into provenance/cache identity and must not become
@@ -204,6 +241,8 @@ class AgentProfile:
         return fingerprint_argv(self.render_argv())
 
     def eligible(self, *, task_class: str = "atomization", path: str | None = None) -> tuple[bool, str]:
+        if not self.enabled:
+            return False, "disabled"
         if task_class not in self.task_classes:
             return False, "task_class"
         if self.provider_context < MIN_PROVIDER_CONTEXT:
@@ -213,12 +252,10 @@ class AgentProfile:
         if not all((self.zero_tool, self.no_mcp, self.no_custom_instructions, self.no_user_interaction, self.no_remote)):
             return False, "unsafe_restriction"
         executable = self.render_argv()[0]
-        if path is not None:
-            executable = str(Path(path) / executable)
         if Path(executable).is_absolute():
             if not Path(executable).is_file() or not os.access(executable, os.X_OK):
                 return False, "executable"
-        elif shutil.which(executable) is None:
+        elif shutil.which(executable, path=path) is None:
             return False, "executable"
         return True, "eligible"
 
@@ -227,7 +264,13 @@ def _validate_argv(argv: tuple[str, ...], profile_id: str) -> tuple[str, ...]:
     if not argv:
         raise ProfileConfigError(f"profile {profile_id}.argv must not be empty")
     for index, token in enumerate(argv):
-        if not token or any(char in token for char in _SHELL_META):
+        if not token:
+            if index == 0 or argv[index - 1] not in {"--tools", "--allowed-tools"}:
+                raise ProfileConfigError(
+                    f"profile {profile_id}.argv[{index}] is an unsafe empty argument"
+                )
+            continue
+        if any(char in token for char in _SHELL_META):
             raise ProfileConfigError(f"profile {profile_id}.argv[{index}] contains shell syntax")
         if "{PROMPT}" in token or "PROMPT" in token:
             raise ProfileConfigError(f"profile {profile_id}: prompt must be supplied through stdin")
@@ -247,16 +290,18 @@ def _validate_argv(argv: tuple[str, ...], profile_id: str) -> tuple[str, ...]:
 
 def default_profiles() -> tuple[AgentProfile, ...]:
     rows = (
-        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "claude-sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--print")),
-        ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5", "high", ("medium", "high", "xhigh"), ("codex", "exec", "--model", "{MODEL}", "--reasoning-effort", "{EFFORT}", "--sandbox", "read-only", "--skip-git-repo-check", "-")),
-        ("agy", 2, 10, ("fast", "responsive"), ("atomization", "title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
+        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--print")),
+        ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-")),
+        ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print")),
         ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
         ("co-gem", 3, 10, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
         ("claude-gem", 3, 20, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("claude-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
     )
+    disabled = {"cg", "co-gem", "claude-gem"}
     return tuple(AgentProfile(
         id=profile_id, tier=tier, priority=priority, traits=traits, task_classes=tasks,
         model=model, effort=effort, supported_efforts=efforts, argv=argv,
+        supported_models=(model,), enabled=profile_id not in disabled,
     ) for profile_id, tier, priority, traits, tasks, model, effort, efforts, argv in rows)
 
 
@@ -350,6 +395,23 @@ class AgentRunResult:
     stderr: str = ""
     exit_code: int | None = None
     fallback_reason: str | None = None
+    priority: int = 0
+
+
+def classify_failure(stderr: object, *, exit_code: int | None = None) -> str:
+    """Map bounded CLI diagnostics to the router's allowlisted transitions."""
+    value = sanitize_stderr(stderr).casefold()
+    if re.search(r"\b(unauthorized|unauthenticated|login required|not logged in|auth failed)\b", value):
+        return "auth"
+    if re.search(r"\b(rate.?limit|quota|too many requests|resource exhausted)\b", value):
+        return "quota"
+    if re.search(r"\b(overloaded|capacity|temporarily unavailable)\b", value):
+        return "capacity"
+    if re.search(r"\b(context window|context length|too many tokens)\b", value):
+        return "context_capability"
+    if re.search(r"\b(connection|network|dns|transport|econn|timed? out)\b", value):
+        return "transport"
+    return "process"
 
 
 def child_environment(extra: Mapping[str, str] | None = None, *, path: str | None = None) -> dict[str, str]:
@@ -433,12 +495,20 @@ class ExternalAgentRouter:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-    def _run_one(self, profile: AgentProfile, prompt: str, attempt_index: int) -> tuple[str, str, int | None]:
+    def _run_one(
+        self,
+        profile: AgentProfile,
+        prompt: str,
+        attempt_index: int,
+        timeout: int,
+    ) -> tuple[str, str, int | None]:
         if self._executor is not None:
             return self._executor(profile, prompt, attempt_index)
         from .atomizer.agent_exec import AgentExecClient
 
-        client = AgentExecClient(list(profile.render_argv()), timeout=profile.timeout, profile=profile)
+        client = AgentExecClient(
+            list(profile.render_argv()), timeout=timeout, profile=profile
+        )
         return client.run_with_evidence(prompt)
 
     def run(self, prompt: str) -> str:
@@ -459,14 +529,19 @@ class ExternalAgentRouter:
                 attempts.append(AgentRunResult(
                     profile.id, profile.revision, profile.tier, len(attempts) + 1,
                     profile.model, profile.effort, None, "unavailable", profile.command_fingerprint(),
-                    0.0, "ineligible", reason, None, None,
+                    0.0, "ineligible", reason, None, None, priority=profile.priority,
                 ))
                 continue
             index = len(attempts) + 1
             calls += 1
             attempt_started = time.monotonic()
             try:
-                raw, stderr, exit_code = self._run_one(profile, prompt, index)
+                remaining = max(
+                    1, int(self.deadline_seconds - (time.monotonic() - started))
+                )
+                raw, stderr, exit_code = self._run_one(
+                    profile, prompt, index, min(profile.timeout, remaining)
+                )
                 elapsed = time.monotonic() - attempt_started
                 if not str(raw).strip():
                     raise AgentRunError("external agent produced empty output", category="empty_output", profile_id=profile.id, stderr=stderr)
@@ -474,7 +549,7 @@ class ExternalAgentRouter:
                     profile.id, profile.revision, profile.tier, index, profile.model, profile.effort,
                     None, "unverified", profile.command_fingerprint(), elapsed,
                     None, sanitize_stderr(stderr), exit_code,
-                    None if not attempts else "degraded-success",
+                    None if not attempts else "degraded-success", priority=profile.priority,
                 )
                 self.last_result = result
                 attempts.append(result)
@@ -498,6 +573,7 @@ class ExternalAgentRouter:
                     profile.id, profile.revision, profile.tier, index, profile.model, profile.effort,
                     None, "unavailable", profile.command_fingerprint(), time.monotonic() - attempt_started,
                     category, sanitize_stderr(exc.stderr), exc.exit_code,
+                    priority=profile.priority,
                 )
                 attempts.append(result)
                 self._circuit_open_until[profile.id] = time.monotonic() + 60.0
@@ -543,6 +619,6 @@ class ExternalAgentRouter:
 __all__ = [
     "AgentProfile", "AgentRunError", "AgentRunResult", "ExternalAgentRouter",
     "ProfileConfigError", "ROUTER_CONTRACT_VERSION", "RESPONSE_SCHEMA_VERSION",
-    "cache_identity", "child_environment", "default_profiles", "fingerprint_argv",
+    "cache_identity", "child_environment", "classify_failure", "default_profiles", "fingerprint_argv",
     "profiles_from_config", "sanitize_stderr", "validate_profiles",
 ]

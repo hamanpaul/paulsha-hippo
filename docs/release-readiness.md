@@ -12,12 +12,14 @@ wheel hash, until the main agent runs the artifact-bound and live checks.
   not own HTTP/TCP provider clients, API keys, OAuth, provider URLs, or secret
   stores.
 - `hippo install all --force --dry-run` plans only manifest-owned changes;
-  `hippo install all --force` applies an atomic, backed-up transaction. Protected
+  real apply additionally requires a reviewed `--runtime-plan` covering writer/
+  service fencing, compensation, doctor, and enabled-profile probes. Protected
   memory, ledger, index, recovery, project-registry, shell-rc, launcher, and
   credential paths are rejected. Shared JSON uses owned-entry compensation.
 - `hippo upgrade plan|prepare|apply|rollback` stages one hash-bound artifact
-  with a write-ahead manifest and writer fence. Service/profile verification is
-  explicitly returned as `pending` until performed in the target environment.
+  with a write-ahead manifest and writer fence. Real apply requires a complete
+  reviewed `--command-plan`, including the pipx package switch, rollback switch,
+  registry producer/consumer attestation, doctor, and effective profile/hash.
 - Publication journals keep targets and relation edges invisible until a
   matching commit marker. Incomplete journals are recovered before the next
   atomization pass.

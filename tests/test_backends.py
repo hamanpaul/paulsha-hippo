@@ -44,7 +44,7 @@ class RegistryContractTests(unittest.TestCase):
                 self.assertEqual(preset.argv_template, [])
 
     def test_argv_presets_use_stdin_mechanism(self):
-        for name in ("claude-headless", "codex-headless", "copilot-headless"):
+        for name in ("claude-headless", "codex-headless", "agy-headless"):
             with self.subTest(preset=name):
                 preset = backends.PRESETS[name]
                 self.assertTrue(preset.available)
@@ -62,9 +62,11 @@ class RegistryContractTests(unittest.TestCase):
             backends.PRESETS["codex-headless"].argv_template,
             ["codex", "exec", "--skip-git-repo-check",
              "--sandbox", "read-only", "--color", "never", "-"])
-        # copilot：實測帶非空 -p 時 stdin 注入不可靠——stdin 必須是唯一 prompt 來源
-        self.assertEqual(backends.PRESETS["copilot-headless"].argv_template,
-                         ["copilot", "-s", "--no-color"])
+        self.assertFalse(backends.PRESETS["copilot-headless"].available)
+        self.assertEqual(
+            backends.PRESETS["agy-headless"].argv_template,
+            ["agy", "--mode", "plan", "--sandbox", "--print"],
+        )
         # gemini-headless：候選 argv 未經 round-trip 實證，不入 registry
         # template（unavailable；升級前提見 docs/backend-matrix.md）。
 
@@ -104,12 +106,12 @@ class ProbeTests(unittest.TestCase):
 
     def test_probe_failure_reports_rc_and_stderr(self):
         # rc=41 情境取材自 gemini 實測；gemini-headless 已標 unavailable（probe
-        # 宣告層短路），故以 available 的 copilot-headless stub 驗證 rc/stderr 回報。
+        # 宣告層短路），故以 available 的 agy-headless stub 驗證 rc/stderr 回報。
         with TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
-            self._make_bin(bin_dir, "copilot", "#!/bin/sh\necho auth broken >&2\nexit 41\n")
+            self._make_bin(bin_dir, "agy", "#!/bin/sh\necho auth broken >&2\nexit 41\n")
             result = backends.probe_preset(
-                backends.PRESETS["copilot-headless"],
+                backends.PRESETS["agy-headless"],
                 env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": tmp}, live=True)
         self.assertFalse(result.ok)
         self.assertIn("rc=41", result.detail)
@@ -119,7 +121,7 @@ class ProbeTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"PATH": tmp}):
                 result = backends.probe_preset(
-                    backends.PRESETS["copilot-headless"],
+                    backends.PRESETS["agy-headless"],
                     env={"PATH": tmp, "HOME": tmp})
         self.assertFalse(result.ok)
         self.assertIsNone(result.executable)

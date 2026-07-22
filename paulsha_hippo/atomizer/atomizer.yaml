@@ -32,56 +32,68 @@ external_agents:
   max_agent_calls: 6
   profiles:
     - id: claude
+      enabled: true
       tier: 1
       priority: 10
       traits: [judge, reasoner]
-      task_classes: [atomization, title]
-      model: claude-sonnet
+      task_classes: [atomization, title, skillopt]
+      model: sonnet
+      supported_models: [sonnet]
       effort: high
       supported_efforts: [medium, high, xhigh]
-      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --print]
+      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --safe-mode, --disable-slash-commands, --strict-mcp-config, --mcp-config, '{"mcpServers":{}}', --tools, "", --permission-mode, plan, --no-session-persistence, --print]
     - id: codex
+      enabled: true
       tier: 1
       priority: 20
       traits: [judge, reasoner]
-      task_classes: [atomization, title]
+      task_classes: [atomization, title, skillopt]
       model: gpt-5
+      supported_models: [gpt-5]
       effort: high
-      supported_efforts: [medium, high, xhigh]
-      argv: [codex, exec, --model, "{MODEL}", --reasoning-effort, "{EFFORT}", --sandbox, read-only, --skip-git-repo-check, -]
+      supported_efforts: [high]
+      argv: [codex, exec, --model, "{MODEL}", -c, model_reasoning_effort=high, --sandbox, read-only, --skip-git-repo-check, --ephemeral, --ignore-user-config, --ignore-rules, --disable, shell_tool, -]
     - id: agy
+      enabled: true
       tier: 2
       priority: 10
       traits: [fast, responsive]
-      task_classes: [atomization, title]
+      task_classes: [title, skillopt]
       model: default
+      supported_models: [default]
       effort: medium
       supported_efforts: [low, medium, high]
-      argv: [agy, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
+      argv: [agy, --model, "{MODEL}", --effort, "{EFFORT}", --mode, plan, --sandbox, --print]
     - id: cg
+      enabled: false
       tier: 2
       priority: 20
       traits: [heavy-implementation, fast]
-      task_classes: [atomization, title]
+      task_classes: [atomization, title, skillopt]
       model: default
+      supported_models: [default]
       effort: high
       supported_efforts: [medium, high, xhigh]
       argv: [cg, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
     - id: co-gem
+      enabled: false
       tier: 3
       priority: 10
       traits: [low-cost, fallback]
-      task_classes: [atomization, title]
+      task_classes: [atomization, title, skillopt]
       model: local
+      supported_models: [local]
       effort: low
       supported_efforts: [low, medium]
       argv: [co-gem, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
     - id: claude-gem
+      enabled: false
       tier: 3
       priority: 20
       traits: [low-cost, fallback]
-      task_classes: [atomization, title]
+      task_classes: [atomization, title, skillopt]
       model: local
+      supported_models: [local]
       effort: low
       supported_efforts: [low, medium]
       argv: [claude-gem, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]

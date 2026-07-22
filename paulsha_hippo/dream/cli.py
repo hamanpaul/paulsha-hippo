@@ -188,11 +188,35 @@ def _run(args: argparse.Namespace) -> int:
 def _status(args: argparse.Namespace) -> int:
     memory_root = Path(args.memory_root)
     from ..build_info import build_identity
+    from ..atomizer import config as atomizer_config
+
+    config_identity: dict[str, object]
+    try:
+        config, config_hash = atomizer_config.load_config()
+        profiles = []
+        for profile in config.external_profiles:
+            eligible, reason = profile.eligible(task_class="atomization")
+            profiles.append(
+                {
+                    "id": profile.id,
+                    "revision": profile.revision,
+                    "tier": profile.tier,
+                    "model": profile.model,
+                    "effort": profile.effort,
+                    "command_fingerprint": profile.command_fingerprint(),
+                    "eligible": eligible,
+                    "eligibility_reason": reason,
+                }
+            )
+        config_identity = {"hash": config_hash, "external_profiles": profiles}
+    except Exception as exc:
+        config_identity = {"status": "invalid", "error": str(exc)[:300]}
 
     print(
         json.dumps(
             {
                 "build_identity": build_identity(),
+                "config_identity": config_identity,
                 "last_run": dream_ledger.last_run(memory_root),
                 "backlog_depth": dream_ledger.backlog_depth(memory_root),
                 "health": dream_ledger.backlog_census(memory_root),

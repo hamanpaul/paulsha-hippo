@@ -28,7 +28,7 @@
 1. `paulsha_hippo/paths.py`：單一權威 resolver——`HIPPO_*` > `PSC_*`（deprecated stderr 警告）> config.yaml > `~/.agents/memory` 預設
 2. `paulsha_hippo/hippo_config.py`：`~/.config/paulsha-hippo/config.yaml` + env 覆寫
 3. CLI 去 `memory` 前綴層＋新命令：`init`、`doctor`（雙 root FAIL）、`install hooks|service`、`dream supervise`
-4. 蒸餾三檔位 runner：`claude-headless`（preset argv=`claude -p`）、`openai-compatible`（stdlib http）、`custom-argv`（現 agent_exec 原樣）
+4. 蒸餾 runner 已由 Issue #39 取代為 external headless CLI profiles；舊版 direct-provider 與單一 custom argv 設計不再是 runtime contract。
 5. installer：hooks（沿 install.sh 冪等語意）＋ service（systemd 偵測→user units；否→supervise 指引）
 
 ## 驗收

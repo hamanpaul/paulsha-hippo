@@ -220,6 +220,13 @@ class DreamCliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             payload = json.loads(buf.getvalue())
             self.assertEqual(payload["backlog_depth"], 1)
+            self.assertIn("build_commit", payload["build_identity"])
+            self.assertTrue(payload["config_identity"]["hash"])
+            self.assertTrue(payload["config_identity"]["external_profiles"])
+            self.assertTrue(all(
+                "command_fingerprint" in row
+                for row in payload["config_identity"]["external_profiles"]
+            ))
 
 
 if __name__ == "__main__":

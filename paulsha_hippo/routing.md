@@ -57,7 +57,7 @@ MVP 設計與驗證細節見：
 
 > **T3.2 已落地（2026-06）：** `hippo atomize --promoter llm` 會載入 `atomizer/skills/atomize-knowledge-slice.md`，透過 canonical external headless CLI profiles 與 bounded tier fallback 做 per-session 語意 promoter；`relates_to`/`mentions` 等語意關係寫入 `runtime/ledger/relations.jsonl`，整個 session 維持 fail-closed promotion。
 
-> **Issue #39 邊界（2026-07）：** runtime distiller 唯一來源是 `~/.config/paulsha-hippo/atomizer.yaml`；Hippo 只把 frozen prompt 以 stdin 交給 external headless CLI profile。OAuth/API key、launcher、provider URL 與 credential lifecycle 由外部 CLI 管理，Hippo 不讀取、轉發或備份。atomizer、SkillOpt 與 importer title 生成共用同一個 tiered profile router。
+> **Issue #39 邊界（2026-07）：** runtime distiller 唯一來源是 `~/.config/paulsha-hippo/config.yaml`；Hippo 只把 frozen prompt 以 stdin 交給 external headless CLI profile。外部 agent 的登入、launcher 與 provider lifecycle 不屬於 Hippo；atomizer、SkillOpt 與 importer title 生成共用同一個 tiered profile router。
 
 > **T4 已落地（2026-05）：** decayed/reactivation 事件由最小 janitor 寫入 `runtime/ledger/lifecycle.jsonl`，active 集合由 `paulshaclaw.memory.ledger.retrieval_set.active_records()` 提供。掃描入口：`psc memory janitor scan`。設計見 `docs/superpowers/specs/2026-05-31-stage2-t4-ledger-janitor-design.md`。
 
