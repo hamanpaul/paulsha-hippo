@@ -279,13 +279,9 @@ def plan_lint(records: list[KnowledgeRecord]) -> list[dict[str, Any]]:
                     "project": record.project,
                 }
             )
-        if "/" in record.project:
-            findings.append(
-                {
-                    "rule": LINT_RAW_REMOTE_KEY,
-                    "record_id": record.record_id,
-                    "path": str(record.path),
-                    "project": record.project,
-                }
-            )
+        # Remote-form project IDs are canonical metadata.  Filesystem placement
+        # uses a separate collision-resistant directory key, so a slash in the
+        # project ID is not itself a hygiene defect.  Keep the legacy
+        # raw_remote_key summary field for schema compatibility, but do not emit
+        # false-positive findings for valid rich IDs.
     return findings
