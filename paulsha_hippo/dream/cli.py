@@ -151,16 +151,31 @@ def _run(args: argparse.Namespace) -> int:
                 try:
                     audit = moc_census.audit_indexed_ids(memory_root)
                     indexed = set(audit.searchable_ids)
+                    coverage = result.get("index_coverage", {})
+                    reconciliation = moc_census.reconcile_index(memory_root, coverage)
+                    eligible = set(reconciliation.eligible_ids)
+                    if not reconciliation.ok:
+                        result.setdefault("warnings", []).append(
+                            "run-level index reconciliation failed "
+                            f"with {len(reconciliation.problems)} problem(s)"
+                        )
                 except Exception:
                     indexed = set()
-                missing = sorted(set(str(item) for item in produced) - indexed)
+                    eligible = set(str(item) for item in produced)
+                produced_ids = set(str(item) for item in produced)
+                expected_indexed = produced_ids & eligible
+                excluded = produced_ids - eligible
+                missing = sorted(expected_indexed - indexed)
                 if missing:
                     result.setdefault("warnings", []).append(
-                        f"run-level publication reconciliation missing {len(missing)} produced slice(s)"
+                        "run-level publication reconciliation missing "
+                        f"{len(missing)} eligible produced slice(s)"
                     )
                 result["produced_slice_ids"] = list(produced)
-                result["metadata_indexed"] = len(produced) - len(missing)
-                result["fts_indexed"] = len(produced) - len(missing)
+                result["produced_eligible"] = len(expected_indexed)
+                result["produced_excluded"] = len(excluded)
+                result["metadata_indexed"] = len(expected_indexed) - len(missing)
+                result["fts_indexed"] = len(expected_indexed) - len(missing)
             warnings = result.pop("warnings", [])
             return {
                 "summary": result,
