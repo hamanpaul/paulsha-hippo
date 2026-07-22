@@ -6,6 +6,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from paulsha_hippo.dream import reconcile
 
@@ -112,6 +113,26 @@ class TestReconcileDryRun(unittest.TestCase):
             )
         data = json.loads(result)
         self.assertEqual(data["summary"]["malformed"], 1)
+
+    def test_policy_rejected_fragment_is_malformed(self):
+        with TemporaryDirectory() as tmpdir:
+            memory_root = Path(tmpdir)
+            slices_dir = memory_root / "inbox" / "_slices" / "proj"
+            _write_fragment(slices_dir, "claude", "secret")
+            with mock.patch.object(
+                reconcile.policy,
+                "check_boundary",
+                return_value=mock.Mock(hits=(object(),)),
+            ) as check_boundary:
+                result = reconcile.run_reconcile(
+                    memory_root, now="2026-07-21T00:00:00", dry_run=True,
+                )
+
+        data = json.loads(result)
+        self.assertEqual(data["summary"]["malformed"], 1)
+        check_boundary.assert_called_once()
+        self.assertEqual(check_boundary.call_args.args[0], "external_to_raw")
+        self.assertEqual(check_boundary.call_args.kwargs["session_ref"], "claude:secret")
 
 
 class TestReconcileApply(unittest.TestCase):

@@ -8,6 +8,8 @@ import json
 import logging
 from pathlib import Path
 
+from paulsha_hippo import policy
+
 from ..atomizer.pipeline import _archive_fragments, _read_fragment
 from ..ledger import dream as dream_ledger
 from ..ledger import processing
@@ -16,6 +18,30 @@ from . import lock as dream_lock
 LOGGER = logging.getLogger(__name__)
 
 _RECONCILE_CONFIG_HASH = "reconcile"
+
+
+def _passes_policy_boundary(fragment) -> bool:
+    """Return whether a persisted fragment is safe to reconcile.
+
+    Reconcile only consumes fragment metadata and paths, but it still reads the
+    fragment body. Keep that read behind the executable memory boundary and
+    fail closed when the policy engine rejects or cannot inspect the content.
+    """
+    session_ref = f"{fragment.source_agent}:{fragment.source_session}"
+    try:
+        result = policy.check_boundary(
+            "external_to_raw",
+            fragment.body,
+            project_slug=fragment.project or "_unknown",
+            session_ref=session_ref,
+        )
+    except Exception as exc:  # noqa: BLE001 - policy boundary is fail-closed
+        LOGGER.warning("reconcile skipped policy-invalid fragment %s: %s", session_ref, exc)
+        return False
+    if result.hits:
+        LOGGER.warning("reconcile skipped fragment with policy hits: %s", session_ref)
+        return False
+    return True
 
 
 def _scan_fragments(memory_root: Path) -> dict[str, list[Path]]:
@@ -27,6 +53,9 @@ def _scan_fragments(memory_root: Path) -> dict[str, list[Path]]:
     for frag_path in sorted(slices_dir.rglob("*.md")):
         fragment = _read_fragment(frag_path)
         if fragment is None:
+            sessions.setdefault("__malformed__", []).append(frag_path)
+            continue
+        if not _passes_policy_boundary(fragment):
             sessions.setdefault("__malformed__", []).append(frag_path)
             continue
         session_key = f"{fragment.source_agent}:{fragment.source_session}"
