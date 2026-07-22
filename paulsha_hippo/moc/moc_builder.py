@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-from ..atomizer.config import sanitize_project_component
+from ..atomizer.config import project_directory_key
 from ..ledger import retrieval_set
 from . import frontmatter_io as fio
 
@@ -115,7 +115,7 @@ def build_mocs(memory_root: Path, now: str) -> None:
         if project == "common-sense":
             continue
         lines = _hierarchy_lines(items)
-        _write_moc(knowledge / f"{sanitize_project_component(project)}-moc.md", "project", now, f"{project} MOC", lines, project)
+        _write_moc(knowledge / f"{project_directory_key(project)}-moc.md", "project", now, f"{project} MOC", lines, project)
 
     cs = _hierarchy_lines([r for r in rows if r[1] == "common-sense"])
     _write_moc(knowledge / "common-sense-moc.md", "common-sense", now, "Common-sense MOC", cs)

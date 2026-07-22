@@ -225,12 +225,14 @@ class AgentExecConfigTests(unittest.TestCase):
 
         self.assertTrue(cfg.agent_exec_command)
         self.assertGreater(cfg.agent_exec_timeout, 0)
-        self.assertTrue(cfg.agent_exec_upstream_url.startswith("http"))
+        self.assertEqual(cfg.agent_exec_backend, "external-cli")
+        self.assertGreaterEqual(len(cfg.external_profiles), 6)
+        self.assertNotIn("upstream_url", cfg.__dict__)
         self.assertIn(cfg.default_promoter, ("identity", "llm"))
         self.assertTrue(cfg.skill_path)
         self.assertTrue(cfg.known_projects_file)
 
-    def test_upstream_url_override_and_hash(self):
+    def test_retired_provider_fields_are_rejected(self):
         import pathlib
         from paulsha_hippo.atomizer import config as cfgmod
 
@@ -241,16 +243,15 @@ class AgentExecConfigTests(unittest.TestCase):
             "    - '^#'\n"
             "  max_fragment_chars: 8000\n"
             "agent_exec:\n"
-            "  upstream_url: http://10.0.0.5:9001\n"
+            "  api_key_env: HIPPO_PROVIDER_KEY\n"
         )
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
-            cfg, hash_value = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg.agent_exec_upstream_url, "http://10.0.0.5:9001")
-            self.assertEqual(len(hash_value), 64)
+            with self.assertRaisesRegex(cfgmod.AtomizerConfigError, "operator-redaction"):
+                cfgmod.load_config(default_dir=p, override_path=None)
 
-    def test_resolve_agent_exec_settings_prefers_env_upstream(self):
+    def test_resolve_agent_exec_settings_has_no_endpoint(self):
         from paulsha_hippo.atomizer import config as cfgmod
 
         with mock.patch.dict(
@@ -258,8 +259,10 @@ class AgentExecConfigTests(unittest.TestCase):
             {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": "http://10.0.0.9:9002"},
             clear=False,
         ):
-            _, upstream = cfgmod.resolve_agent_exec_settings()
-        self.assertEqual(upstream, "http://10.0.0.9:9002")
+            command, model = cfgmod.resolve_agent_exec_settings()
+        self.assertTrue(command)
+        self.assertTrue(model)
+        self.assertNotIn("http://", " ".join(command))
 
     def test_missing_known_projects_file_uses_facade_default(self):
         from paulsha_hippo.atomizer import config as cfgmod
@@ -304,9 +307,9 @@ class AgentExecConfigTests(unittest.TestCase):
             override_path.unlink()
 
     def test_resolve_command_argv_expands_repo_relative_script(self):
-        resolved = resolve_command_argv(("scripts/claude-gemma4",))
+        resolved = resolve_command_argv(("scripts/build_release_artifact.py",))
         self.assertTrue(Path(resolved[0]).is_absolute())
-        self.assertTrue(resolved[0].endswith("/scripts/claude-gemma4"))
+        self.assertTrue(resolved[0].endswith("/scripts/build_release_artifact.py"))
 
     def test_max_output_tokens_default_and_in_hash(self):
         import tempfile, pathlib

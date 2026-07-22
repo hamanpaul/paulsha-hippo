@@ -17,24 +17,17 @@
 - **optimizer**: codex ACP（vendored adapter）
 - **judge**: 可由 `~/.agents/config/skillopt.yaml` 指定的 agent command
 
-## LLM backend 覆寫鏈
+## External CLI profiles
 
-- **共用設定源**：`agent_exec.command` 與 `agent_exec.upstream_url` 由
-  `paulshaclaw/memory/atomizer/atomizer.yaml` 起始，並可用
-  `~/.config/paulshaclaw/atomizer.override.yaml` 覆寫。
-- **臨時熱切換**：只想改 upstream，不想改本機 override 檔時，可設
-  `PSC_CLAUDE_GEMMA4_UPSTREAM_URL`；它會蓋過 config 檔裡的
-  `agent_exec.upstream_url`。
-- **影響面**：SkillOpt rollout、`psc memory atomize --promoter llm` 與
-  importer title 生成共用同一組 backend 設定；judge command 仍獨立由
-  `skillopt.yaml` 控制。
+- **共用設定源**：`external_agents.profiles` 宣告 tier、traits、task class、model、effort 與 tokenized argv。
+- **身份邊界**：SkillOpt rollout、`hippo atomize --promoter llm` 與 importer title 生成共用同一組外部 headless CLI router；OAuth/API key、endpoint 與 launcher lifecycle 不屬於 Hippo。
+- **judge**：仍可由 `skillopt.yaml` 指定一個外部 CLI command，但 prompt 只走 stdin，且不繼承 parent environment。
 
 ### 替換 backend 步驟
 
-1. 在 `atomizer.override.yaml` 改 `agent_exec.command` 指到新 wrapper / CLI。
-2. 若 backend upstream 也改了，同步設定 `agent_exec.upstream_url`。
-3. 只做短期切換時，改設 `PSC_CLAUDE_GEMMA4_UPSTREAM_URL` 即可，不必改檔。
-4. 重新跑 `psc memory atomize ...` 或 `psc memory skillopt run ...` 驗證新路徑。
+1. 在 canonical `external_agents.profiles` 新增或調整一個外部 CLI profile。
+2. 以 tokenized argv 指定模型與 effort；禁止 shell wrapper、prompt argv 與權限繞過旗標。
+3. 重新跑 `hippo atomize ...` 或 `hippo skillopt run ...`，查看 bounded fallback/provenance。
 
 ## CLI
 

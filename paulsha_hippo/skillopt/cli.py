@@ -12,7 +12,11 @@ from typing import Any
 from paulsha_hippo import paths
 from paulsha_hippo.atomizer import cli as atomizer_cli
 from paulsha_hippo.atomizer import config as atomizer_config
-from paulsha_hippo.atomizer.agent_exec import AgentExecClient
+from paulsha_hippo.agent_profiles import (
+    FIXED_TIMEOUT_SECONDS,
+    AgentProfile,
+    ExternalAgentRouter,
+)
 
 from .loop import SkillOptError, optimize_skill
 from .optimizer_acp import make_acp_optimizer
@@ -267,22 +271,51 @@ def _build_default_hooks(
     config: atomizer_config.AtomizerConfig,
     skillopt_config: SkillOptConfig,
 ) -> tuple[HookFactory, HookFactory, HookFactory]:
-    command = list(atomizer_config.resolve_command_argv(config.agent_exec_command))
     known_projects = atomizer_cli._known_projects(config.known_projects_file)
     judge_command = list(skillopt_config.judge_command)
 
-    def make_rollout():
-        agent = AgentExecClient(
-            list(command),
-            timeout=config.agent_exec_timeout,
-            env=atomizer_config.build_agent_exec_env(
-                upstream_url=config.agent_exec_upstream_url,
+    # SkillOpt's judge is another external headless task.  Keep the normal
+    # configured profile set (and its tier fallback); only an explicit
+    # skillopt.yaml command becomes a constrained Tier-3 custom profile.  It
+    # still goes through the same stdin/minimal-env/safety contract.
+    if tuple(judge_command) == tuple(config.agent_exec_command):
+        judge_profiles = config.external_profiles
+    else:
+        judge_profiles = (
+            AgentProfile.from_mapping(
+                {
+                    "id": "skillopt-custom",
+                    "tier": 3,
+                    "priority": 0,
+                    "traits": ["custom-judge"],
+                    "task_classes": ["skillopt"],
+                    "model": config.agent_exec_model,
+                    "effort": "medium",
+                    "supported_efforts": ["medium"],
+                    "argv": judge_command,
+                }
             ),
+        )
+
+    def make_rollout():
+        agent = ExternalAgentRouter(
+            config.external_profiles,
+            task_class="atomization",
+            deadline_seconds=config.router_deadline_seconds,
+            max_attempts=config.router_max_attempts,
+            max_agent_calls=config.router_max_agent_calls,
         )
         return make_atomize_rollout(agent, known_projects, config=config)
 
     def make_score():
-        judge = AgentExecClient(list(judge_command), timeout=skillopt_config.judge_timeout)
+        judge = ExternalAgentRouter(
+            judge_profiles,
+            task_class="skillopt",
+            deadline_seconds=min(
+                max(int(skillopt_config.judge_timeout), 1),
+                FIXED_TIMEOUT_SECONDS,
+            ),
+        )
         return make_hybrid_score(judge, alpha=skillopt_config.alpha)
 
     def make_optimizer():

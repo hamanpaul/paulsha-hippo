@@ -191,16 +191,19 @@ def test_atomizer_bounded_defaults_and_fixed_safety_gates():
     assert cfg.parallelism == 1
 
 
-def test_default_gemma_argv_is_explicitly_zero_tool_without_fallback_profile():
+def test_default_external_profile_is_explicitly_zero_tool_without_cli_fallback():
     command = " ".join(DEFAULT_AGENT_EXEC_COMMAND)
-    for flag in (
-        "--available-tools=none",
-        "--disable-builtin-mcps",
-        "--no-custom-instructions",
-        "--no-ask-user",
-        "--no-remote",
-        "--no-remote-export",
-    ):
-        assert flag in command
-    assert "--available-tools=" in command
-    assert "--available-tools=none" in command
+    assert "--headless" in command
+    assert "--stdin" in command
+    assert "{PROMPT}" not in command
+    from paulsha_hippo.agent_profiles import default_profiles
+
+    assert all(
+        profile.native_fallback_disabled
+        and profile.zero_tool
+        and profile.no_mcp
+        and profile.no_custom_instructions
+        and profile.no_user_interaction
+        and profile.no_remote
+        for profile in default_profiles()
+    )

@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- Issue #34/#39 release-candidate implementation：external headless profile router、canonical atom title/project/provenance、publication recovery、quarantine/health、ownership-manifest force install 與 hash-bound artifact upgrade runner。Live service/recovery/soak/publish/consumer evidence 仍待候選 wheel 綁定後執行。
 - dream `--require-idle` 增加記憶體 headroom 閘，新增 `--min-avail-mem-pct`（預設 20%）並在低記憶體時輸出 `skipped: "low memory"` 與 `avail_pct`。
 - `hippo dream supervise` 偵測 systemd dream timer 已接管時會讓位，避免與 timer 雙跑。
 - 索引 coverage 六欄報表（`scanned / invalid_frontmatter / pool_excluded(by reason) / noise_excluded(by reason) / eligible / indexed`）：`build_index()` 回傳、隨索引寫入 `retrieval.db` 的 `coverage` 表（權威來源，與索引成對原子發布）並派生 `runtime/indexes/retrieval.coverage.json`；`dream run` 輸出新增 `index_coverage`。

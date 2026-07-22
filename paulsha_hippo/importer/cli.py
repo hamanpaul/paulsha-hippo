@@ -7,11 +7,13 @@ import json
 import sys
 from pathlib import Path
 
+from ..build_info import version_json
 from .pipeline import PipelineError, ingest_queue_item
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m paulsha_hippo.importer.cli")
+    parser.add_argument("--version", action="version", version=version_json())
     subcommands = parser.add_subparsers(dest="command", required=True)
     ingest = subcommands.add_parser("ingest", help="ingest one queue item")
     ingest.add_argument("--queue-item", required=True, type=Path)

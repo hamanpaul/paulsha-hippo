@@ -139,8 +139,9 @@ def _commit_init_atomic(cfg: Path, cfg_body: str,
         os.close(lock_fd)
 
 
-def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
-             api_key_env: str | None, model: str | None, assume_yes: bool) -> int:
+def run_init(*, memory_root: str | None, backend: str, model: str | None,
+             assume_yes: bool, base_url: str | None = None,
+             api_key_env: str | None = None) -> int:
     """產生 ~/.config/paulsha-hippo/config.yaml 與 atomizer override（backend preset）。
 
     G3「先驗證再選路」：所有 backend 參數與 executable 驗證、config／override 完整
@@ -155,16 +156,20 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     if not preset.available:
         print(f"init: backend {backend} 尚不可用（命令契約未確認，見 issue #10）", file=sys.stderr)
         return 2
+    if base_url or api_key_env:
+        print(
+            "init: provider URL/API-key 欄位已移除；請在外部 headless CLI/launcher 設定登入",
+            file=sys.stderr,
+        )
+        return 2
     root = memory_root or str(paths.memory_root())
 
     # --- 先驗證＋生成完整內容（純字串，不碰檔案系統） ---
     cfg_body = (
         f"memory_root: {root}\n"
-        "distiller:\n"
-        f"  backend: {backend}\n"
-        + (f"  base_url: {base_url}\n" if base_url else "")
-        + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
-        + (f"  model: {model}\n" if model else "")
+        "external_agents:\n"
+        f"  selected_profile: {backend}\n"
+        "  ownership: external-cli\n"
     )
 
     # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）。
@@ -173,23 +178,11 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     # resolve_backend_argv 路徑，取代先前 codex/copilot-headless 誤落 custom-argv
     # 分支、init 不寫 override 的缺口。argv token 以 json.dumps 加引號輸出（合法
     # YAML double-quoted scalar），路徑含空白也安全。
-    if backend == "openai-compatible":
-        if not base_url:
-            print("init: openai-compatible 需要 --base-url", file=sys.stderr)
-            return 2
-        override_body: str | None = (
-            "schema_version: \"1\"\n"
-            "agent_exec:\n"
-            "  backend: openai-compatible\n"
-            f"  base_url: {base_url}\n"
-            + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
-            + (f"  model: {model}\n" if model else "")
-        )
-    elif preset.argv_template:
+    if preset.argv_template:
         try:
             argv = resolve_backend_argv(list(preset.argv_template))
         except BackendUnavailableError as exc:
-            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend openai-compatible/custom-argv）",
+            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend custom-argv）",
                   file=sys.stderr)
             return 2
         command_lines = "".join(
@@ -215,7 +208,7 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
     committed = _commit_init_atomic(cfg, cfg_body, override, override_body)
 
     print(f"memory_root: {root}")
-    print(f"distiller backend: {backend}")
+    print(f"external agent profile: {backend}")
     print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
     if override_body is not None:
         print(f"atomizer override: {override}{'' if override in committed else '（既存，未覆寫）'}")
@@ -401,6 +394,13 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     report = paths.resolution_report()
     failed = False
     print("# hippo doctor")
+    from .build_info import build_identity
+
+    # Doctor's parse-only path must not launch even a local git subprocess; a
+    # service-effective backend probe is the only opt-in process boundary.
+    identity = build_identity(resolve_git=False)
+    print(f"- build version: {identity['version']}")
+    print(f"- build commit: {identity['build_commit']}")
     for key, value in report.items():
         if key == "conflict":
             continue
@@ -536,14 +536,14 @@ def _probe_environment() -> tuple[dict[str, str], bool]:
     EnvironmentFile，manager env 即 service-effective env——與 systemd-run
     transient unit 所見等價，且 timeout／判定行為留在本程序內可控（systemd-run
     中途被殺會殘留 transient unit），CI 亦可決定性測試。無 user bus →
-    fallback 現行近似（os.environ + 保守 PATH），呼叫端必須在輸出標示
-    「近似，非 service-effective」。"""
+    fallback 只保留保守 PATH 解析，呼叫端必須在輸出標示「近似，非
+    service-effective」。"""
+    from .agent_profiles import child_environment
+
     manager_env = _service_manager_environment()
     if manager_env is not None:
-        env = dict(manager_env)
-        env.setdefault("PATH", _FALLBACK_SERVICE_PATH)
-        return env, True
-    return {**os.environ, "PATH": _FALLBACK_SERVICE_PATH}, False
+        return child_environment({"PATH": manager_env.get("PATH", _FALLBACK_SERVICE_PATH)}), True
+    return child_environment({"PATH": _FALLBACK_SERVICE_PATH}), False
 
 
 _PROBE_TIMEOUT_SECS = 60
@@ -575,16 +575,20 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈、
     輸出非 UTF-8 位元組令 text=True decode 失敗）一律 FAIL。
 
-    Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（manager env
-    或標示近似的 fallback），本函式不再自行繼承 os.environ——僅疊加
-    HIPPO_SELF_SESSION=1。
+    Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（僅用來
+    決定 service-effective PATH），但真正傳給外部 CLI 的環境仍收斂到
+    `agent_profiles.child_environment()` 的固定最小 non-secret allowlist。
+    Hippo 不會把 manager/shell 的 credential 值轉交給子程序；登入與 OAuth/API
+    key 必須由外部 launcher/CLI 自己管理。
 
     #7：probe 實跑的是 configured backend argv（預設 `claude -p`），必須比照
     agent_exec.AgentExecClient.run 注入 HIPPO_SELF_SESSION=1——使用者已安裝的
     SessionEnd/PreCompact hooks 讀到此標記即早退，否則 doctor 探測會被當成
     真實 session 寫回 queue，重新引入遞迴自捕捉／queue 污染。
     """
-    env = {**probe_env, "HIPPO_SELF_SESSION": "1"}
+    from .agent_profiles import child_environment
+
+    env = child_environment({"PATH": probe_env.get("PATH", _FALLBACK_SERVICE_PATH)})
     try:
         completed = runner(
             command,
@@ -619,57 +623,16 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     return True, "smoke prompt exit 0、回應非空"
 
 
-def _probe_openai_compatible(cfg, probe_env: dict[str, str],
-                             *, env_label: str) -> tuple[str, bool]:
-    """openai-compatible 檔位的實際 probe：bounded smoke prompt 打 /v1/chat/completions。
-
-    先前僅回「probe 由 PR-D preset 接手」即綠燈——恢復 gate 拿不到真實可用性
-    判定（端點掛掉／認證失效照樣 exit 0）。改為 fail-closed：端點不可達、HTTP
-    錯誤、timeout、回應缺 choices[0].message.content 或內容為空（HttpAgentClient
-    對以上一律拋例外）→ FAIL。max_tokens／timeout 均受限，probe 不做實際工作。
-
-    Codex 複驗 B1：API key（`api_key_env`）從注入的 probe_env 解析，而非 doctor
-    所在互動 shell 的 os.environ——否則只 export 在 shell 的 key 會令 probe
-    誤判健康，排程的 dream service 實際仍認證失敗。"""
-    from paulsha_hippo.atomizer.agent_exec import HttpAgentClient
-
-    client = HttpAgentClient(
-        cfg.agent_exec_base_url,
-        cfg.agent_exec_model,
-        api_key_env=cfg.agent_exec_api_key_env or None,
-        timeout=_PROBE_TIMEOUT_SECS,
-        max_tokens=_PROBE_MAX_TOKENS,
-        env=probe_env,
-    )
-    try:
-        client.run(_PROBE_SMOKE_PROMPT)
-    except Exception as exc:  # noqa: BLE001 —probe fail-closed：任何失敗都判 FAIL
-        detail = " ".join(str(exc).split())[:200]
-        return (
-            f"FAIL distiller backend：openai-compatible（{cfg.agent_exec_base_url}）"
-            f"{env_label} smoke probe 失敗：{detail}",
-            True,
-        )
-    return (
-        f"- distiller backend：✓ openai-compatible（{cfg.agent_exec_base_url}；"
-        f"{env_label} smoke probe 有非空回應）",
-        False,
-    )
-
-
 def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     """以 service-effective 環境檢查 atomizer backend。回傳 (報告行, is_failure)。
 
     兩檔行為（跨批次共享契約 6——PR-C/PR-D 對 `run_doctor` 的呼叫端必讀）：
-    - `live=False`（裸 `hippo doctor` 預設）：純解析檢查——argv backend 以
-      service-effective PATH `shutil.which`（絕對路徑則 is_file+X_OK）；
-      openai-compatible 只驗 config 可載入、不打端點。快速、免費、無副作用，
-      不喚起 backend、不產生 API 成本。
+    - `live=False`（裸 `hippo doctor` 預設）：純解析檢查——external CLI argv
+      以 service-effective PATH `shutil.which`（絕對路徑則 is_file+X_OK）。
+      快速、免費、無副作用，不喚起 backend。
     - `live=True`（`--fix-backend`／`--probe-live`／`HIPPO_DOCTOR_LIVE_PROBE=1`）：
       對 configured backend 真送 bounded smoke prompt——argv 走真實 exec
-      （`_exec_probe_service_effective`，60s timeout），openai-compatible 以
-      HttpAgentClient 直打 `/v1/chat/completions`；fail-closed（spec §4.1
-      恢復序列 gate「實際喚起 backend 一次」語意）。
+      （`_exec_probe_service_effective`，60s timeout）；fail-closed。
 
     dream service template 固定 --promoter llm，故 backend 檢查不過一律 FAIL，
     不因 config 的 default promoter 軟化。probe 環境經 `_probe_environment()`
@@ -684,14 +647,6 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     probe_env, service_effective = _probe_environment()
     env_label = ("service-effective" if service_effective
                  else "近似，非 service-effective（無 systemd user bus）")
-    if cfg.agent_exec_backend == "openai-compatible":
-        if not live:
-            return (
-                f"- distiller backend：openai-compatible（{cfg.agent_exec_base_url}；"
-                "config 可載入；即時 smoke probe 需 --probe-live／--fix-backend）",
-                False,
-            )
-        return _probe_openai_compatible(cfg, probe_env, env_label=env_label)
     command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
     if not Path(argv0).is_absolute():
@@ -764,8 +719,6 @@ def _fix_backend_override() -> tuple[int, str]:
         cfg, _ = atomizer_config.load_config()
     except Exception as exc:
         return 1, f"fix-backend: config 無法載入：{exc}"
-    if cfg.agent_exec_backend == "openai-compatible":
-        return 0, "fix-backend: openai-compatible backend 無 argv，無可遷移"
     command = atomizer_config.resolve_command_argv(cfg.agent_exec_command)
     argv0 = command[0]
     if Path(argv0).is_absolute():

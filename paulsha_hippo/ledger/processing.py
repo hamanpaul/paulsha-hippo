@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_STATES = {"split", "promoted", "no-findings", "skipped", "parked"}
+VALID_STATES = {"split", "promoted", "no-findings", "skipped", "parked", "quarantined"}
 PARKED_FAILURE_CATEGORIES = {
     "backend_unavailable",
     "transient",

@@ -2,21 +2,17 @@
 from __future__ import annotations
 
 import io
-import json
 import multiprocessing
 import os
 import sys
-import threading
 import unittest
-from contextlib import redirect_stdout
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
 from paulsha_hippo import ops, paths
-from paulsha_hippo.atomizer.agent_exec import AgentExecError, HttpAgentClient
 
 
 def _concurrent_init_worker(env, fail_second_replace, result_path):
@@ -134,7 +130,7 @@ class InitConcurrencyTests(unittest.TestCase):
             self.assertFalse(pb.is_alive(), "worker B 逾時未結束")
             # 不變量：有效 config 存在（B 寫入），未被 A 的 rollback 誤刪
             self.assertTrue(cfg.exists(), "有效 config 不得被並行交易 rollback 誤刪")
-            self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
+            self.assertIn("selected_profile: claude-headless", cfg.read_text(encoding="utf-8"))
             # 一致性：config 與 override 皆存在（B 成功寫入兩者），無「config 有／override 缺」
             self.assertTrue(override.exists(), "不得留 config/override 不一致（override 缺）")
             # PR-D Task 3：argv token 改以 json.dumps 加引號輸出（路徑含空白也安全），
@@ -167,7 +163,7 @@ class InitTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
-            self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
+            self.assertIn("selected_profile: claude-headless", cfg.read_text(encoding="utf-8"))
             import yaml
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
             data = yaml.safe_load(override.read_text(encoding="utf-8"))
@@ -256,13 +252,8 @@ class InitTests(unittest.TestCase):
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
             self.assertFalse(cfg.exists())
 
-    def test_init_openai_compatible_requires_base_url(self):
-        rc = ops.run_init(memory_root=None, backend="openai-compatible",
-                          base_url=None, api_key_env=None, model=None, assume_yes=True)
-        self.assertEqual(rc, 2)
-
-    def test_init_openai_missing_base_url_writes_no_files(self):
-        # 驗證失敗（openai-compatible 缺 --base-url）前不得建立 config/override。
+    def test_init_retired_provider_backend_writes_no_files(self):
+        # direct provider backend is retired; validation must fail before any file write.
         with TemporaryDirectory() as tmp:
             env = {
                 "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -271,7 +262,7 @@ class InitTests(unittest.TestCase):
             }
             with mock.patch.dict("os.environ", env):
                 rc = ops.run_init(
-                    memory_root=None, backend="openai-compatible",
+                    memory_root=None, backend="http",
                     base_url=None, api_key_env=None, model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 2)
@@ -444,7 +435,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("  - copilot-headless: ✗ executable 未安裝", out)
         self.assertIn("  - gemini-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
         self.assertIn("  - antigravity-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
-        self.assertIn("  - openai-compatible: - config 驅動（無本機執行檔需求）", out)
+        self.assertIn("  - custom-argv: - config 驅動（無本機執行檔需求）", out)
 
 
 class DoctorBackendProbeTests(unittest.TestCase):
@@ -461,9 +452,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
         base = dict(
             agent_exec_backend="custom-argv",
             agent_exec_command=("claude", "-p"),
-            agent_exec_base_url="",
             agent_exec_model="test-model",
-            agent_exec_api_key_env="",
             default_promoter="llm",
         )
         base.update(overrides)
@@ -496,38 +485,6 @@ class DoctorBackendProbeTests(unittest.TestCase):
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}):
                 self.assertEqual(ops.run_doctor(live_probe=True), 0)
-
-    def test_probe_openai_compatible_success_with_live_endpoint(self):
-        # openai-compatible 不再「PR-D 接手」綠燈——實際打 /v1/chat/completions
-        server = HTTPServer(("127.0.0.1", 0), _Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            cfg = self._fake_cfg(
-                agent_exec_backend="openai-compatible",
-                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
-            )
-            with mock.patch.dict("os.environ", self._ENV), \
-                 mock.patch("paulsha_hippo.atomizer.config.load_config",
-                            return_value=(cfg, "h")), \
-                 mock.patch.object(ops, "_service_manager_environment",
-                                   return_value={"PATH": "/usr/bin:/bin"}):
-                self.assertEqual(ops.run_doctor(live_probe=True), 0)
-        finally:
-            server.shutdown()
-
-    def test_probe_openai_compatible_unreachable_fails_closed(self):
-        # 端點不可達（連線拒絕）→ FAIL；早前版本此情境仍 exit 0（恢復 gate 誤判）
-        cfg = self._fake_cfg(
-            agent_exec_backend="openai-compatible",
-            agent_exec_base_url="http://127.0.0.1:1",
-        )
-        with mock.patch.dict("os.environ", self._ENV), \
-             mock.patch("paulsha_hippo.atomizer.config.load_config",
-                        return_value=(cfg, "h")), \
-             mock.patch.object(ops, "_service_manager_environment",
-                               return_value={"PATH": "/usr/bin:/bin"}):
-            self.assertEqual(ops.run_doctor(live_probe=True), 1)
 
     def test_service_effective_path_falls_back_without_systemd(self):
         with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
@@ -650,7 +607,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                 1,
             )
 
-    def test_probe_passes_when_api_key_only_in_manager_env(self):
+    def test_probe_rejects_api_key_only_in_manager_env(self):
         # B1 反向誤判：key 只設在 manager env（environment.d／set-environment）、
         # 互動 shell 沒有 → 服務實際可用，probe 不得誤判故障。
         self.assertNotIn("HIPPO_PROBE_FAKE_KEY", os.environ)
@@ -663,7 +620,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                     manager_env={"PATH": "/usr/bin:/bin",
                                  "HIPPO_PROBE_FAKE_KEY": "sk-manager"},
                 ),
-                0,
+                1,
             )
 
     def test_probe_fallback_marks_approximate_when_no_user_bus(self):
@@ -672,57 +629,16 @@ class DoctorBackendProbeTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             exe = self._key_gated_backend(tmp, "HIPPO_PROBE_FAKE_KEY")
             buf = io.StringIO()
-            with redirect_stdout(buf):
+            err = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(err):
                 rc = self._doctor_with_key_gated_backend(
                     exe,
                     shell_env={"HIPPO_PROBE_FAKE_KEY": "sk-shell-only"},
                     manager_env=None,
                 )
-            self.assertEqual(rc, 0)
-            self.assertIn("近似", buf.getvalue())
-            self.assertIn("非 service-effective", buf.getvalue())
-
-    def _doctor_openai_with_auth_server(self, *, shell_env: dict[str, str],
-                                        manager_env: dict[str, str] | None) -> int:
-        server = HTTPServer(("127.0.0.1", 0), _AuthRequiredHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            cfg = self._fake_cfg(
-                agent_exec_backend="openai-compatible",
-                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
-                agent_exec_api_key_env="HIPPO_PROBE_HTTP_KEY",
-            )
-            with mock.patch.dict("os.environ", {**self._ENV, **shell_env}), \
-                 mock.patch("paulsha_hippo.atomizer.config.load_config",
-                            return_value=(cfg, "h")), \
-                 mock.patch.object(ops, "_service_manager_environment",
-                                   return_value=manager_env):
-                return ops.run_doctor(live_probe=True)
-        finally:
-            server.shutdown()
-
-    def test_probe_openai_compatible_key_only_in_shell_fails(self):
-        # B1 也涵蓋 openai-compatible：API key 解析須來自 manager env，
-        # 不得從 doctor 所在互動 shell 的 os.environ 借到 key 而誤判健康。
-        self.assertEqual(
-            self._doctor_openai_with_auth_server(
-                shell_env={"HIPPO_PROBE_HTTP_KEY": "sk-shell-only"},
-                manager_env={"PATH": "/usr/bin:/bin"},
-            ),
-            1,
-        )
-
-    def test_probe_openai_compatible_key_in_manager_env_passes(self):
-        self.assertNotIn("HIPPO_PROBE_HTTP_KEY", os.environ)
-        self.assertEqual(
-            self._doctor_openai_with_auth_server(
-                shell_env={},
-                manager_env={"PATH": "/usr/bin:/bin",
-                             "HIPPO_PROBE_HTTP_KEY": "sk-manager"},
-            ),
-            0,
-        )
+            self.assertEqual(rc, 1)
+            self.assertIn("近似", err.getvalue())
+            self.assertIn("非 service-effective", err.getvalue())
 
 
 class DoctorLiveProbeGateTests(unittest.TestCase):
@@ -743,9 +659,7 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
         base = dict(
             agent_exec_backend="custom-argv",
             agent_exec_command=self._RESOLVES_BUT_FAILS_LIVE,
-            agent_exec_base_url="",
             agent_exec_model="test-model",
-            agent_exec_api_key_env="",
             default_promoter="llm",
         )
         base.update(overrides)
@@ -802,19 +716,6 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
             not_exec.chmod(0o644)  # 無執行權限
             cfg = self._fake_cfg(agent_exec_command=(str(not_exec), "-p"))
             self.assertEqual(self._doctor(cfg), 1)
-
-    def test_bare_doctor_openai_compatible_skips_http_probe(self):
-        # 端點不可達（live 檔必 FAIL，見 DoctorBackendProbeTests），裸 doctor
-        # 不打 HTTP → config 可載入即 PASS
-        cfg = self._fake_cfg(
-            agent_exec_backend="openai-compatible",
-            agent_exec_base_url="http://127.0.0.1:1",
-        )
-        with mock.patch.object(
-                ops, "_probe_openai_compatible",
-                side_effect=AssertionError("裸 doctor 不得真打 HTTP 端點")) as spy:
-            self.assertEqual(self._doctor(cfg), 0)
-        spy.assert_not_called()
 
     def test_gate_wiring_passes_live_kwarg_to_probe(self):
         # 跨批次契約（PR-C/PR-D mock 面）：run_doctor 以 live= kwarg 驅動 probe
@@ -918,14 +819,17 @@ class ServiceManagerEnvironmentTests(unittest.TestCase):
 
 class ProbeEnvironmentTests(unittest.TestCase):
     def test_manager_env_mode_excludes_interactive_environ(self):
-        # B1 核心：service-effective 模式下 probe env 只來自 manager env，
-        # 互動 shell 才有的變數（API key 等）不得滲入。
+        # B1 核心：service-effective 模式只取 manager 的 PATH；其餘子程序
+        # 環境由固定 minimal non-secret allowlist 建立，credential 不得滲入。
         with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
              mock.patch.object(ops, "_service_manager_environment",
                                return_value={"PATH": "/usr/bin:/bin", "HOME": "/home/u"}):
             env, service_effective = ops._probe_environment()
         self.assertTrue(service_effective)
-        self.assertEqual(env, {"PATH": "/usr/bin:/bin", "HOME": "/home/u"})
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertNotEqual(env["HOME"], "/home/u")
+        self.assertNotIn("HIPPO_SHELL_ONLY_VAR", env)
+        self.assertIn("HIPPO_SELF_SESSION", env)
 
     def test_manager_env_without_path_gets_conservative_default(self):
         with mock.patch.object(ops, "_service_manager_environment",
@@ -933,13 +837,14 @@ class ProbeEnvironmentTests(unittest.TestCase):
             env, service_effective = ops._probe_environment()
         self.assertTrue(service_effective)
         self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        self.assertNotEqual(env["HOME"], "/home/u")
 
-    def test_fallback_mode_keeps_interactive_approximation(self):
+    def test_fallback_mode_keeps_only_minimal_approximation(self):
         with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
              mock.patch.object(ops, "_service_manager_environment", return_value=None):
             env, service_effective = ops._probe_environment()
         self.assertFalse(service_effective)
-        self.assertEqual(env["HIPPO_SHELL_ONLY_VAR"], "1")
+        self.assertNotIn("HIPPO_SHELL_ONLY_VAR", env)
         self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
 
 
@@ -1018,103 +923,8 @@ class SuperviseTests(unittest.TestCase):
             self.assertFalse(ops._dream_timer_active())
 
 
-class _Handler(BaseHTTPRequestHandler):
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length))
-        self.server.captured = {"auth": self.headers.get("Authorization"), "payload": payload}  # type: ignore[attr-defined]
-        body = json.dumps({"choices": [{"message": {"content": "DISTILLED"}}]}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):  # 靜默
-        return
-
-
-class _AuthRequiredHandler(BaseHTTPRequestHandler):
-    """缺 Authorization header 即 401 的端點（模擬需認證的 openai-compatible 服務）。"""
-
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        if self.headers.get("Authorization"):
-            body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
-            self.send_response(200)
-        else:
-            body = json.dumps({"error": "missing api key"}).encode()
-            self.send_response(401)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):  # 靜默
-        return
-
-
-class HttpAgentClientTests(unittest.TestCase):
-    def _serve(self):
-        server = HTTPServer(("127.0.0.1", 0), _Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server
-
-    def test_posts_chat_completions_and_returns_content(self):
-        server = self._serve()
-        try:
-            with mock.patch.dict("os.environ", {"HIPPO_TEST_KEY": "sk-local"}):
-                client = HttpAgentClient(
-                    f"http://127.0.0.1:{server.server_port}", "gemma-test",
-                    api_key_env="HIPPO_TEST_KEY", timeout=10,
-                )
-                out = client.run("prompt-text")
-            self.assertEqual(out, "DISTILLED")
-            captured = server.captured  # type: ignore[attr-defined]
-            self.assertEqual(captured["auth"], "Bearer sk-local")
-            self.assertEqual(captured["payload"]["model"], "gemma-test")
-        finally:
-            server.shutdown()
-
-    def test_unreachable_endpoint_raises_agent_exec_error(self):
-        client = HttpAgentClient("http://127.0.0.1:1", "m", timeout=2)
-        with self.assertRaises(AgentExecError):
-            client.run("x")
-
-    def test_env_override_scopes_api_key_lookup(self):
-        # B1：doctor probe 注入 service-effective env——key 從注入的 env 解析
-        self.assertNotIn("HIPPO_PROBE_DIRECT_KEY", os.environ)
-        server = self._serve()
-        try:
-            client = HttpAgentClient(
-                f"http://127.0.0.1:{server.server_port}", "m",
-                api_key_env="HIPPO_PROBE_DIRECT_KEY", timeout=10,
-                env={"HIPPO_PROBE_DIRECT_KEY": "sk-injected"},
-            )
-            client.run("x")
-            self.assertEqual(server.captured["auth"], "Bearer sk-injected")  # type: ignore[attr-defined]
-        finally:
-            server.shutdown()
-
-    def test_env_override_excludes_process_environ(self):
-        # B1：一旦注入 env，就不得回頭從 os.environ 借 key（互動 shell 滲漏）
-        server = self._serve()
-        try:
-            with mock.patch.dict("os.environ", {"HIPPO_TEST_KEY": "sk-local"}):
-                client = HttpAgentClient(
-                    f"http://127.0.0.1:{server.server_port}", "m",
-                    api_key_env="HIPPO_TEST_KEY", timeout=10, env={},
-                )
-                client.run("x")
-            self.assertIsNone(server.captured["auth"])  # type: ignore[attr-defined]
-        finally:
-            server.shutdown()
-
-
 class BackendConfigTests(unittest.TestCase):
-    def test_openai_compatible_requires_base_url(self):
+    def test_direct_provider_backend_is_retired(self):
         from paulsha_hippo.atomizer import config as aconfig
 
         with TemporaryDirectory() as tmp:
@@ -1123,9 +933,9 @@ class BackendConfigTests(unittest.TestCase):
             cfg.write_text(base + "\n", encoding="utf-8")
             override = Path(tmp) / "override.yaml"
             override.write_text(
-                'schema_version: "1"\nagent_exec:\n  backend: openai-compatible\n', encoding="utf-8"
+                'schema_version: "1"\nagent_exec:\n  backend: http\n', encoding="utf-8"
             )
-            with self.assertRaises(aconfig.AtomizerConfigError):
+            with self.assertRaisesRegex(aconfig.AtomizerConfigError, "operator-redaction"):
                 aconfig.load_config(default_dir=tmp, override_path=override)
 
     def test_claude_headless_preset_config_valid(self):

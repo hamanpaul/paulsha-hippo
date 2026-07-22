@@ -18,7 +18,7 @@ _SCALAR_ORDER = (
     "phase", "project", "slice_id", "artifact_kind", "version", "created_at",
     "created_by", "source_session", "gate_required", "checksum",
     "memory_layer", "source_agent", "captured_at", "supersedes",
-    "distilled_from", "fragment_ref", "session_title", "atom_title", "tags", "source_fragments",
+    "distilled_from", "fragment_ref", "session_title", "title", "atom_title", "tags", "source_fragments", "publication_id",
 )
 
 
@@ -69,6 +69,9 @@ def build(fragment: Fragment, config: AtomizerConfig) -> Slice:
         "distilled_from": session_ref,
         "fragment_ref": fragment_ref,
         "session_title": fragment.session_title,
+        "title": fragment.session_title or "",
+        "atom_title": fragment.session_title or "",
+        "distiller": {},
     }
     return Slice(slice_id=slice_id, frontmatter=frontmatter, body=body, title=fragment.session_title or None)
 
@@ -106,9 +109,11 @@ def build_from_proposal(proposal: "SliceProposal", session_meta: dict[str, objec
         "source_agent": agent,
         "captured_at": captured_at,
         "provenance": dict(session_meta.get("provenance") or {}),
+        "distiller": dict(session_meta.get("distiller") or {}),
         "supersedes": [],
         "distilled_from": f"{agent}:{session}",
         "session_title": str(session_meta.get("session_title", "")),
+        "title": proposal.title,
         "atom_title": proposal.title,
         "tags": list(proposal.tags),
         "source_fragments": list(proposal.source_fragment_indices),
@@ -128,6 +133,8 @@ def validate(frontmatter: dict[str, object], body: str) -> list[str]:
     for field in _T4_FIELDS:
         if field not in frontmatter:
             errors.append(f"missing T4 contract field: {field}")
+    if "distiller" not in frontmatter:
+        errors.append("missing distiller provenance")
     if frontmatter.get("memory_layer") != "knowledge":
         errors.append("memory_layer must be 'knowledge'")
     return errors
@@ -147,7 +154,7 @@ def render(slice_: Slice) -> str:
     for key in _SCALAR_ORDER:
         if key not in fm:
             continue
-        if key in ("project", "session_title", "atom_title"):
+        if key in ("project", "session_title", "title", "atom_title", "created_at", "captured_at", "source_session"):
             # free-text → always a quoted scalar so YAML indicator chars can't deform it
             lines.append(f"{key}: {json.dumps(str(fm[key]), ensure_ascii=False)}")
         else:
@@ -156,6 +163,26 @@ def render(slice_: Slice) -> str:
     if isinstance(provenance, dict):
         lines.append("provenance:")
         for pkey in ("repo", "commit", "path"):
-            lines.append(f"  {pkey}: {provenance.get(pkey, '')}")
+            lines.append(f"  {pkey}: {json.dumps(str(provenance.get(pkey, '')), ensure_ascii=False)}")
+    distiller = fm.get("distiller") or {}
+    if isinstance(distiller, dict):
+        lines.append("distiller:")
+        for key in (
+            "profile_id", "profile_revision", "tier", "attempt_index",
+            "requested_model", "requested_effort", "observed_model",
+            "model_verification", "command_fingerprint", "fallback_reason",
+            "config_hash", "skill_hash", "hippo_version", "build_commit",
+            "elapsed_seconds", "failure_category", "stderr", "exit_code",
+        ):
+            if key not in distiller:
+                continue
+            value = distiller[key]
+            if value is None:
+                rendered = "null"
+            elif isinstance(value, (bool, int, float)):
+                rendered = _scalar(value)
+            else:
+                rendered = json.dumps(str(value), ensure_ascii=False)
+            lines.append(f"  {key}: {rendered}")
     lines.append("---")
     return "\n".join(lines) + "\n" + slice_.body

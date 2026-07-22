@@ -68,8 +68,14 @@ def materialize_links(memory_root: Path) -> tuple[dict[str, int], list[str]]:
                         links.append(f"[[{target.stem}]]")
                 elif node.startswith("entity:"):
                     links.append(f"[[{node[len('entity:'):]}]]")
-            title = fm.get("title") or path.stem.rsplit("--", 1)[0]
-            fio.update(path, {"title": title, "aliases": [title], "related": links})
+            title = fm.get("title") or fm.get("atom_title") or path.stem.rsplit("--", 1)[0]
+            updates = {"aliases": [title], "related": links}
+            # A valid semantic title is canonical; only fill the legacy field
+            # when neither title key exists.  Link materialization must not
+            # overwrite proposal title with a filename-derived generic stem.
+            if not fm.get("title"):
+                updates["title"] = title
+            fio.update(path, updates)
         except Exception as exc:  # fail-soft: 單一壞 slice 不中止 linker
             warnings.append(f"{path.name}: linker skipped ({exc})")
             continue

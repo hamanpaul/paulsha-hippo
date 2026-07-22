@@ -1,6 +1,6 @@
 """One-shot migration: regenerate titles for `untitled` knowledge slices (#151).
 
-Slices whose title-generation failed (gemma4 offline at import time) land as
+Slices whose title-generation failed (external agent offline at import time) land as
 `title: untitled` with a `untitled--<slice_id>.md` filename — visible in the raw
 wake-up brief injected to agents. This migration distils a real title from the
 slice body, stamps `title`/`atom_title`/`aliases`, and renames the file to

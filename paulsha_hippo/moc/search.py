@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .. import instruction_corpus
+from ..atomizer.publication import committed_publication_ids
 from ..importer.config import default_projects_path, load_projects_config
 from ..ledger import lifecycle
 from ..ledger import retrieval_set
@@ -227,6 +228,7 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
     # 先讀 projects.yaml/建語料，全部成功後才開 sqlite 連線——否則 scoping-config
     # 壞掉會洩漏連線（reviewer Important）。
     project_roots = _project_roots(memory_root)
+    committed_publications = committed_publication_ids(memory_root)
     corpus_by_project: dict[str, object] = {}
     empty_corpus = instruction_corpus.corpus_for_roots(())
     per_project: dict[str, ProjectIndexStats] = {}
@@ -319,6 +321,11 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
                 return None
             reason = pool_exclude_reason(fm)
             if reason is not None:
+                pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
+                return None
+            publication_id = fm.get("publication_id")
+            if publication_id is not None and str(publication_id) not in committed_publications:
+                reason = "publication-pending"
                 pool_excluded[reason] = pool_excluded.get(reason, 0) + 1
                 return None
             project = str(fm.get("project", ""))

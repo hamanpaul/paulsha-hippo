@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from ..ledger import processing, relations
 from ..noise import DocCorpus, classify_noise
 from . import slice_frontmatter, splitter
-from .config import AtomizerConfig, is_safe_path_component, sanitize_project_component
+from .config import AtomizerConfig, is_safe_path_component, project_directory_key, sanitize_project_component
 from .llm_promoter import LLMPromoter, PromoteError
 from .promoter import IdentityPromoter, Promoter
 from .splitter import Fragment
@@ -73,6 +73,50 @@ def _atomic_write(path: Path, text: str) -> None:
 def _move(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+
+
+def _quarantine_inbox_document(
+    memory_root: Path,
+    path: Path,
+    raw_bytes: bytes,
+    *,
+    reason: str,
+    now: str,
+    config_hash: str,
+) -> str:
+    """Preserve one poison inbox document and make the quarantine terminal."""
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    root = memory_root / "runtime" / "quarantine" / "inbox"
+    destination = root / f"{path.stem}--{digest[:16]}{path.suffix or '.md'}"
+    evidence = destination.with_suffix(destination.suffix + ".json")
+    if not destination.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        _move(path, destination)
+        _atomic_write(
+            evidence,
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "hash": digest,
+                    "reason": reason,
+                    "source_path": str(path.relative_to(memory_root)),
+                    "detected_at": now,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    processing.append_state(
+        memory_root,
+        session_key=f"quarantine:{digest}",
+        state="quarantined",
+        now=now,
+        config_hash=config_hash,
+        quarantine_path=str(destination.relative_to(memory_root)),
+        quarantine_reason=reason,
+        source_hash=digest,
+    )
+    return str(destination.relative_to(memory_root))
 
 
 def _archive_fragments(memory_root: Path, fragment_paths: list[Path], now: str) -> None:
@@ -292,7 +336,7 @@ def _handle_promote_failure(
     if category not in processing.PARKED_FAILURE_CATEGORIES:
         category = "invalid_output"
     error_text = processing.sanitize_error_text(str(exc))
-    cache_key = promoter.cache_key_for_fragments(fragments)
+    cache_key = promoter._bound_cache_key_for_fragments(fragments)
     counter = _retry_counter_path(memory_root, cache_key)
     if counter is None:
         return "", False
@@ -313,16 +357,20 @@ def _handle_promote_failure(
     return f" (parked: {category} after {attempts} bounded chunk attempt(s))", True
 
 
-def _promoter_metadata(promoter: Promoter) -> dict[str, str]:
+def _promoter_metadata(promoter: Promoter) -> dict[str, Any]:
     if isinstance(promoter, IdentityPromoter):
         return {"promoter": "identity"}
     if isinstance(promoter, LLMPromoter):
         skill_text = getattr(promoter, "_skill", "")
-        return {
+        metadata: dict[str, Any] = {
             "promoter": "llm",
             "model": str(getattr(promoter, "_model", "unknown")),
             "skill_hash": hashlib.sha256(skill_text.encode("utf-8")).hexdigest(),
         }
+        provenance = getattr(promoter, "last_provenance", None)
+        if isinstance(provenance, dict):
+            metadata["distiller"] = dict(provenance)
+        return metadata
     return {}
 
 
@@ -360,14 +408,19 @@ def _prepare_slice_writes(
 
 
 def _knowledge_path_for(memory_root: Path, project: str, slice_id: str) -> Path:
-    project_dir = memory_root / "knowledge" / str(project)
-    if project_dir.exists():
-        for candidate in sorted(project_dir.glob(f"*--{slice_id}.md")):
-            return candidate
-        legacy = project_dir / f"{slice_id}.md"
-        if legacy.exists():
-            return legacy
-    return project_dir / f"{slice_id}.md"
+    keys = [project_directory_key(str(project))]
+    legacy_key = sanitize_project_component(str(project))
+    if legacy_key not in keys:
+        keys.append(legacy_key)
+    for key in keys:
+        project_dir = memory_root / "knowledge" / key
+        if project_dir.exists():
+            for candidate in sorted(project_dir.glob(f"*--{slice_id}.md")):
+                return candidate
+            legacy = project_dir / f"{slice_id}.md"
+            if legacy.exists():
+                return legacy
+    return memory_root / "knowledge" / keys[0] / f"{slice_id}.md"
 
 
 def _append_semantic_edges(
@@ -479,6 +532,8 @@ def _publish_session(
     now: str,
     config_hash: str,
     warnings: list[str],
+    processing_extra: Mapping[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> str:
     """Stage every accepted atom, then materialize one idempotent publication.
 
@@ -489,15 +544,9 @@ def _publish_session(
     """
     rendered_rows: list[tuple[Path, bytes, slice_frontmatter.Slice, list[tuple[Path, Fragment]]]] = []
     identity = []
-    for slice_, referenced_fragments in accepted_writes:
-        target = _knowledge_path_for(
-            memory_root,
-            sanitize_project_component(str(slice_.frontmatter["project"])),
-            slice_.slice_id,
-        )
+    for slice_, _ in accepted_writes:
         rendered = slice_frontmatter.render(slice_).encode("utf-8")
         identity.append((slice_.slice_id, hashlib.sha256(rendered).hexdigest()))
-        rendered_rows.append((target, rendered, slice_, referenced_fragments))
     publication_id = hashlib.sha256(
         json.dumps(
             {"session": session_key, "config": config_hash, "slices": identity},
@@ -505,23 +554,8 @@ def _publish_session(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    stage_root = memory_root / "runtime" / "staging" / "atomize" / publication_id
-    staged: list[tuple[Path, Path, bytes]] = []
-    for index, (target, rendered, _, _) in enumerate(rendered_rows):
-        if target.is_file() and target.read_bytes() != rendered:
-            raise PromoteError(f"slice publication collision at {target}")
-        stage = stage_root / f"{index:04d}.md"
-        stage.parent.mkdir(parents=True, exist_ok=True)
-        with stage.open("wb") as handle:
-            handle.write(rendered)
-            handle.flush()
-            os.fsync(handle.fileno())
-        staged.append((stage, target, rendered))
-    if staged:
-        _fsync_parent(staged[0][0])
-
     edge_specs: list[dict[str, str]] = []
-    for _, _, slice_, referenced_fragments in rendered_rows:
+    for slice_, referenced_fragments in accepted_writes:
         for frag_path, _ in referenced_fragments:
             edge_specs.append(
                 {
@@ -550,38 +584,56 @@ def _publish_session(
                 slice_, title_to_slice_id=title_to_slice_id, warnings=warnings
             )
         )
-    _append_publication_event(
+    from .publication import PublicationItem, PublicationTransaction
+
+    for slice_, referenced_fragments in accepted_writes:
+        frontmatter = dict(slice_.frontmatter)
+        frontmatter["publication_id"] = publication_id
+        published_slice = replace(slice_, frontmatter=frontmatter)
+        target = _knowledge_path_for(
+            memory_root,
+            str(frontmatter["project"]),
+            published_slice.slice_id,
+        )
+        rendered = slice_frontmatter.render(published_slice).encode("utf-8")
+        # Slice IDs are immutable content identities, while publication IDs are
+        # session-transaction identities.  A re-import that publishes one new
+        # atom must not rewrite unchanged sibling atoms merely because their
+        # transaction marker changed.  Reuse an existing byte-identical body
+        # and checksum, preserving the original publication marker/provenance.
+        if target.is_file():
+            try:
+                existing_fm, existing_body = _parse_frontmatter(
+                    target.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError):
+                existing_fm, existing_body = None, ""
+            if (
+                isinstance(existing_fm, Mapping)
+                and existing_fm.get("slice_id") == published_slice.slice_id
+                and existing_fm.get("checksum") == frontmatter.get("checksum")
+                and existing_body == published_slice.body
+            ):
+                rendered = target.read_bytes()
+        rendered_rows.append((target, rendered, published_slice, referenced_fragments))
+
+    transaction = PublicationTransaction(
         memory_root,
-        {
-            "event": "staged",
-            "publication_id": publication_id,
-            "session_key": session_key,
-            "targets": [str(target) for _, target, _ in staged],
-            "ts": now,
+        publication_id=publication_id,
+        session_key=session_key,
+        now=now,
+        config_hash=config_hash,
+    )
+    transaction.prepare(
+        [PublicationItem(slice_id=slice_.slice_id, target=target, data=rendered)
+         for target, rendered, slice_, _ in rendered_rows],
+        edge_specs,
+        processing_extra={
+            **dict(processing_extra or {}),
+            **({"run_id": run_id} if run_id else {}),
         },
     )
-    relations.append_edges(memory_root, edge_specs, now=now, config_hash=config_hash)
-    created: list[Path] = []
-    try:
-        for stage, target, rendered in staged:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                stage.unlink()
-                continue
-            os.replace(stage, target)
-            _fsync_parent(target)
-            if target.read_bytes() != rendered:
-                raise OSError(f"publication verification failed: {target}")
-            created.append(target)
-    except Exception:
-        for target in created:
-            try:
-                target.unlink()
-            except FileNotFoundError:
-                pass
-        raise
-    finally:
-        shutil.rmtree(stage_root, ignore_errors=True)
+    transaction.commit()
     return publication_id
 
 
@@ -666,6 +718,9 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
             warnings.append(f"{raw_path}: unreadable inbox document; skipped")
             continue
         source_inbox_hash = hashlib.sha256(raw_bytes).hexdigest()
+        quarantine_root = memory_root / "runtime" / "quarantine" / "inbox"
+        if any(quarantine_root.glob(f"{raw_path.stem}--{source_inbox_hash[:16]}*")):
+            continue
         if raw_size is not None and raw_size > _ATOMIZER_INBOX_FILE_MAX_BYTES:
             if processing.state_of(memory_root, path_session_key) == "skipped":
                 continue
@@ -691,7 +746,20 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
             # explicit replay workflow owns any future LLM mutation.
             continue
         if data is None or not data.get("project") or not data.get("source_session"):
-            warnings.append(f"{raw_path}: unparseable or missing project/source_session; skipped")
+            reason = "malformed-frontmatter" if data is None else "missing-project-or-source-session"
+            try:
+                quarantine_path = _quarantine_inbox_document(
+                    memory_root,
+                    raw_path,
+                    raw_bytes,
+                    reason=reason,
+                    now=now,
+                    config_hash=config_hash,
+                )
+            except OSError as exc:
+                warnings.append(f"{raw_path}: quarantine failed ({type(exc).__name__})")
+            else:
+                warnings.append(f"{raw_path}: quarantined ({reason}) at {quarantine_path}")
             continue
         agent = str(data.get("source_agent", "_unknown"))
         session = str(data["source_session"])
@@ -703,7 +771,7 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
         if unsafe_fields:
             warnings.append(f"{raw_path}: unsafe path field(s) {', '.join(unsafe_fields)}; skipped")
             continue
-        project_path = sanitize_project_component(project)
+        project_path = project_directory_key(project)
         session_key = f"{agent}:{session}"
         current_event = processing.fold_events(memory_root).get(session_key)
         current_state = str(current_event.get("state", "")) if current_event else ""
@@ -797,9 +865,11 @@ def _read_fragment(path: Path) -> Fragment | None:
 def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now: str,
                   dry_run: bool, promoter: Promoter, warnings: list[str],
                   dry_run_fragments: dict[str, list[Fragment]],
-                  doc_corpus: "DocCorpus | None" = None) -> tuple[int, int]:
+                  doc_corpus: "DocCorpus | None" = None,
+                  run_id: str | None = None) -> tuple[int, int, list[str]]:
     slices_written = 0
     noise_dropped = 0
+    produced_slice_ids: list[str] = []
 
     # In dry_run mode, only preview freshly split raw sessions. Existing split backlog
     # must stay mutation-free: no LLM call, no cache changes, no retry-sidecar writes.
@@ -832,7 +902,8 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
                     LOGGER.info("atomize: dropped noise slice %s:%s (%s)", session_key, slice_.slice_id, verdict.reason)
                     continue
                 slices_written += 1
-        return slices_written, noise_dropped
+                produced_slice_ids.append(slice_.slice_id)
+        return slices_written, noise_dropped, produced_slice_ids
 
     events = processing.fold_events(memory_root)
     for session_key, event in events.items():
@@ -898,7 +969,7 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
 
         cache_key = None
         if isinstance(promoter, LLMPromoter):
-            cache_key = promoter.cache_key_for_fragments([fragment for _, fragment in fragments])
+            cache_key = promoter._bound_cache_key_for_fragments([fragment for _, fragment in fragments])
 
         if not promoted:
             if isinstance(promoter, LLMPromoter) and promoter.last_disposition == "no_findings":
@@ -1020,55 +1091,53 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
             now=now,
             config_hash=config_hash,
             warnings=warnings,
-        )
-
-        processing.append_state(
-            memory_root,
-            session_key=session_key,
-            state="promoted",
-            now=now,
-            config_hash=config_hash,
-            slices=len(accepted_writes),
-            accepted_slices=len(accepted_writes),
-            cache_key=cache_key,
-            publication_id=publication_id,
-            source_inbox_hash=event.get("source_inbox_hash"),
-            chunk_cache_keys=(
-                list(promoter.last_chunk_cache_keys)
-                if isinstance(promoter, LLMPromoter)
-                else []
-            ),
-            **_promoter_metadata(promoter),
-        )
-        _append_publication_event(
-            memory_root,
-            {
-                "event": "committed",
-                "publication_id": publication_id,
-                "session_key": session_key,
+            processing_extra={
+                "slices": len(accepted_writes),
                 "accepted_slices": len(accepted_writes),
-                "ts": now,
+                "cache_key": cache_key,
+                "source_inbox_hash": event.get("source_inbox_hash"),
+                "chunk_cache_keys": (
+                    list(promoter.last_chunk_cache_keys)
+                    if isinstance(promoter, LLMPromoter)
+                    else []
+                ),
+                **_promoter_metadata(promoter),
             },
+            run_id=run_id,
         )
         slices_written += len(accepted_writes)
+        produced_slice_ids.extend(slice_.slice_id for slice_, _ in accepted_writes)
         _archive_fragments(memory_root, [frag_path for frag_path, _ in fragments], now)
         if isinstance(promoter, LLMPromoter):
             promoter.clear_last_chunk_caches()
         _clear_cache_key(memory_root, cache_key)
         _clear_retry_counter(memory_root, cache_key)
-    return slices_written, noise_dropped
+    return slices_written, noise_dropped, produced_slice_ids
 
 
 def run(memory_root: Path, *, config: AtomizerConfig, config_hash: str, now: str,
         dry_run: bool = False, promoter: Promoter | None = None,
-        doc_corpus: "DocCorpus | None" = None) -> dict[str, Any]:
+        doc_corpus: "DocCorpus | None" = None,
+        run_id: str | None = None) -> dict[str, Any]:
     promoter = promoter or IdentityPromoter()
     warnings: list[str] = []
+    publication_recovery = {"recovered": [], "rolled_back": []}
+    if not dry_run:
+        from .publication import recover_incomplete
+
+        publication_recovery = recover_incomplete(memory_root)
     split, dry_run_fragments = _split_pass(memory_root, config, config_hash, now, dry_run, warnings)
-    slices, noise_dropped = _promote_pass(memory_root, config, config_hash, now, dry_run, promoter, warnings, dry_run_fragments, doc_corpus)
+    slices, noise_dropped, produced_slice_ids = _promote_pass(
+        memory_root, config, config_hash, now, dry_run, promoter, warnings,
+        dry_run_fragments, doc_corpus, run_id,
+    )
     return {
-        "summary": {"split_sessions": split, "slices": slices, "skipped": len(warnings),
+        "run_id": run_id,
+        "summary": {"run_id": run_id, "split_sessions": split, "slices": slices, "skipped": len(warnings),
                     "noise_dropped": noise_dropped,
-                    "config_hash": config_hash, "dry_run": dry_run},
+                    "config_hash": config_hash, "backend_identity": "external-cli" if not isinstance(promoter, IdentityPromoter) else "identity",
+                    "dry_run": dry_run},
         "warnings": warnings,
+        "publication_recovery": publication_recovery,
+        "produced_slice_ids": produced_slice_ids,
     }

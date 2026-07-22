@@ -41,6 +41,12 @@ def _tool_arg(s: str) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in raw_argv and "--json" in raw_argv:
+        from .build_info import version_json
+
+        print(version_json())
+        return 0
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
@@ -73,8 +79,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_p.add_argument("--backend", default="claude-headless",
                         choices=list(hippo_backends.PRESETS), help=_backend_help)
-    init_p.add_argument("--base-url")
-    init_p.add_argument("--api-key-env")
     init_p.add_argument("--model")
     init_p.add_argument("--yes", action="store_true")
     init_p.set_defaults(func=_ops_init)
@@ -99,6 +103,39 @@ def _build_parser() -> argparse.ArgumentParser:
     install_service = install_sub.add_parser("service", help="安裝 dream 常駐（systemd 偵測+fallback）")
     install_service.add_argument("--enable", action="store_true")
     install_service.set_defaults(func=_ops_install_service)
+    install_all = install_sub.add_parser(
+        "all", help="依 ownership manifest 安全更新 Hippo-owned release surfaces"
+    )
+    install_all.add_argument("--force", action="store_true", help="允許 manifest 證明的 owned changes")
+    install_all.add_argument("--dry-run", action="store_true", help="只輸出 plan，不落盤")
+    install_all.add_argument("--manifest", default=None)
+    install_all.add_argument("--target-root", default=None)
+    install_all.add_argument("--transaction-root", default=None)
+    install_all.set_defaults(func=_ops_install_all)
+
+    upgrade = memory_subparsers.add_parser(
+        "upgrade", help="isolated artifact upgrade transaction (service gates remain pending)"
+    )
+    upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True)
+    upgrade_plan = upgrade_sub.add_parser("plan")
+    upgrade_plan.add_argument("--candidate", required=True)
+    upgrade_plan.add_argument("--target-root", required=True)
+    upgrade_plan.add_argument("--profile-id", default="candidate")
+    upgrade_plan.add_argument("--artifact-name", default="hippo.whl")
+    upgrade_plan.add_argument("--out", required=True)
+    upgrade_plan.set_defaults(func=_upgrade)
+    upgrade_prepare = upgrade_sub.add_parser("prepare")
+    upgrade_prepare.add_argument("--plan", required=True)
+    upgrade_prepare.add_argument("--transaction-root", default=None)
+    upgrade_prepare.set_defaults(func=_upgrade)
+    upgrade_apply = upgrade_sub.add_parser("apply")
+    upgrade_apply.add_argument("--manifest", required=True)
+    upgrade_apply.add_argument("--force", action="store_true")
+    upgrade_apply.add_argument("--dry-run", action="store_true")
+    upgrade_apply.set_defaults(func=_upgrade)
+    upgrade_rollback = upgrade_sub.add_parser("rollback")
+    upgrade_rollback.add_argument("--manifest", required=True)
+    upgrade_rollback.set_defaults(func=_upgrade)
 
     dry_run = memory_subparsers.add_parser("dry-run-policy")
     dry_run.add_argument("session_id")
@@ -287,7 +324,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="agent-instruction doc root/file; builds the doc-fragment guard corpus so "
              "instruction fragments are skipped (left for prune-noise) instead of retitled.")
     retitle.add_argument("--agent-command", default=None,
-                         help="override the title-distillation command (default: gemma4 wrapper).")
+                         help="override the title-distillation external CLI command.")
     retitle.add_argument(
         "--project", action="append", default=None,
         help="restrict retitling to these project(s). Repeatable; omit to scan all projects.")
@@ -1012,8 +1049,6 @@ def _ops_init(args) -> int:
     return ops.run_init(
         memory_root=args.memory_root,
         backend=args.backend,
-        base_url=args.base_url,
-        api_key_env=args.api_key_env,
         model=args.model,
         assume_yes=args.yes,
     )
@@ -1038,6 +1073,54 @@ def _ops_install_service(args) -> int:
     from paulsha_hippo import ops
 
     return ops.run_install_service(enable=args.enable)
+
+
+def _ops_install_all(args) -> int:
+    from . import deployment
+
+    manifest = Path(args.manifest) if args.manifest else Path(__file__).resolve().parent / "install-manifest.json"
+    target_root = Path(args.target_root) if args.target_root else paths.hippo_config_root()
+    try:
+        result = deployment.install_all(
+            manifest_path=manifest,
+            target_root=target_root,
+            package_root=Path(__file__).resolve().parent,
+            force=bool(args.force),
+            dry_run=bool(args.dry_run),
+            transaction_root=args.transaction_root,
+        )
+    except deployment.DeploymentError as exc:
+        print(json.dumps({"status": "blocked", "reason": str(exc)}, ensure_ascii=False, sort_keys=True))
+        return 1
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _upgrade(args: argparse.Namespace) -> int:
+    from . import upgrade as upgrade_tx
+
+    try:
+        if args.upgrade_command == "plan":
+            result = upgrade_tx.plan_upgrade(
+                args.candidate,
+                target_root=args.target_root,
+                profile_id=args.profile_id,
+                artifact_name=args.artifact_name,
+            )
+            out = Path(args.out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        elif args.upgrade_command == "prepare":
+            result = upgrade_tx.prepare_upgrade(args.plan, transaction_root=args.transaction_root)
+        elif args.upgrade_command == "apply":
+            result = upgrade_tx.apply_upgrade(args.manifest, force=bool(args.force), dry_run=bool(args.dry_run))
+        else:
+            result = upgrade_tx.rollback_upgrade(args.manifest)
+    except upgrade_tx.UpgradeError as exc:
+        print(json.dumps({"status": "blocked", "reason": str(exc)}, ensure_ascii=False, sort_keys=True))
+        return 1
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def _requeue(args: argparse.Namespace) -> int:

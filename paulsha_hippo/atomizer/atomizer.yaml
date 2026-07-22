@@ -26,17 +26,65 @@ phase_map:
   review: review
 default_artifact_kind: report
 default_phase: review
-agent_exec:
-  command:
-    # Feed stdin to co-gem's non-interactive -p mode; systemd needs both user
-    # launchers and the pinned Node runtime added to PATH.
-    - /bin/bash
-    - -c
-    - 'set -eu; export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v22.20.0/bin:$PATH"; prompt=$(cat); exec "$HOME/.local/bin/co-gem" -s --no-color --available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export -p "$prompt"'
-  timeout_seconds: 300
-  model: gem
-  max_output_tokens: 2048
-  upstream_url: http://127.0.0.1:8080
+external_agents:
+  deadline_seconds: 300
+  max_attempts: 6
+  max_agent_calls: 6
+  profiles:
+    - id: claude
+      tier: 1
+      priority: 10
+      traits: [judge, reasoner]
+      task_classes: [atomization, title]
+      model: claude-sonnet
+      effort: high
+      supported_efforts: [medium, high, xhigh]
+      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --print]
+    - id: codex
+      tier: 1
+      priority: 20
+      traits: [judge, reasoner]
+      task_classes: [atomization, title]
+      model: gpt-5
+      effort: high
+      supported_efforts: [medium, high, xhigh]
+      argv: [codex, exec, --model, "{MODEL}", --reasoning-effort, "{EFFORT}", --sandbox, read-only, --skip-git-repo-check, -]
+    - id: agy
+      tier: 2
+      priority: 10
+      traits: [fast, responsive]
+      task_classes: [atomization, title]
+      model: default
+      effort: medium
+      supported_efforts: [low, medium, high]
+      argv: [agy, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
+    - id: cg
+      tier: 2
+      priority: 20
+      traits: [heavy-implementation, fast]
+      task_classes: [atomization, title]
+      model: default
+      effort: high
+      supported_efforts: [medium, high, xhigh]
+      argv: [cg, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
+    - id: co-gem
+      tier: 3
+      priority: 10
+      traits: [low-cost, fallback]
+      task_classes: [atomization, title]
+      model: local
+      effort: low
+      supported_efforts: [low, medium]
+      argv: [co-gem, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
+    - id: claude-gem
+      tier: 3
+      priority: 20
+      traits: [low-cost, fallback]
+      task_classes: [atomization, title]
+      model: local
+      effort: low
+      supported_efforts: [low, medium]
+      argv: [claude-gem, --model, "{MODEL}", --effort, "{EFFORT}", --headless, --stdin]
 # #175: 預設 llm 蒸餾。identity 會把 importer 樣板 fragments 1:1 複製成
 # knowledge slices（樣板噪音），僅保留為顯式 --promoter identity（測試/離線）。
 promoter: llm

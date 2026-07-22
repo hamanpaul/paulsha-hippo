@@ -60,9 +60,10 @@ def slice_filename(title: str, slice_id: str) -> str:
 
 def _title(fm: dict[str, Any], body: str) -> str:
     """Extract title from frontmatter, markdown heading, or fallback."""
-    title = fm.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
+    for key in ("title", "atom_title"):
+        title = fm.get(key)
+        if isinstance(title, str) and title.strip():
+            return title.strip()
     for line in body.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):

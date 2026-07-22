@@ -55,14 +55,9 @@ MVP 設計與驗證細節見：
 
 > **T3 已落地（2026-05）：** inbox raw session 由 `psc memory atomize` 經確定性結構拆分 → 1:1 升級為 `knowledge/<project>/<slice_id>.md`;處理狀態記於 `runtime/ledger/processing.jsonl`,派生關係記於 `runtime/ledger/relations.jsonl`。設計見 `docs/superpowers/specs/2026-05-31-stage2-t3-atomizer-linker-design.md`。
 
-> **T3.2 已落地（2026-06）：** `psc memory atomize --promoter llm` 會載入 `atomizer/skills/atomize-knowledge-slice.md`，透過 configurable `agent_exec.command`（預設 `scripts/claude-gemma4`，可替換 stub/fake）做 per-session 語意 promoter；`relates_to`/`mentions` 等語意關係寫入 `runtime/ledger/relations.jsonl`，整個 session 維持 fail-closed promotion，設計見 `docs/superpowers/specs/2026-06-02-stage2-llm-atomizer-design.md`。
+> **T3.2 已落地（2026-06）：** `hippo atomize --promoter llm` 會載入 `atomizer/skills/atomize-knowledge-slice.md`，透過 canonical external headless CLI profiles 與 bounded tier fallback 做 per-session 語意 promoter；`relates_to`/`mentions` 等語意關係寫入 `runtime/ledger/relations.jsonl`，整個 session 維持 fail-closed promotion。
 
-> **PR-B（#91）補充（2026-07）：** LLM backend 路徑/連線設定已收斂到同一條 override chain：
-> 1. repo 預設：`paulshaclaw/memory/atomizer/atomizer.yaml`
-> 2. 本機覆寫：`~/.config/paulshaclaw/atomizer.override.yaml`
-> 3. 臨時 upstream 熱切換：`PSC_CLAUDE_GEMMA4_UPSTREAM_URL`
->
-> `agent_exec.command` 與 `agent_exec.upstream_url` 會同時影響 atomizer promoter、SkillOpt rollout 與 importer title 生成；改 backend 時不要只改單一路徑。
+> **Issue #39 邊界（2026-07）：** runtime distiller 唯一來源是 `~/.config/paulsha-hippo/atomizer.yaml`；Hippo 只把 frozen prompt 以 stdin 交給 external headless CLI profile。OAuth/API key、launcher、provider URL 與 credential lifecycle 由外部 CLI 管理，Hippo 不讀取、轉發或備份。atomizer、SkillOpt 與 importer title 生成共用同一個 tiered profile router。
 
 > **T4 已落地（2026-05）：** decayed/reactivation 事件由最小 janitor 寫入 `runtime/ledger/lifecycle.jsonl`，active 集合由 `paulshaclaw.memory.ledger.retrieval_set.active_records()` 提供。掃描入口：`psc memory janitor scan`。設計見 `docs/superpowers/specs/2026-05-31-stage2-t4-ledger-janitor-design.md`。
 

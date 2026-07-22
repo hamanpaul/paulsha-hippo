@@ -76,15 +76,16 @@ class AtomizeCliLlmTests(unittest.TestCase):
 
     def test_agent_command_override_uses_shared_resolution(self):
         cfg, _ = atomizer_config.load_config(override_path=None)
-        args = Namespace(promoter="llm", agent_command="scripts/claude-gemma4")
+        args = Namespace(promoter="llm", agent_command="scripts/build_release_artifact.py")
 
         with TemporaryDirectory() as tmp:
-            with mock.patch.object(atomizer_cli, "AgentExecClient") as agent_exec_client:
+            with mock.patch.object(atomizer_cli, "ExternalAgentRouter") as router:
                 atomizer_cli._build_promoter(args, cfg, Path(tmp))
 
-        command = agent_exec_client.call_args.args[0]
+        profiles = router.call_args.args[0]
+        command = profiles[0].render_argv()
         self.assertTrue(Path(command[0]).is_absolute())
-        self.assertTrue(str(command[0]).endswith("scripts/claude-gemma4"))
+        self.assertTrue(str(command[0]).endswith("scripts/build_release_artifact.py"))
 
     def test_promoter_llm_uses_stub_agent(self):
         with TemporaryDirectory() as tmp:
@@ -131,9 +132,10 @@ class AtomizeCliLlmTests(unittest.TestCase):
         cfg, _ = cfgmod.load_config()
         args = argparse.Namespace(promoter="llm", agent_command=None)
         promoter = cli._build_promoter(args, cfg, Path("/tmp/does-not-matter"))
-        inner = promoter._agent._inner
-        self.assertEqual(inner._env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], str(cfg.agent_exec_max_output_tokens))
-        self.assertEqual(inner._env["PSC_CLAUDE_GEMMA4_UPSTREAM_URL"], cfg.agent_exec_upstream_url)
+        from paulsha_hippo.agent_profiles import ExternalAgentRouter
+        self.assertIsInstance(promoter._agent._inner, ExternalAgentRouter)
+        self.assertTrue(promoter._agent._inner.profiles)
+        self.assertNotIn("PSC_CLAUDE_GEMMA4_UPSTREAM_URL", vars(cfg))
 
 
 if __name__ == "__main__":

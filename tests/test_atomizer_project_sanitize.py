@@ -2,6 +2,7 @@ from paulsha_hippo.atomizer import pipeline as apipe
 from paulsha_hippo.atomizer.config import (
     is_safe_path_component,
     load_config,
+    project_directory_key,
     sanitize_project_component,
 )
 
@@ -38,9 +39,9 @@ def test_url_project_session_is_not_skipped(tmp_path):
     assert out["summary"]["split_sessions"] >= 1
     assert not any("unsafe path" in w for w in out["warnings"])
 
-    # Files land under the sanitized (slash-free) project dir; no slash dir is created.
+    # Files land under a stable collision-resistant rich-project directory key.
     files = [str(p) for p in tmp_path.rglob("*") if p.is_file()]
-    assert any("github.com__hamanpaul__serialwrap" in s for s in files)
+    assert any(project_directory_key("github.com/hamanpaul/serialwrap") in s for s in files)
     assert not any("github.com/hamanpaul/serialwrap" in s for s in files)
 
 
@@ -85,16 +86,16 @@ def test_build_mocs_writes_sanitized_per_project_moc_for_slash_project(tmp_path,
     )
     moc_builder.build_mocs(tmp_path, "2026-06-16T00:00:00Z")  # must not raise
     names = {p.name for p in (tmp_path / "knowledge").glob("*-moc.md")}
-    assert "github.com__owner__repo-moc.md" in names
+    assert f"{project_directory_key('github.com/owner/repo')}-moc.md" in names
     # the slash must not have leaked into a nested path like knowledge/github.com/...
     assert not (tmp_path / "knowledge" / "github.com").exists()
     # the session title surfaces as the wikilink alias (not the raw facet stem)
-    moc = (tmp_path / "knowledge" / "github.com__owner__repo-moc.md").read_text(encoding="utf-8")
+    moc = (tmp_path / "knowledge" / f"{project_directory_key('github.com/owner/repo')}-moc.md").read_text(encoding="utf-8")
     assert "|修復 UART]]" in moc
 
 
 def test_session_title_propagates_to_knowledge_slices(tmp_path):
-    # The per-session gemma4 title (inbox frontmatter `title:`) must reach every
+    # The per-session external-agent title (inbox frontmatter `title:`) must reach every
     # knowledge slice as `session_title`, so MOC/wake-up can show it as the label.
     inbox = tmp_path / "inbox" / "sessions" / "claude-code" / "2026-06-16"
     inbox.mkdir(parents=True)

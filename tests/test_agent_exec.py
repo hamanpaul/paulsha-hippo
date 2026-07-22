@@ -73,11 +73,6 @@ class AgentExecTests(unittest.TestCase):
         with self.assertRaises(agent_exec.AgentTransientError):
             client.run("x")
 
-    def test_http_client_unreachable_raises_transient(self):
-        client = agent_exec.HttpAgentClient("http://127.0.0.1:1", "m", timeout=2)
-        with self.assertRaises(agent_exec.AgentTransientError):
-            client.run("x")
-
     def test_typed_errors_remain_agent_exec_errors(self):
         self.assertTrue(issubclass(agent_exec.AgentUnavailableError, agent_exec.AgentExecError))
         self.assertTrue(issubclass(agent_exec.AgentTransientError, agent_exec.AgentExecError))
@@ -204,15 +199,15 @@ class AgentExecTests(unittest.TestCase):
         )
         self.assertEqual(client.run("x").strip(), "8192")
 
-    def test_exec_client_no_env_inherits_parent(self):
+    def test_exec_client_does_not_inherit_parent_env(self):
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "4242"
         self.addCleanup(os.environ.pop, "CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
         client = agent_exec.AgentExecClient(
             [sys.executable, "-c",
-             "import os,sys; sys.stdin.read(); print(os.environ.get('CLAUDE_CODE_MAX_OUTPUT_TOKENS',''))"],
+             "import os,sys; sys.stdin.read(); print(os.environ.get('CLAUDE_CODE_MAX_OUTPUT_TOKENS') or 'missing')"],
             timeout=5,
         )
-        self.assertEqual(client.run("x").strip(), "4242")
+        self.assertEqual(client.run("x").strip(), "missing")
 
 
 if __name__ == "__main__":

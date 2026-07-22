@@ -78,6 +78,7 @@ def _run(args: argparse.Namespace) -> int:
             return 0
 
         now = args.now
+        run_id = f"dream-{now}"
 
         # #15 失敗鏈：config 載入與 promoter 建構是 atomize 失敗邊界的一部分，
         # 不得逃出 run_dream 記錄邊界（否則無 failure category／evidence／dream
@@ -98,6 +99,7 @@ def _run(args: argparse.Namespace) -> int:
             jan_error = exc
 
         doc_corpus = corpus_for_roots(getattr(args, "instruction_root", None))
+        atom_result: dict[str, object] = {}
 
         def atomize_fn() -> dict[str, object]:
             if atom_error is not None:
@@ -106,7 +108,7 @@ def _run(args: argparse.Namespace) -> int:
                     config_hash=atom_hash, dry_run=args.dry_run,
                 )
                 raise atom_error
-            return atomizer_pipeline.run(
+            result = atomizer_pipeline.run(
                 memory_root,
                 config=atom_cfg,
                 config_hash=atom_hash,
@@ -114,7 +116,11 @@ def _run(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 promoter=promoter,
                 doc_corpus=doc_corpus,
+                run_id=run_id,
             )
+            atom_result.clear()
+            atom_result.update(result)
+            return result
 
         def janitor_fn() -> dict[str, object]:
             if jan_error is not None:
@@ -138,6 +144,23 @@ def _run(args: argparse.Namespace) -> int:
             if args.dry_run:
                 return {"summary": {"skipped": "dry-run"}, "warnings": []}
             result = moc_runner.run_moc(memory_root, now)
+            produced = atom_result.get("produced_slice_ids", [])
+            if isinstance(produced, list) and produced:
+                from ..moc import census as moc_census
+
+                try:
+                    audit = moc_census.audit_indexed_ids(memory_root)
+                    indexed = set(audit.searchable_ids)
+                except Exception:
+                    indexed = set()
+                missing = sorted(set(str(item) for item in produced) - indexed)
+                if missing:
+                    result.setdefault("warnings", []).append(
+                        f"run-level publication reconciliation missing {len(missing)} produced slice(s)"
+                    )
+                result["produced_slice_ids"] = list(produced)
+                result["metadata_indexed"] = len(produced) - len(missing)
+                result["fts_indexed"] = len(produced) - len(missing)
             warnings = result.pop("warnings", [])
             return {
                 "summary": result,
@@ -164,11 +187,15 @@ def _run(args: argparse.Namespace) -> int:
 
 def _status(args: argparse.Namespace) -> int:
     memory_root = Path(args.memory_root)
+    from ..build_info import build_identity
+
     print(
         json.dumps(
             {
+                "build_identity": build_identity(),
                 "last_run": dream_ledger.last_run(memory_root),
                 "backlog_depth": dream_ledger.backlog_depth(memory_root),
+                "health": dream_ledger.backlog_census(memory_root),
             },
             sort_keys=True,
             indent=2,

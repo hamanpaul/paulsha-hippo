@@ -275,11 +275,6 @@ class SkilloptCliTests(unittest.TestCase):
         )
         seen: dict[str, object] = {}
 
-        def fake_agent_exec(command, timeout, env=None):
-            calls = seen.setdefault("agent_exec_calls", [])
-            calls.append((tuple(command), timeout, env))
-            return f"agent<{len(calls)}>"
-
         def fake_rollout(agent, known_projects, config):
             seen["rollout_args"] = (agent, tuple(known_projects), config)
             return "rollout"
@@ -293,7 +288,6 @@ class SkilloptCliTests(unittest.TestCase):
             return "optimizer"
 
         with (
-            mock.patch("paulsha_hippo.skillopt.cli.AgentExecClient", side_effect=fake_agent_exec),
             mock.patch(
                 "paulsha_hippo.skillopt.cli.make_atomize_rollout",
                 side_effect=fake_rollout,
@@ -315,18 +309,11 @@ class SkilloptCliTests(unittest.TestCase):
             self.assertEqual(make_rollout(), "rollout")
             self.assertEqual(make_score(), "score")
             self.assertEqual(make_optimizer(), "optimizer")
-            self.assertEqual(
-                seen["agent_exec_calls"],
-                [
-                    (
-                        tuple(resolve_command_argv(_CFG.agent_exec_command)),
-                        _CFG.agent_exec_timeout,
-                        {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": _CFG.agent_exec_upstream_url},
-                    ),
-                    (("python3", "-m", "judge.demo"), 123, None),
-                ],
-            )
-            self.assertEqual(seen["score_args"], ("agent<2>", 0.55))
+            self.assertEqual(seen["rollout_args"][0].__class__.__name__, "ExternalAgentRouter")
+            self.assertEqual(seen["score_args"][0].__class__.__name__, "ExternalAgentRouter")
+            self.assertEqual(seen["score_args"][0].task_class, "skillopt")
+            self.assertEqual(seen["score_args"][0].profiles[0].id, "skillopt-custom")
+            self.assertEqual(seen["score_args"][1], 0.55)
 
     def test_main_resolves_default_skill_path_outside_repo_root(self) -> None:
         outside_cwd = self.root / "outside-cwd"

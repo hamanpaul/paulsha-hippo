@@ -1,7 +1,6 @@
 name: Tests
 
-# Template 骨架：tests/ 尚不存在時整個 job 跳過（新 repo 出生即綠燈）；
-# 一旦加入測試套件，pytest 自動成為 PR gate（滿足 policy R-19）。
+# This repository owns a test suite; a missing/empty collection is a CI failure.
 on:
   pull_request:
   push:
@@ -18,36 +17,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect test suite
-        id: detect
-        run: |
-          first_test="$(find tests -type f \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit 2>/dev/null || true)"
-          if [ -n "$first_test" ]; then
-            echo "has_tests=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "No test suite yet; skipping pytest."
-          fi
-
       - name: Setup Python
-        if: steps.detect.outputs.has_tests == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install project and test dependencies
-        if: steps.detect.outputs.has_tests == 'true'
         run: |
-          python -m pip install --upgrade pip pytest
-          if [ -f pyproject.toml ]; then python -m pip install -e ".[test]"; fi
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          python -m pip install --upgrade pip
+          python -m pip install ".[test]"
+
+      - name: Collect test suite
+        run: |
+          python -m pytest --collect-only -q | tee "$RUNNER_TEMP/pytest-collection.log"
+          grep -Eq '[1-9][0-9]* tests collected' "$RUNNER_TEMP/pytest-collection.log"
 
       - name: Run test suite
-        if: steps.detect.outputs.has_tests == 'true'
         run: python -m pytest tests/ -q
 
       - name: Build and smoke clean wheel install
-        if: steps.detect.outputs.has_tests == 'true'
         run: |
           rm -rf dist .wheel-smoke
           python -m pip wheel . --wheel-dir dist

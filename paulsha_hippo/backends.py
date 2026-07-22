@@ -1,25 +1,10 @@
-"""Backend preset registry（spec §3.5 契約 7）。
+"""External headless CLI preset registry（spec §3.5 契約 7）。
 
 每個 preset 宣告 name / argv template / required executable / doctor probe /
-capabilities / available。argv presets 全部走既有 custom-argv 機制
-（AgentExecClient：prompt 由 stdin 餵入、stdout 取回輸出），機制零新增。
-
-argv 實測基線（2026-07-10）：
-- codex：`codex exec ... -`——stdout 僅含 final message，log 走 stderr。
-- copilot：stdin 為唯一 prompt 來源；帶非空 `-p` 時 stdin 注入不可靠（實測
-  內容丟失），故不使用 `-p`。
-- gemini：unavailable——headless 呼叫僅觀察到 rc=41（selectedType=vertex-ai
-  而無 GOOGLE_CLOUD_PROJECT/GOOGLE_API_KEY），無任何成功 stdin→stdout
-  round-trip。候選 argv `gemini -p "執行 stdin 提供的任務指示"`（`-p` 文字依
-  `--help`「Appended to input on stdin (if any)」推得）未經實證，依 spec §8
-  「不猜 argv」不入 template；升級前提見 docs/backend-matrix.md。
-- antigravity：命令契約未確認（spec §2 非目標）→ available=False，
-  選單顯示但不可選。
-
-capabilities 詞彙：
-- "argv-stdin"：CLI 子程序，prompt 走 stdin（AgentExecClient）
-- "http"：openai-compatible HTTP API（HttpAgentClient）
-- "user-defined"：argv 由使用者 config 提供
+capabilities / available。所有 prompt 都由 stdin 傳入，執行邊界是
+``shell=False`` 的外部 CLI；OAuth、API key、provider URL 與登入生命週期
+不屬於 Hippo。profile fallback 與 provenance 由 ``agent_profiles`` 的共用
+router 負責，本模組只保存可驗證的命令 preset。
 
 本模組 stdlib-only，且不得 import paulsha_hippo.ops（ops 反向 import 本模組）。
 """
@@ -87,12 +72,33 @@ PRESETS: dict[str, BackendPreset] = {
         capabilities=frozenset(),
         available=False,
     ),
-    "openai-compatible": BackendPreset(
-        name="openai-compatible",
-        argv_template=[],
-        required_executable=None,
-        doctor_probe=None,
-        capabilities=frozenset({"http"}),
+    "agy-headless": BackendPreset(
+        name="agy-headless",
+        argv_template=["agy", "--headless", "--stdin"],
+        required_executable="agy",
+        doctor_probe=["agy", "--version"],
+        capabilities=frozenset({"argv-stdin"}),
+    ),
+    "cg-headless": BackendPreset(
+        name="cg-headless",
+        argv_template=["cg", "--headless", "--stdin"],
+        required_executable="cg",
+        doctor_probe=["cg", "--version"],
+        capabilities=frozenset({"argv-stdin"}),
+    ),
+    "co-gem-headless": BackendPreset(
+        name="co-gem-headless",
+        argv_template=["co-gem", "--headless", "--stdin"],
+        required_executable="co-gem",
+        doctor_probe=["co-gem", "--version"],
+        capabilities=frozenset({"argv-stdin"}),
+    ),
+    "claude-gem-headless": BackendPreset(
+        name="claude-gem-headless",
+        argv_template=["claude-gem", "--headless", "--stdin"],
+        required_executable="claude-gem",
+        doctor_probe=["claude-gem", "--version"],
+        capabilities=frozenset({"argv-stdin"}),
     ),
     "custom-argv": BackendPreset(
         name="custom-argv",

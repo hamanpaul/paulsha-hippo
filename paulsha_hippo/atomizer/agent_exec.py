@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import hashlib
-import os
+import json
 import subprocess
 from abc import ABC, abstractmethod
+from dataclasses import asdict
 from pathlib import Path
+
+from ..agent_profiles import AgentProfile, AgentRunResult, child_environment, sanitize_stderr
 
 
 class AgentExecError(Exception):
     """Raised when an agent subprocess cannot produce usable output."""
+
+    def __init__(self, message: str, *, category: str = "process", stderr: str = "", exit_code: int | None = None) -> None:
+        super().__init__(message)
+        self.category = category
+        self.stderr = stderr
+        self.exit_code = exit_code
 
 
 class AgentUnavailableError(AgentExecError):
@@ -26,14 +35,32 @@ class AgentClient(ABC):
 
 
 class AgentExecClient(AgentClient):
-    def __init__(self, command: list[str], timeout: int = 300, env: dict | None = None) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        timeout: int = 300,
+        env: dict | None = None,
+        *,
+        profile: AgentProfile | None = None,
+    ) -> None:
         self._command = list(command)
         self._timeout = timeout
         self._env = dict(env) if env is not None else None
+        self._profile = profile
+        self.last_result = None
 
-    def run(self, prompt: str) -> str:
+    def run_with_evidence(self, prompt: str) -> tuple[str, str, int | None]:
+        """執行一個 external CLI，回傳 stdout + sanitized stderr + rc。
+
+        ``env`` 不再從 parent 合併；只有固定 allowlist 的 non-secret values 可以
+        進 child process。Prompt 永遠由 stdin 傳遞。
+        """
         if not self._command:
             raise AgentUnavailableError("agent command not configured")
+        try:
+            env = child_environment(self._env)
+        except Exception as exc:
+            raise AgentUnavailableError(str(exc)) from exc
         try:
             completed = subprocess.run(
                 self._command,
@@ -42,76 +69,48 @@ class AgentExecClient(AgentClient):
                 text=True,
                 timeout=self._timeout,
                 check=False,
-                # #7：注入自捕捉標記——蒸餾子程序（claude -p 等）的 agent session
-                # 其 hooks 讀到即跳過 queue write，斷開遞迴自捕捉。
-                env={**os.environ, "HIPPO_SELF_SESSION": "1", **(self._env or {})},
+                shell=False,
+                env=env,
             )
         except FileNotFoundError as exc:
-            raise AgentUnavailableError(f"agent command not found: {self._command[0]}") from exc
+            raise AgentUnavailableError(
+                f"agent command not found: {self._command[0]}"
+            ) from exc
         except PermissionError as exc:
-            raise AgentUnavailableError(f"agent command not executable: {self._command[0]}") from exc
+            raise AgentUnavailableError(
+                f"agent command not executable: {self._command[0]}"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise AgentTransientError(f"agent timed out after {self._timeout}s") from exc
+            raise AgentTransientError(
+                f"agent timed out after {self._timeout}s",
+                category="timeout",
+                stderr=sanitize_stderr(getattr(exc, "stderr", "")),
+            ) from exc
+        stderr = sanitize_stderr(completed.stderr)
         if completed.returncode != 0:
-            raise AgentTransientError(f"agent exited with code {completed.returncode}")
+            raise AgentTransientError(
+                f"agent exited with code {completed.returncode}",
+                category="process",
+                stderr=stderr,
+                exit_code=completed.returncode,
+            )
         if not completed.stdout.strip():
-            raise AgentTransientError("agent produced empty output")
-        return completed.stdout
-
-
-class HttpAgentClient(AgentClient):
-    """openai-compatible 檔位：stdlib urllib 直呼 /v1/chat/completions。
-
-    api_key 由 env 名解析（config 永不放值）；缺 key 時不帶 Authorization
-    （地端 ollama/vLLM 常無需驗證）。key 解析來源預設 os.environ；`env` 可
-    注入替代來源（#15 Codex B1：doctor probe 傳 service-effective manager
-    env——注入後即不回頭讀 os.environ，互動 shell 才有的 key 不得滲入判定）。
-    """
-
-    def __init__(self, base_url: str, model: str, *, api_key_env: str | None = None,
-                 timeout: int = 300, max_tokens: int = 2048,
-                 env: dict | None = None) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._model = model
-        self._api_key_env = api_key_env
-        self._timeout = timeout
-        self._max_tokens = max_tokens
-        self._env = env
+            raise AgentTransientError(
+                "agent produced empty output",
+                category="empty_output",
+                stderr=stderr,
+                exit_code=completed.returncode,
+            )
+        self.last_result = {
+            "stderr": stderr,
+            "exit_code": completed.returncode,
+            "command": tuple(self._command),
+        }
+        return completed.stdout, stderr, completed.returncode
 
     def run(self, prompt: str) -> str:
-        import json as _json
-        import urllib.error
-        import urllib.request
-
-        payload = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self._max_tokens,
-        }
-        headers = {"Content-Type": "application/json"}
-        if self._api_key_env:
-            source = self._env if self._env is not None else os.environ
-            key = str(source.get(self._api_key_env, "") or "").strip()
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(
-            f"{self._base_url}/v1/chat/completions",
-            data=_json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                body = _json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            raise AgentTransientError(f"openai-compatible endpoint unreachable: {exc}") from exc
-        try:
-            content = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AgentTransientError("openai-compatible response missing choices[0].message.content") from exc
-        if not str(content).strip():
-            raise AgentTransientError("agent produced empty output")
-        return str(content)
+        output, _stderr, _returncode = self.run_with_evidence(prompt)
+        return output
 
 
 class FakeAgentClient(AgentClient):
@@ -128,6 +127,7 @@ class CachingAgentClient(AgentClient):
     def __init__(self, inner: AgentClient, cache_dir: Path) -> None:
         self._inner = inner
         self._cache_dir = cache_dir
+        self.last_result: AgentRunResult | None = None
 
     def cache_path_for_key(self, cache_key: str) -> Path:
         return self._cache_dir / f"{cache_key}.json"
@@ -149,6 +149,7 @@ class CachingAgentClient(AgentClient):
 
     def run_cached(self, prompt: str, cache_key: str) -> str:
         path = self.cache_path_for_key(cache_key)
+        self.last_result = None
         if path.exists():
             try:
                 cached = path.read_text(encoding="utf-8")
@@ -156,14 +157,68 @@ class CachingAgentClient(AgentClient):
                 pass
             else:
                 if cached:
-                    return cached
+                    # Router-backed entries carry the selected profile and the
+                    # complete bounded attempt chain.  Replaying that envelope
+                    # preserves honest provenance without storing the prompt.
+                    try:
+                        envelope = json.loads(cached)
+                    except json.JSONDecodeError:
+                        envelope = None
+                    if isinstance(envelope, dict) and envelope.get("cache_schema") == "2":
+                        output = envelope.get("output")
+                        attempts_raw = envelope.get("attempts", [])
+                        try:
+                            attempts = tuple(
+                                AgentRunResult(**item)
+                                for item in attempts_raw
+                                if isinstance(item, dict)
+                            )
+                            result_raw = envelope.get("provenance")
+                            result = AgentRunResult(**result_raw) if isinstance(result_raw, dict) else None
+                        except (TypeError, ValueError):
+                            attempts = ()
+                            result = None
+                        if isinstance(output, str) and result is not None:
+                            self.last_result = result
+                            if hasattr(self._inner, "last_result"):
+                                self._inner.last_result = result
+                            if hasattr(self._inner, "attempts"):
+                                self._inner.attempts = attempts or (result,)
+                            return output
+                        # A recognized router envelope that fails validation is
+                        # treated as cache corruption, not as a raw answer.
+                    else:
+                        # Legacy/fake clients intentionally store raw text.
+                        return cached
         output = self._inner.run(prompt)
-        self._write_text_atomically(path, output)
+        result = getattr(self._inner, "last_result", None)
+        if isinstance(result, AgentRunResult):
+            attempts = getattr(self._inner, "attempts", ())
+            payload = {
+                "cache_schema": "2",
+                "output": output,
+                "provenance": asdict(result),
+                "attempts": [asdict(item) for item in attempts if isinstance(item, AgentRunResult)],
+            }
+            self._write_text_atomically(
+                path,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+            self.last_result = result
+        else:
+            self._write_text_atomically(path, output)
         return output
 
     def run(self, prompt: str) -> str:
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         return self.run_cached(prompt, prompt_hash)
+
+    def cache_namespace(self) -> str:
+        inner = self._inner
+        provider = getattr(inner, "cache_namespace", None)
+        if callable(provider):
+            return str(provider())
+        return ""
 
     def clear_cache_key(self, cache_key: str) -> None:
         try:

@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from ..atomizer.publication import committed_publication_ids
 from ..importer.config import default_projects_path, load_projects_config
 from ..instruction_corpus import discover_instruction_docs
 from . import frontmatter_io as fio
@@ -347,7 +348,9 @@ def _census_noise_reason(body: str, corpus: object) -> "str | None":
 
 
 def _fate(entry: CensusEntry,
-          corpus_for: "Callable[[str], object]") -> "tuple[str, str | None, list[str]]":
+          corpus_for: "Callable[[str], object]",
+          committed_publications: "set[str] | None" = None,
+          ) -> "tuple[str, str | None, list[str]]":
     """回傳 (fate, slice_id, identity_problems)；fate ∈ {"invalid",
     "pool:<reason>", "noise:<reason>", "eligible"}。
 
@@ -401,6 +404,9 @@ def _fate(entry: CensusEntry,
         reason = _census_pool_reason(fm)
         if reason is not None:
             return f"pool:{reason}", sid, problems
+        if (fm.get("publication_id") is not None
+                and str(fm.get("publication_id")) not in (committed_publications or set())):
+            return "pool:publication-pending", sid, problems
         noise_reason = _census_noise_reason(body, corpus_for(str(fm.get("project", ""))))
     except Exception:
         # 對賬工具自身不得被單一毒 slice 炸掉：鏡像 build_index 的 per-slice
@@ -448,8 +454,9 @@ def reconcile_index(memory_root: Path, coverage: "Mapping[str, Any]",
     noise: dict[str, int] = {}
     eligible_ids: set[str] = set()
     eligible_count = 0
+    committed_publications = committed_publication_ids(memory_root)
     for entry in census:
-        fate, sid, identity_problems = _fate(entry, corpus_for)
+        fate, sid, identity_problems = _fate(entry, corpus_for, committed_publications)
         problems.extend(identity_problems)
         if fate == "invalid":
             invalid += 1

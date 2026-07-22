@@ -54,6 +54,9 @@ def _run_pass(
             summary = value
         else:
             summary = {k: v for k, v in result.items() if k != "warnings"}
+        for key in ("produced_slice_ids", "publication_recovery", "health"):
+            if key in result:
+                summary[key] = result[key]
 
     if isinstance(warnings, list) and warnings:
         summary = dict(summary)
@@ -92,6 +95,35 @@ def run_dream(
     if moc_fn is not None:
         moc_clean = _run_pass("moc", moc_fn, passes, errors)
 
+    health = dream_ledger.backlog_census(memory_root, now=now)
+    health["run_id"] = run_id
+    health["config_hash"] = config_hash
+    try:
+        from paulsha_hippo.build_info import build_identity
+
+        health["build_identity"] = build_identity()
+    except Exception:  # pragma: no cover - identity must never hide run health
+        health["build_identity"] = {"version": "unknown", "build_commit": "unknown"}
+    atomize_summary = passes.get("atomize") if isinstance(passes.get("atomize"), dict) else {}
+    if isinstance(atomize_summary, dict):
+        produced = atomize_summary.get("produced_slice_ids", [])
+        health["notes_created"] = len(produced) if isinstance(produced, list) else 0
+        health["produced_slice_ids"] = list(produced) if isinstance(produced, list) else []
+        health["eligible"] = health["notes_created"]
+        health["backend_identity"] = atomize_summary.get("backend_identity", "unknown")
+    for key, default in {
+        "notes_created": 0,
+        "generic_title": 0,
+        "unknown_project": 0,
+        "invalid_frontmatter": 0,
+        "invalid_checksum": 0,
+        "eligible": 0,
+        "backend_identity": "unknown",
+    }.items():
+        health.setdefault(key, default)
+    health.setdefault("metadata_indexed", None)
+    health.setdefault("fts_indexed", None)
+
     if errors:
         status = "failed"
     else:
@@ -105,6 +137,7 @@ def run_dream(
         "errors": errors,
         "dream_config_hash": config_hash,
         "dry_run": dry_run,
+        "health": health,
     }
 
     if not dry_run:

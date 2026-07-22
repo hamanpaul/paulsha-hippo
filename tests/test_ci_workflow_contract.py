@@ -6,12 +6,14 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "test
 
 def test_ci_does_not_false_green_test_detection_or_install_failure():
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "find tests -type f" in text
-    assert "ls tests/test_*.py tests/*_test.py" not in text
+    assert "Detect test suite" not in text
+    assert "steps.detect" not in text
     install_block = text.split("- name: Install project and test dependencies", 1)[1].split(
-        "- name: Run test suite", 1
+        "- name: Collect test suite", 1
     )[0]
     assert "|| true" not in install_block
+    assert "python -m pip install \".[test]\"" in install_block
+    assert "python -m pytest --collect-only -q" in text
     assert "python -m pytest tests/ -q" in text
 
 

@@ -16,7 +16,7 @@ from collections import Counter
 from pathlib import Path
 from tempfile import mkdtemp
 
-from .atomizer.config import is_safe_path_component, sanitize_project_component
+from .atomizer.config import is_safe_path_component, project_directory_key, sanitize_project_component
 from .moc import frontmatter_io as _fio
 from .moc.runner import run_moc
 
@@ -113,7 +113,7 @@ def rekey_project(
         raise RekeyError("--from must be a non-empty key different from --to")
 
     knowledge = memory_root / "knowledge"
-    target_dir = knowledge / sanitize_project_component(new_slug)
+    target_dir = knowledge / project_directory_key(new_slug)
     target_slice_ids = _slice_ids_in_dir(target_dir)
     rows: list[dict] = []
     planned: list[tuple[Path, Path, dict]] = []
@@ -187,22 +187,32 @@ def rekey_project(
     warnings: list[str] = []
     post_apply_errors = 0
     if apply and counts.get("rekeyed", 0):
-        source_dir = knowledge / sanitize_project_component(old_key)
-        if source_dir.is_dir() and not any(source_dir.iterdir()):
-            try:
-                source_dir.rmdir()
-                removed_source_dir = True
-            except OSError as exc:
-                post_apply_errors += 1
-                warnings.append(f"post-apply cleanup failed: {exc}")
-        orphan_moc = knowledge / f"{sanitize_project_component(old_key)}-moc.md"
-        if removed_source_dir and orphan_moc.exists():
-            try:
-                orphan_moc.unlink()
-                removed_orphan_moc = True
-            except OSError as exc:
-                post_apply_errors += 1
-                warnings.append(f"post-apply cleanup failed: {exc}")
+        # Clean the actual source directories selected by the migration.  This
+        # keeps legacy sanitized layouts migratable while new rich IDs use the
+        # collision-resistant project_directory_key.
+        source_dirs = {path.parent for path, _target, _row in planned}
+        source_dirs.update(
+            {
+                knowledge / project_directory_key(old_key),
+                knowledge / sanitize_project_component(old_key),
+            }
+        )
+        for source_dir in sorted(source_dirs):
+            if source_dir.is_dir() and not any(source_dir.iterdir()):
+                try:
+                    source_dir.rmdir()
+                    removed_source_dir = True
+                except OSError as exc:
+                    post_apply_errors += 1
+                    warnings.append(f"post-apply cleanup failed: {exc}")
+            orphan_moc = knowledge / f"{source_dir.name}-moc.md"
+            if not source_dir.exists() and orphan_moc.exists():
+                try:
+                    orphan_moc.unlink()
+                    removed_orphan_moc = True
+                except OSError as exc:
+                    post_apply_errors += 1
+                    warnings.append(f"post-apply cleanup failed: {exc}")
         try:
             conflict_paths = {Path(row["path"]) for row in rows if row["status"] == "conflict"}
             moc_result = _run_moc_preserving_conflicts(memory_root, now, conflict_paths)

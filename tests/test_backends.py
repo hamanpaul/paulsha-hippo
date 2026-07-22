@@ -17,7 +17,8 @@ class RegistryContractTests(unittest.TestCase):
         for expected in (
             "claude-headless", "codex-headless", "copilot-headless",
             "gemini-headless", "antigravity-headless",
-            "openai-compatible", "custom-argv",
+            "agy-headless", "cg-headless", "co-gem-headless",
+            "claude-gem-headless", "custom-argv",
         ):
             self.assertIn(expected, backends.PRESETS)
 
@@ -67,14 +68,13 @@ class RegistryContractTests(unittest.TestCase):
         # gemini-headless：候選 argv 未經 round-trip 實證，不入 registry
         # template（unavailable；升級前提見 docs/backend-matrix.md）。
 
-    def test_http_and_custom_presets_have_no_argv_template(self):
-        for name in ("openai-compatible", "custom-argv"):
+    def test_custom_preset_has_no_argv_template(self):
+        for name in ("custom-argv",):
             with self.subTest(preset=name):
                 preset = backends.PRESETS[name]
                 self.assertEqual(preset.argv_template, [])
                 self.assertIsNone(preset.required_executable)
                 self.assertIsNone(preset.doctor_probe)
-        self.assertIn("http", backends.PRESETS["openai-compatible"].capabilities)
         self.assertIn("user-defined", backends.PRESETS["custom-argv"].capabilities)
 
 
@@ -146,10 +146,10 @@ class ProbeTests(unittest.TestCase):
                 self.assertFalse(result.available)
                 self.assertIsNone(result.ok)
                 self.assertIn("unavailable", result.detail)
-        openai = backends.probe_preset(backends.PRESETS["openai-compatible"])
-        self.assertTrue(openai.available)
-        self.assertIsNone(openai.ok)
-        self.assertIn("config 驅動", openai.detail)
+        custom = backends.probe_preset(backends.PRESETS["custom-argv"])
+        self.assertTrue(custom.available)
+        self.assertIsNone(custom.ok)
+        self.assertIn("config 驅動", custom.detail)
 
     def test_probe_timeout_is_failure_not_crash(self):
         with TemporaryDirectory() as tmp:

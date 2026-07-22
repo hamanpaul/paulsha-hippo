@@ -6,7 +6,8 @@ import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
-from .agent_exec import AgentExecClient, HttpAgentClient, CachingAgentClient
+from .agent_exec import CachingAgentClient
+from ..agent_profiles import AgentProfile, ExternalAgentRouter
 from . import config as atomizer_config
 from . import pipeline
 from .llm_promoter import LLMPromoter
@@ -70,35 +71,45 @@ def _build_promoter(
     args: argparse.Namespace,
     config: atomizer_config.AtomizerConfig,
     memory_root: Path,
+    config_hash: str = "",
 ) -> Promoter:
     promoter_name = args.promoter or config.default_promoter
     if promoter_name != "llm":
         return IdentityPromoter()
 
-    command = (
-        list(atomizer_config.resolve_command_argv(shlex.split(args.agent_command)))
-        if args.agent_command is not None
-        else list(atomizer_config.resolve_command_argv(config.agent_exec_command))
-    )
-    if config.agent_exec_backend == "openai-compatible" and args.agent_command is None:
-        inner = HttpAgentClient(
-            config.agent_exec_base_url,
-            config.agent_exec_model,
-            api_key_env=config.agent_exec_api_key_env or None,
-            timeout=config.agent_exec_timeout,
-            max_tokens=config.agent_exec_max_output_tokens,
+    explicit_command = getattr(args, "agent_command", None)
+    if explicit_command is not None:
+        command = list(atomizer_config.resolve_command_argv(shlex.split(explicit_command)))
+        custom_profile = AgentProfile.from_mapping(
+            {
+                "id": "custom-local",
+                "tier": 3,
+                "priority": 0,
+                "traits": ["custom", "fallback"],
+                "task_classes": ["atomization"],
+                "model": config.agent_exec_model,
+                "effort": "medium",
+                "supported_efforts": ["medium"],
+                "argv": command,
+            }
         )
+        inner = ExternalAgentRouter(
+            (custom_profile,),
+            task_class="atomization",
+            deadline_seconds=config.router_deadline_seconds,
+            max_attempts=1,
+            max_agent_calls=1,
+        )
+        model = config.agent_exec_model
     else:
-        inner = AgentExecClient(
-            command,
-            timeout=config.agent_exec_timeout,
-            # Config is authoritative: it threads the selected backend upstream plus the
-            # output-token cap into the launcher even when the parent env differs.
-            env=atomizer_config.build_agent_exec_env(
-                upstream_url=config.agent_exec_upstream_url,
-                max_output_tokens=config.agent_exec_max_output_tokens,
-            ),
+        inner = ExternalAgentRouter(
+            config.external_profiles,
+            task_class="atomization",
+            deadline_seconds=config.router_deadline_seconds,
+            max_attempts=config.router_max_attempts,
+            max_agent_calls=config.router_max_agent_calls,
         )
+        model = config.external_profiles[0].model if config.external_profiles else "unknown"
     cached_client = CachingAgentClient(
         inner,
         _cache_dir(memory_root),
@@ -109,7 +120,8 @@ def _build_promoter(
         cached_client,
         skill_text,
         _known_projects(config.known_projects_file),
-        model=config.agent_exec_model,
+        model=model,
+        config_hash=config_hash,
     )
 
 
@@ -137,7 +149,7 @@ def prepare_pipeline_inputs(
     try:
         override = args.override if getattr(args, "override", None) else atomizer_config._DEFAULT_SENTINEL
         config, config_hash = atomizer_config.load_config(override_path=override)
-        promoter = _build_promoter(args, config, memory_root)
+        promoter = _build_promoter(args, config, memory_root, config_hash)
     except Exception as exc:  # noqa: BLE001 —初始化失敗需入 park 鏈並被記錄
         error = exc
     return config, config_hash, promoter, error

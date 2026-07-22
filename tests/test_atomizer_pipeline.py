@@ -850,7 +850,10 @@ class PipelineTests(unittest.TestCase):
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            self.assertEqual([event["event"] for event in publication_events], ["staged"])
+            self.assertEqual(
+                [event["event"] for event in publication_events],
+                ["publish_prepare", "publish_materialized"],
+            )
             result = pipeline.run(root, config=cfg, config_hash=h, now="2026-05-31T03:02:00Z")
 
             self.assertEqual(result["summary"]["slices"], 2)
@@ -863,7 +866,7 @@ class PipelineTests(unittest.TestCase):
                 .read_text(encoding="utf-8")
                 .splitlines()
             ]
-            self.assertEqual(publication_events[-1]["event"], "committed")
+            self.assertEqual(publication_events[-1]["event"], "publish_commit")
 
     def test_bad_fragment_references_leave_session_split_without_partial_writes(self):
         with TemporaryDirectory() as tmp:
