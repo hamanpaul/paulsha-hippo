@@ -59,6 +59,34 @@ def test_copilot_adapter_retries_session_end_flush_race(tmp_path, monkeypatch):
     assert sleeps == [0.05]
 
 
+def test_copilot_adapter_flush_retry_is_bounded(tmp_path, monkeypatch):
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({
+        "tool": "copilot-cli",
+        "session_id": "s-empty",
+        "psc_config_root": str(tmp_path),
+        "capture_scope": "session_end",
+        "cwd": str(tmp_path),
+    }), encoding="utf-8")
+    calls = 0
+    sleeps: list[float] = []
+
+    def empty_history(*_):
+        nonlocal calls
+        calls += 1
+        return {"user_prompts": [], "assistant_messages": [], "assistant_summary": ""}
+
+    monkeypatch.setattr(copilot_adapter, "read_copilot_history", empty_history)
+    monkeypatch.setattr(copilot_adapter.time, "sleep", sleeps.append)
+
+    result = copilot_adapter.extract(queue)
+
+    assert result.session["user_prompts"] == []
+    assert result.session["assistant_messages"] == []
+    assert calls == 5
+    assert sleeps == [0.05, 0.1, 0.2, 0.4]
+
+
 @pytest.mark.parametrize("layout", ["current", "legacy"])
 def test_copilot_layout_runs_through_importer_inbox_and_atom(tmp_path, monkeypatch, layout):
     copilot_root = tmp_path / ".copilot"
