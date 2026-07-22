@@ -158,18 +158,16 @@ class LintRuleTests(unittest.TestCase):
         self.assertEqual(findings[0]["rule"], "title-untitled")
         self.assertEqual(findings[0]["record_id"], "sl-u1")
 
-    def test_raw_remote_project_key_is_flagged(self):
+    def test_remote_form_project_id_is_not_flagged(self):
         findings = rules.plan_lint([_lint_rec(rid="sl-r1", project="github.com/hamanpaul/testpilot")])
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["rule"], "raw-remote-key")
-        self.assertEqual(findings[0]["project"], "github.com/hamanpaul/testpilot")
+        self.assertEqual(findings, [])
 
     def test_clean_record_yields_no_findings(self):
         self.assertEqual(rules.plan_lint([_lint_rec()]), [])
 
-    def test_both_rules_can_fire_on_one_record(self):
+    def test_remote_form_project_with_untitled_only_flags_title(self):
         findings = rules.plan_lint([_lint_rec(title="untitled", project="a/b")])
-        self.assertEqual({finding["rule"] for finding in findings}, {"title-untitled", "raw-remote-key"})
+        self.assertEqual({finding["rule"] for finding in findings}, {"title-untitled"})
 
     def test_findings_are_deterministic_and_sorted(self):
         first = _lint_rec(rid="sl-2", title="untitled")

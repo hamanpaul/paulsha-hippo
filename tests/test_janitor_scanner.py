@@ -106,9 +106,9 @@ class ScannerLintTests(unittest.TestCase):
                 source_path_exists=lambda r: True,
             )
 
-            self.assertEqual(result["summary"]["lint"], {"untitled": 1, "raw_remote_key": 1})
+            self.assertEqual(result["summary"]["lint"], {"untitled": 1, "raw_remote_key": 0})
             lint_warnings = [warning for warning in result["warnings"] if warning.startswith("lint:")]
-            self.assertEqual(len(lint_warnings), 2)
+            self.assertEqual(len(lint_warnings), 1)
             self.assertTrue(slice_path.exists())
             self.assertEqual(lifecycle.read_events(root / "runtime" / "ledger" / "lifecycle.jsonl"), [])
 
