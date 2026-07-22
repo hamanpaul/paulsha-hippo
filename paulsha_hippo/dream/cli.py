@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 from ..atomizer import cli as atomizer_cli
@@ -176,7 +177,26 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reconcile(args: argparse.Namespace) -> int:
+    from . import reconcile as reconcile_mod
+    memory_root = Path(args.memory_root)
+    now = args.now or datetime.now().isoformat()
+    # Normalize: no mode flag → dry-run (safe default)
+    dry_run = not args.apply
+    result = reconcile_mod.run_reconcile(
+        memory_root,
+        now=now,
+        dry_run=dry_run,
+        apply=args.apply,
+        limit=args.limit,
+    )
+    print(result)
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     if args.dream_command == "status":
         return _status(args)
+    if args.dream_command == "reconcile":
+        return _reconcile(args)
     return _run(args)
