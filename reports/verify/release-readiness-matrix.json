@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "candidate_commit": null,
+  "wheel_sha256": null,
+  "gates": {
+    "AR-01": {"state": "pending", "evidence": null, "rerun": "CI and local full pytest", "timestamp": null},
+    "AR-02": {"state": "pending", "evidence": null, "rerun": "final candidate build manifest plus CLI JSON", "timestamp": null},
+    "AR-03": {"state": "pending", "evidence": null, "rerun": "clean venv outside checkout", "timestamp": null},
+    "AR-04": {"state": "pending", "evidence": null, "rerun": "reviewed config migration dry-run/apply/second-run", "timestamp": null},
+    "AR-05": {"state": "pending", "evidence": null, "rerun": "service-effective external CLI probe and canary", "timestamp": null},
+    "AR-06": {"state": "pending", "evidence": null, "rerun": "semantic corpus acceptance", "timestamp": null},
+    "AR-07": {"state": "pending", "evidence": null, "rerun": "publication and NAME_MAX crash tests", "timestamp": null},
+    "AR-08": {"state": "pending", "evidence": null, "rerun": "per-client installed ingress trace", "timestamp": null},
+    "AR-09": {"state": "pending", "evidence": null, "rerun": "recovery profile manifests", "timestamp": null},
+    "AR-10": {"state": "pending", "evidence": null, "rerun": "independent census and SHA report", "timestamp": null},
+    "AR-11": {"state": "pending", "evidence": null, "rerun": "three scheduled cycles with unique ingress", "timestamp": null},
+    "AR-12": {"state": "pending", "evidence": null, "rerun": "two injected-failure rollback drills", "timestamp": null},
+    "AR-13": {"state": "pending", "evidence": null, "rerun": "policy/OpenSpec/docs/diff checks", "timestamp": null},
+    "AR-14": {"state": "pending", "evidence": null, "rerun": "post-tag exact wheel hash smoke", "timestamp": null},
+    "IC-01": {"state": "pending", "evidence": null, "rerun": "live same-session offered path Read", "timestamp": null},
+    "IC-02": {"state": "pending", "evidence": null, "rerun": "issue evidence and official OpenSpec archive", "timestamp": null}
+  }
+}

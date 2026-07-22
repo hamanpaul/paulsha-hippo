@@ -236,7 +236,7 @@ def test_sanitizer_failure_keeps_raw_queue_and_writes_no_derived_artifact(tmp_pa
 
 
 def test_frontmatter_uses_title_but_conversation_keeps_all_outcomes():
-    session = _payload(session_title="specific title", title_source="gemma4")
+    session = _payload(session_title="specific title", title_source="external-agent")
 
     markdown = render_markdown(session, project="paulsha-hippo")
 

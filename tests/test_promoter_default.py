@@ -14,8 +14,7 @@ from paulsha_hippo.atomizer.promoter import IdentityPromoter
 
 class PromoterDefaultTests(unittest.TestCase):
     def test_shipped_config_default_promoter_is_llm(self):
-        # override_path=None 停用 ~/.config/paulshaclaw/atomizer.override.yaml，
-        # 只驗 repo 內建 atomizer.yaml（唯一實際生效的預設來源）。
+        # override_path=None 只驗 repo 內建 atomizer.yaml 模板。
         cfg, _ = atomizer_config.load_config(override_path=None)
         self.assertEqual(cfg.default_promoter, "llm")
 
@@ -23,7 +22,7 @@ class PromoterDefaultTests(unittest.TestCase):
         # 鎖 atomizer/cli.py:73 `args.promoter or config.default_promoter`：
         # 未帶 --promoter（None）不得再落 IdentityPromoter。
         cfg, _ = atomizer_config.load_config(override_path=None)
-        args = argparse.Namespace(promoter=None, agent_command=None)
+        args = argparse.Namespace(promoter=None)
         with TemporaryDirectory() as tmp:
             promoter = atomizer_cli._build_promoter(args, cfg, Path(tmp))
         self.assertIsInstance(promoter, LLMPromoter)
@@ -32,7 +31,7 @@ class PromoterDefaultTests(unittest.TestCase):
     def test_explicit_identity_flag_still_honored(self):
         # identity 保留為顯式選項（測試/離線 deterministic 用）。
         cfg, _ = atomizer_config.load_config(override_path=None)
-        args = argparse.Namespace(promoter="identity", agent_command=None)
+        args = argparse.Namespace(promoter="identity")
         with TemporaryDirectory() as tmp:
             promoter = atomizer_cli._build_promoter(args, cfg, Path(tmp))
         self.assertIsInstance(promoter, IdentityPromoter)

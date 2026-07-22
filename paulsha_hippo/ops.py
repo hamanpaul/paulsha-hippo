@@ -139,15 +139,9 @@ def _commit_init_atomic(cfg: Path, cfg_body: str,
         os.close(lock_fd)
 
 
-def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
-             api_key_env: str | None, model: str | None, assume_yes: bool) -> int:
-    """產生 ~/.config/paulsha-hippo/config.yaml 與 atomizer override（backend preset）。
-
-    G3「先驗證再選路」：所有 backend 參數與 executable 驗證、config／override 完整
-    內容一律「在動任何檔案之前」完成；任一驗證失敗即回非零，絕不建立或修改任一
-    設定檔——避免留下「宣告 claude-headless 卻缺 override」的半初始化不一致設定，
-    使後續 doctor/dream 失敗或誤 park。通過後才以暫存檔＋atomic replace 一次性提交。
-    """
+def run_init(*, memory_root: str | None, backend: str, model: str | None,
+             assume_yes: bool) -> int:
+    """產生完整 canonical ``~/.config/paulsha-hippo/config.yaml``。"""
     preset = backends.PRESETS.get(backend)
     if preset is None:
         print(f"init: 不支援的 backend: {backend}（可選 {', '.join(_BACKENDS)}）", file=sys.stderr)
@@ -157,68 +151,63 @@ def run_init(*, memory_root: str | None, backend: str, base_url: str | None,
         return 2
     root = memory_root or str(paths.memory_root())
 
-    # --- 先驗證＋生成完整內容（純字串，不碰檔案系統） ---
-    cfg_body = (
-        f"memory_root: {root}\n"
-        "distiller:\n"
-        f"  backend: {backend}\n"
-        + (f"  base_url: {base_url}\n" if base_url else "")
-        + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
-        + (f"  model: {model}\n" if model else "")
-    )
-
-    # backend preset → paulshaclaw 相容 atomizer override（load_config 既有掛點）。
-    # PR-D Task 3：泛化舊版僅 claude-headless 特判的絕對路徑化——任何 registry
-    # preset 只要有非空 argv_template（claude/codex/copilot-headless……）都走同一條
-    # resolve_backend_argv 路徑，取代先前 codex/copilot-headless 誤落 custom-argv
-    # 分支、init 不寫 override 的缺口。argv token 以 json.dumps 加引號輸出（合法
-    # YAML double-quoted scalar），路徑含空白也安全。
-    if backend == "openai-compatible":
-        if not base_url:
-            print("init: openai-compatible 需要 --base-url", file=sys.stderr)
-            return 2
-        override_body: str | None = (
-            "schema_version: \"1\"\n"
-            "agent_exec:\n"
-            "  backend: openai-compatible\n"
-            f"  base_url: {base_url}\n"
-            + (f"  api_key_env: {api_key_env}\n" if api_key_env else "")
-            + (f"  model: {model}\n" if model else "")
-        )
-    elif preset.argv_template:
+    # Validate the requested external executable before touching either config
+    # surface.  The executable remains external; Hippo stores no auth material.
+    resolved_preset_argv: list[str] | None = None
+    if preset.argv_template:
         try:
-            argv = resolve_backend_argv(list(preset.argv_template))
+            resolved_preset_argv = resolve_backend_argv(list(preset.argv_template))
         except BackendUnavailableError as exc:
-            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend openai-compatible/custom-argv）",
+            print(f"init: {exc}（請先安裝 {backend} CLI，或改用 --backend custom-argv）",
                   file=sys.stderr)
             return 2
-        command_lines = "".join(
-            f"    - {json.dumps(token, ensure_ascii=False)}\n" for token in argv
-        )
-        override_body = (
-            "schema_version: \"1\"\n"
-            "agent_exec:\n"
-            "  command:\n"
-            f"{command_lines}"
-            + (f"  model: {model}\n" if model else "")
-        )
-    else:  # custom-argv：不動 override（沿 atomizer.yaml 或既有 override）
-        override_body = None
+    try:
+        import yaml
 
-    # --- 驗證全過；持 transaction lock 以暫存檔全數落地後，再 atomic replace 一次性提交 ---
-    # 既有 config/override 刻意不覆寫（保留使用者設定）；未存在者才 stage。併發／rollback
-    # 硬化（#15 Codex high）全數收斂於 `_commit_init_atomic`：存在性檢查→commit→rollback
-    # 全程互斥，rollback 以 inode 指紋只移除本交易新建且未被替換者，絕不誤刪並行 writer
-    # 剛落地的有效 config，杜絕「宣告 claude-headless 卻缺 override」的半初始化殘留。
+        template = yaml.safe_load(
+            (_PKG_ROOT / "atomizer" / "atomizer.yaml").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        print(f"init: packaged canonical config 無法載入：{exc}", file=sys.stderr)
+        return 2
+    if not isinstance(template, dict):
+        print("init: packaged canonical config root 不是 mapping", file=sys.stderr)
+        return 2
+    profile_map = {
+        "claude-headless": "claude", "codex-headless": "codex",
+        "copilot-headless": "cg", "agy-headless": "agy",
+        "cg-headless": "cg", "co-gem-headless": "co-gem",
+        "claude-gem-headless": "claude-gem", "custom-argv": "claude",
+    }
+    configured_profile = profile_map.get(backend, "claude")
+    template["memory_root"] = root
+    external = template.setdefault("external_agents", {})
+    if not isinstance(external, dict):
+        print("init: packaged external_agents 不是 mapping", file=sys.stderr)
+        return 2
+    external.pop("selected_profile", None)
+    external["ownership"] = "external-cli"
+    profiles = external.get("profiles", [])
+    if isinstance(profiles, list):
+        for profile in profiles:
+            if isinstance(profile, dict) and profile.get("id") == configured_profile:
+                if model:
+                    profile["model"] = model
+                    profile["supported_models"] = [model]
+                if resolved_preset_argv:
+                    argv = profile.get("argv")
+                    if isinstance(argv, list) and argv:
+                        argv[0] = resolved_preset_argv[0]
+                break
+    cfg_body = yaml.safe_dump(template, sort_keys=False, allow_unicode=True)
+
     cfg = paths.hippo_config_root() / "config.yaml"
     override = paths.config_path("atomizer.override.yaml")
-    committed = _commit_init_atomic(cfg, cfg_body, override, override_body)
+    committed = _commit_init_atomic(cfg, cfg_body, override, None)
 
     print(f"memory_root: {root}")
-    print(f"distiller backend: {backend}")
+    print(f"configured external agent profile: {configured_profile}")
     print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
-    if override_body is not None:
-        print(f"atomizer override: {override}{'' if override in committed else '（既存，未覆寫）'}")
     print("下一步：hippo install hooks && hippo install service --enable")
     return 0
 
@@ -386,7 +375,78 @@ def _check_timer_unit_drift() -> tuple[bool, list[str]] | None:
     return len(messages) > 0, messages
 
 
+def _surface_build_attestation(
+    identity: dict[str, object], memory_root: Path, *, home: Path | None = None
+) -> tuple[list[str], bool]:
+    """Compare Hippo-owned hook/service receipts with the active package."""
+    expected_version = str(identity.get("version") or "unknown")
+    expected_commit = str(identity.get("build_commit") or "unknown")
+    strict = expected_commit != "unknown"
+    lines: list[str] = []
+    failed = False
+
+    receipt_path = memory_root / "hooks" / ".hippo-build.json"
+    if receipt_path.is_file():
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            lines.append(f"FAIL hooks build receipt 無法解析：{receipt_path}")
+            failed = True
+        else:
+            mismatches = []
+            if not isinstance(receipt, dict) or receipt.get("schema_version") != "1":
+                mismatches.append("schema")
+            if receipt.get("version") != expected_version:
+                mismatches.append("version")
+            if expected_commit != "unknown" and receipt.get("build_commit") != expected_commit:
+                mismatches.append("commit")
+            if receipt.get("python") != sys.executable:
+                mismatches.append("python")
+            if mismatches:
+                prefix = "FAIL" if strict else "-"
+                lines.append(prefix + " hooks build mismatch：" + ",".join(mismatches))
+                failed = failed or strict
+            else:
+                lines.append("- hooks build attestation：✓")
+    else:
+        lines.append("- hooks build attestation：未安裝 receipt")
+
+    unit = (home or Path.home()) / _UNIT_DIR_NAME / "paulsha-hippo-dream.service"
+    if unit.is_file():
+        try:
+            text = unit.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            lines.append(f"FAIL service unit 無法讀取：{unit}")
+            failed = True
+        else:
+            declared_version = re.search(
+                r"^Environment=HIPPO_BUILD_VERSION=(\S+)$", text, re.MULTILINE
+            )
+            declared_commit = re.search(
+                r"^Environment=HIPPO_BUILD_COMMIT=(\S+)$", text, re.MULTILINE
+            )
+            mismatch = (
+                declared_version is None
+                or declared_version.group(1) != expected_version
+                or (
+                    expected_commit != "unknown"
+                    and (declared_commit is None or declared_commit.group(1) != expected_commit)
+                )
+                or f"ExecStart={sys.executable} " not in text
+            )
+            if mismatch:
+                prefix = "FAIL" if strict else "-"
+                lines.append(prefix + " service build mismatch：version/commit/interpreter")
+                failed = failed or strict
+            else:
+                lines.append("- service build attestation：✓")
+    else:
+        lines.append("- service build attestation：unit 未安裝")
+    return lines, failed
+
+
 def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
+               probe_profiles: bool = False,
                proc_root: str | Path = "/proc") -> int:
     """健檢。backend 檢查預設為解析級（快速、免費、無副作用——shutil.which／
     is_file+X_OK，不喚起 backend）；live smoke probe（實際喚起 backend 一次，
@@ -394,13 +454,23 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     `HIPPO_DOCTOR_LIVE_PROBE=1` 時執行。跨批次呼叫端（PR-C/PR-D）見
     `_probe_backend_service_effective` 的契約說明。"""
     if fix_backend:
-        code, message = _fix_backend_override()
+        code, message = _fix_backend_config()
         print(message, file=sys.stderr if code else sys.stdout)
         if code:
             return code
     report = paths.resolution_report()
     failed = False
     print("# hippo doctor")
+    from .build_info import build_identity
+
+    # Doctor's parse-only path must not launch even a local git subprocess; a
+    # service-effective backend probe is the only opt-in process boundary.
+    identity = build_identity(resolve_git=False)
+    print(f"- build version: {identity['version']}")
+    print(f"- build commit: {identity['build_commit']}")
+    if identity.get("source_dirty"):
+        print("FAIL build source：wheel 來自 dirty checkout", file=sys.stderr)
+        failed = True
     for key, value in report.items():
         if key == "conflict":
             continue
@@ -412,6 +482,12 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
     memory_root = paths.memory_root()
     hooks_dir = memory_root / "hooks"
     print(f"- hooks 部署：{'✓ ' + str(hooks_dir) if hooks_dir.is_dir() else '未部署（hippo install hooks）'}")
+    attestation_lines, attestation_failed = _surface_build_attestation(
+        identity, memory_root
+    )
+    for line in attestation_lines:
+        print(line, file=sys.stderr if line.startswith("FAIL") else sys.stdout)
+    failed = failed or attestation_failed
 
     if _systemd_user_available():
         state = subprocess.run(
@@ -461,6 +537,12 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
             print(f"  - {result.preset}: ✓ {result.executable}（{result.detail}）")
         else:
             print(f"  - {result.preset}: ✗ {result.detail}")
+
+    profile_lines, profile_failed = _probe_external_profiles(live=probe_profiles)
+    print("- external agent profiles:")
+    for line in profile_lines:
+        print(f"  - {line}")
+    failed = failed or profile_failed
 
     probe_line, probe_failed = _probe_backend_service_effective(live=live)
     if probe_failed:
@@ -536,14 +618,14 @@ def _probe_environment() -> tuple[dict[str, str], bool]:
     EnvironmentFile，manager env 即 service-effective env——與 systemd-run
     transient unit 所見等價，且 timeout／判定行為留在本程序內可控（systemd-run
     中途被殺會殘留 transient unit），CI 亦可決定性測試。無 user bus →
-    fallback 現行近似（os.environ + 保守 PATH），呼叫端必須在輸出標示
-    「近似，非 service-effective」。"""
+    fallback 只保留保守 PATH 解析，呼叫端必須在輸出標示「近似，非
+    service-effective」。"""
+    from .agent_profiles import child_environment
+
     manager_env = _service_manager_environment()
     if manager_env is not None:
-        env = dict(manager_env)
-        env.setdefault("PATH", _FALLBACK_SERVICE_PATH)
-        return env, True
-    return {**os.environ, "PATH": _FALLBACK_SERVICE_PATH}, False
+        return child_environment({"PATH": manager_env.get("PATH", _FALLBACK_SERVICE_PATH)}), True
+    return child_environment({"PATH": _FALLBACK_SERVICE_PATH}), False
 
 
 _PROBE_TIMEOUT_SECS = 60
@@ -562,6 +644,54 @@ def _live_probe_env_enabled() -> bool:
     }
 
 
+def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
+    """Report canonical tier/profile contract in the service-effective env."""
+    from paulsha_hippo.atomizer import config as atomizer_config
+
+    try:
+        config, _config_hash = atomizer_config.load_config()
+    except Exception as exc:
+        return [f"FAIL config 無法載入：{exc}"], True
+    profiles = tuple(getattr(config, "external_profiles", ()) or ())
+    if not profiles:
+        return ["- canonical external profile 未設定"], False
+    probe_env, service_effective = _probe_environment()
+    service_path = probe_env.get("PATH", _FALLBACK_SERVICE_PATH)
+    lines: list[str] = []
+    failed = False
+    for profile in profiles:
+        label = (
+            f"tier={profile.tier} priority={profile.priority} id={profile.id} "
+            f"enabled={str(profile.enabled).lower()} model={profile.model} "
+            f"effort={profile.effort} command={profile.command_fingerprint()[:12]}"
+        )
+        eligible, reason = profile.eligible(
+            task_class="atomization", path=service_path
+        )
+        if not eligible:
+            lines.append(f"{label} ineligible={reason}")
+            # Disabled/non-Dream profiles are intentionally non-blocking.  An
+            # enabled Dream profile that cannot execute is a release blocker.
+            if live and profile.enabled and "atomization" in profile.task_classes:
+                failed = True
+            continue
+        if not live:
+            lines.append(f"{label} eligible（live probe pending）")
+            continue
+        command = list(profile.render_argv())
+        if not Path(command[0]).is_absolute():
+            resolved = shutil.which(command[0], path=service_path)
+            if resolved is None:
+                lines.append(f"{label} FAIL executable")
+                failed = True
+                continue
+            command[0] = resolved
+        ok, detail = _exec_probe_service_effective(command, probe_env)
+        lines.append(f"{label} {'✓' if ok else 'FAIL'} {detail}")
+        failed = failed or not ok
+    return lines, failed
+
+
 def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
                                   *, runner=subprocess.run) -> tuple[bool, str]:
     """以 probe_env（見 `_probe_environment`）對 backend argv 送 bounded smoke prompt。
@@ -575,16 +705,20 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈、
     輸出非 UTF-8 位元組令 text=True decode 失敗）一律 FAIL。
 
-    Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（manager env
-    或標示近似的 fallback），本函式不再自行繼承 os.environ——僅疊加
-    HIPPO_SELF_SESSION=1。
+    Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（僅用來
+    決定 service-effective PATH），但真正傳給外部 CLI 的環境仍收斂到
+    `agent_profiles.child_environment()` 的固定最小 non-secret allowlist。
+    Hippo 不會把 manager/shell 的 credential 值轉交給子程序；登入與 OAuth/API
+    key 必須由外部 launcher/CLI 自己管理。
 
     #7：probe 實跑的是 configured backend argv（預設 `claude -p`），必須比照
     agent_exec.AgentExecClient.run 注入 HIPPO_SELF_SESSION=1——使用者已安裝的
     SessionEnd/PreCompact hooks 讀到此標記即早退，否則 doctor 探測會被當成
     真實 session 寫回 queue，重新引入遞迴自捕捉／queue 污染。
     """
-    env = {**probe_env, "HIPPO_SELF_SESSION": "1"}
+    from .agent_profiles import child_environment
+
+    env = child_environment({"PATH": probe_env.get("PATH", _FALLBACK_SERVICE_PATH)})
     try:
         completed = runner(
             command,
@@ -619,57 +753,16 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     return True, "smoke prompt exit 0、回應非空"
 
 
-def _probe_openai_compatible(cfg, probe_env: dict[str, str],
-                             *, env_label: str) -> tuple[str, bool]:
-    """openai-compatible 檔位的實際 probe：bounded smoke prompt 打 /v1/chat/completions。
-
-    先前僅回「probe 由 PR-D preset 接手」即綠燈——恢復 gate 拿不到真實可用性
-    判定（端點掛掉／認證失效照樣 exit 0）。改為 fail-closed：端點不可達、HTTP
-    錯誤、timeout、回應缺 choices[0].message.content 或內容為空（HttpAgentClient
-    對以上一律拋例外）→ FAIL。max_tokens／timeout 均受限，probe 不做實際工作。
-
-    Codex 複驗 B1：API key（`api_key_env`）從注入的 probe_env 解析，而非 doctor
-    所在互動 shell 的 os.environ——否則只 export 在 shell 的 key 會令 probe
-    誤判健康，排程的 dream service 實際仍認證失敗。"""
-    from paulsha_hippo.atomizer.agent_exec import HttpAgentClient
-
-    client = HttpAgentClient(
-        cfg.agent_exec_base_url,
-        cfg.agent_exec_model,
-        api_key_env=cfg.agent_exec_api_key_env or None,
-        timeout=_PROBE_TIMEOUT_SECS,
-        max_tokens=_PROBE_MAX_TOKENS,
-        env=probe_env,
-    )
-    try:
-        client.run(_PROBE_SMOKE_PROMPT)
-    except Exception as exc:  # noqa: BLE001 —probe fail-closed：任何失敗都判 FAIL
-        detail = " ".join(str(exc).split())[:200]
-        return (
-            f"FAIL distiller backend：openai-compatible（{cfg.agent_exec_base_url}）"
-            f"{env_label} smoke probe 失敗：{detail}",
-            True,
-        )
-    return (
-        f"- distiller backend：✓ openai-compatible（{cfg.agent_exec_base_url}；"
-        f"{env_label} smoke probe 有非空回應）",
-        False,
-    )
-
-
 def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     """以 service-effective 環境檢查 atomizer backend。回傳 (報告行, is_failure)。
 
     兩檔行為（跨批次共享契約 6——PR-C/PR-D 對 `run_doctor` 的呼叫端必讀）：
-    - `live=False`（裸 `hippo doctor` 預設）：純解析檢查——argv backend 以
-      service-effective PATH `shutil.which`（絕對路徑則 is_file+X_OK）；
-      openai-compatible 只驗 config 可載入、不打端點。快速、免費、無副作用，
-      不喚起 backend、不產生 API 成本。
+    - `live=False`（裸 `hippo doctor` 預設）：純解析檢查——external CLI argv
+      以 service-effective PATH `shutil.which`（絕對路徑則 is_file+X_OK）。
+      快速、免費、無副作用，不喚起 backend。
     - `live=True`（`--fix-backend`／`--probe-live`／`HIPPO_DOCTOR_LIVE_PROBE=1`）：
       對 configured backend 真送 bounded smoke prompt——argv 走真實 exec
-      （`_exec_probe_service_effective`，60s timeout），openai-compatible 以
-      HttpAgentClient 直打 `/v1/chat/completions`；fail-closed（spec §4.1
-      恢復序列 gate「實際喚起 backend 一次」語意）。
+      （`_exec_probe_service_effective`，60s timeout）；fail-closed。
 
     dream service template 固定 --promoter llm，故 backend 檢查不過一律 FAIL，
     不因 config 的 default promoter 軟化。probe 環境經 `_probe_environment()`
@@ -684,15 +777,21 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     probe_env, service_effective = _probe_environment()
     env_label = ("service-effective" if service_effective
                  else "近似，非 service-effective（無 systemd user bus）")
-    if cfg.agent_exec_backend == "openai-compatible":
-        if not live:
-            return (
-                f"- distiller backend：openai-compatible（{cfg.agent_exec_base_url}；"
-                "config 可載入；即時 smoke probe 需 --probe-live／--fix-backend）",
-                False,
-            )
-        return _probe_openai_compatible(cfg, probe_env, env_label=env_label)
-    command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
+    profiles = tuple(getattr(cfg, "external_profiles", ()) or ())
+    selected = next(
+        (
+            profile
+            for profile in sorted(profiles, key=lambda item: (item.tier, item.priority, item.id))
+            if profile.enabled and "atomization" in profile.task_classes
+        ),
+        None,
+    )
+    if selected is not None:
+        command = list(selected.render_argv())
+    else:
+        # Compatibility for isolated legacy test doubles only.  Canonical
+        # runtime config always carries external_profiles.
+        command = list(atomizer_config.resolve_command_argv(cfg.agent_exec_command))
     argv0 = command[0]
     if not Path(argv0).is_absolute():
         resolved = shutil.which(argv0, path=probe_env.get("PATH", _FALLBACK_SERVICE_PATH))
@@ -728,68 +827,70 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
     )
 
 
-_COMMAND_LIST_HEAD_RE = re.compile(r"^(\s*-\s+)(\S+)\s*$")
-
-
-def _rewrite_override_command_head(text: str, bare: str, resolved: str) -> tuple[str, bool]:
-    """單點改寫：agent_exec.command 清單第一項 == bare 的 token 換成 resolved。
-
-    只處理 init 產生的 override 結構（`command:` 下第一個 `- <token>`）；
-    結構對不上回 (原文, False)，交上層報「需人工」。"""
-    lines = text.splitlines(keepends=True)
-    in_command = False
-    for index, line in enumerate(lines):
-        if line.strip() == "command:":
-            in_command = True
-            continue
-        if in_command:
-            match = _COMMAND_LIST_HEAD_RE.match(line.rstrip("\n"))
-            if match and match.group(2) == bare:
-                newline = "\n" if line.endswith("\n") else ""
-                lines[index] = f"{match.group(1)}{resolved}{newline}"
-                return "".join(lines), True
-            return "".join(lines), False
-    return "".join(lines), False
-
-
-def _fix_backend_override() -> tuple[int, str]:
-    """冪等 migration（#15 既有部署救援）：override 內 service-effective 解析不到的
-    裸 backend 命令 → 備份原檔 → 改寫為絕對路徑。回傳 (exit_code, 訊息)。"""
+def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
+    """把 canonical config 中 enabled profile 的 argv[0] 固定為可執行絕對路徑。"""
     from paulsha_hippo.atomizer import config as atomizer_config
 
-    override = paths.config_path("atomizer.override.yaml")
-    if not override.is_file():
-        return 0, f"fix-backend: override 不存在（{override}），無可遷移"
+    canonical = paths.atomizer_config_path()
+    if not canonical.is_file():
+        return 0, f"fix-backend: canonical config 不存在（{canonical}），無可遷移"
     try:
-        cfg, _ = atomizer_config.load_config()
+        atomizer_config.load_config(override_path=None)
+        import yaml
+
+        document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
     except Exception as exc:
         return 1, f"fix-backend: config 無法載入：{exc}"
-    if cfg.agent_exec_backend == "openai-compatible":
-        return 0, "fix-backend: openai-compatible backend 無 argv，無可遷移"
-    command = atomizer_config.resolve_command_argv(cfg.agent_exec_command)
-    argv0 = command[0]
-    if Path(argv0).is_absolute():
-        return 0, f"fix-backend: argv[0] 已是絕對路徑（{argv0}），無可遷移"
-    if shutil.which(argv0, path=_service_effective_path_env()) is not None:
-        return 0, f"fix-backend: {argv0} 在 service-effective PATH 已可解析，無可遷移"
+    if not isinstance(document, dict):
+        return 1, "fix-backend: canonical config root 不是 mapping"
+    external = document.get("external_agents")
+    profiles = external.get("profiles") if isinstance(external, dict) else None
+    if not isinstance(profiles, list):
+        return 1, "fix-backend: external_agents.profiles 不是 list"
+
+    changes: list[tuple[str, str, str]] = []
+    for profile in profiles:
+        if not isinstance(profile, dict) or profile.get("enabled", True) is not True:
+            continue
+        profile_id = str(profile.get("id", "unknown"))
+        argv = profile.get("argv")
+        if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
+            return 1, f"fix-backend: profile {profile_id} argv 無效"
+        argv0 = argv[0]
+        if Path(argv0).is_absolute() or shutil.which(
+            argv0, path=_service_effective_path_env()
+        ) is not None:
+            continue
+        try:
+            resolved = resolve_backend_argv([argv0])[0]
+        except BackendUnavailableError as exc:
+            return 1, f"fix-backend: profile {profile_id}: {exc}"
+        argv[0] = resolved
+        changes.append((profile_id, argv0, resolved))
+    if not changes:
+        return 0, "fix-backend: enabled profiles 已為 service-effective，無可遷移"
+
+    backup_path = canonical.with_name(canonical.name + ".bak")
+    if backup and not backup_path.exists():
+        shutil.copy2(canonical, backup_path)
+    rendered = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+    staged = _stage_temp(canonical, rendered)
     try:
-        resolved = resolve_backend_argv([argv0])[0]
-    except BackendUnavailableError as exc:
-        return 1, f"fix-backend: {exc}（互動環境也解析不到，請先安裝 backend）"
-    text = override.read_text(encoding="utf-8")
-    new_text, replaced = _rewrite_override_command_head(text, argv0, resolved)
-    if not replaced:
-        return 1, (f"fix-backend: override 未含 agent_exec.command 首項 {argv0!r}，"
-                   "無法自動改寫（請手動修改或重跑 hippo init）")
-    backup = override.with_name(override.name + ".bak")
-    shutil.copy2(override, backup)
-    override.write_text(new_text, encoding="utf-8")
-    return 0, f"fix-backend: {argv0} → {resolved}（備份：{backup}）"
+        os.replace(staged, canonical)
+    finally:
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+    summary = ", ".join(f"{profile_id}:{before}→{after}" for profile_id, before, after in changes)
+    suffix = f"（備份：{backup_path}）" if backup else "（由 install transaction snapshot 保護）"
+    return 0, f"fix-backend: {summary}{suffix}"
 
 
 # ---------------------------------------------------------------- install hooks
 
 def run_install_hooks(*, memory_root: str | None, repo_root: str | None) -> int:
+    resolved_memory_root = memory_root or str(paths.memory_root())
     script = _PKG_ROOT / "hooks" / "install.sh"
     argv = [
         "bash", str(script),
@@ -798,8 +899,31 @@ def run_install_hooks(*, memory_root: str | None, repo_root: str | None) -> int:
     ]
     # 一律經單一權威 resolver（#2 對抗審查 F3）：未給旗標時用 paths.memory_root()，
     # 避免 install.sh 落回自身預設造成 doctor/CLI 與 hooks 寫入分家。
-    argv += ["--memory-root", memory_root or str(paths.memory_root())]
+    argv += ["--memory-root", resolved_memory_root]
     completed = subprocess.run(argv)
+    hooks_dir = Path(resolved_memory_root) / "hooks"
+    if completed.returncode == 0 and hooks_dir.is_dir():
+        from .build_info import build_identity
+
+        identity = build_identity(resolve_git=False)
+        receipt = {
+            "schema_version": "1",
+            "version": identity["version"],
+            "build_commit": identity["build_commit"],
+            "python": sys.executable,
+        }
+        receipt_path = hooks_dir / ".hippo-build.json"
+        staged = _stage_temp(
+            receipt_path, json.dumps(receipt, sort_keys=True) + "\n"
+        )
+        try:
+            os.chmod(staged, 0o600)
+            os.replace(staged, receipt_path)
+        finally:
+            try:
+                os.unlink(staged)
+            except FileNotFoundError:
+                pass
     return completed.returncode
 
 
@@ -818,7 +942,10 @@ _UNIT_DIR_NAME = ".config/systemd/user"
 
 
 def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
+    from .build_info import build_identity
+
     home = Path(home_dir).expanduser() if home_dir else Path.home()
+    identity = build_identity(resolve_git=False)
     src_dir = _PKG_ROOT / "dream" / "systemd"
     unit_dir = home / _UNIT_DIR_NAME
     if not _systemd_user_available():
@@ -838,6 +965,12 @@ def run_install_service(*, enable: bool, home_dir: str | None = None) -> int:
         # （ModuleNotFoundError → 服務啟動即 exit 1）。改用 sys.executable 指向
         # 實際安裝環境的 python，確保 systemd 服務能載入套件。
         text = text.replace("/usr/bin/env python3", sys.executable)
+        if dst_name.endswith(".service"):
+            attestation = (
+                f"Environment=HIPPO_BUILD_VERSION={identity['version']}\n"
+                f"Environment=HIPPO_BUILD_COMMIT={identity['build_commit']}\n"
+            )
+            text = text.replace("[Service]\n", "[Service]\n" + attestation, 1)
         dst = unit_dir / dst_name
         dst.write_text(text, encoding="utf-8")
         written.append(str(dst))

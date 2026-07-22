@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import List
 
-from ..atomizer.config import sanitize_project_component
+from ..atomizer.config import project_directory_key, sanitize_project_component
 from ..ledger import lifecycle
 from ..ledger import retrieval_set
 from ..moc import frontmatter_io as fio
@@ -85,23 +85,36 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
 
     # project is rich metadata (may contain '/'); sanitize for the on-disk paths,
     # matching where moc_builder/atomizer actually write per-project MOC and slices.
-    safe_project = sanitize_project_component(project)
+    storage_keys = [project_directory_key(project)]
+    legacy_key = sanitize_project_component(project)
+    if legacy_key not in storage_keys:
+        storage_keys.append(legacy_key)
 
     # Read MOC
-    moc_path = memory_root / _KNOWLEDGE_LAYER / f"{safe_project}-moc.md"
     moc_body = None
-    if moc_path.exists():
+    for storage_key in storage_keys:
+        moc_path = memory_root / _KNOWLEDGE_LAYER / f"{storage_key}-moc.md"
+        if not moc_path.exists():
+            continue
         try:
             _, body = fio.read(moc_path.read_text(encoding="utf-8"))
             moc_body = body
         except Exception:
             moc_body = None
+        if moc_body is not None:
+            break
 
     # Discover candidate slice files under <knowledge-layer>/<project>
-    kdir = memory_root / _KNOWLEDGE_LAYER / safe_project
     slices: List[dict] = []
-    if kdir.exists():
+    seen_paths: set[Path] = set()
+    for storage_key in storage_keys:
+        kdir = memory_root / _KNOWLEDGE_LAYER / storage_key
+        if not kdir.exists():
+            continue
         for path in sorted(kdir.rglob("*.md")):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
             try:
                 fm, body_offset = _read_frontmatter_only(path)
                 body_bytes = max(0, path.stat().st_size - body_offset)
@@ -331,13 +344,17 @@ def build_orientation(memory_root, project: str, *, retrieval_hint: str | None =
     不假裝 orientation 等同 task retrieval。
     """
     from pathlib import Path as _Path
-    from ..atomizer.config import sanitize_project_component
-    safe = sanitize_project_component(project)
-    pdir = _Path(memory_root) / "knowledge" / safe
+    from ..atomizer.config import project_directory_key, sanitize_project_component
+    keys = [project_directory_key(project)]
+    legacy_key = sanitize_project_component(project)
+    if legacy_key not in keys:
+        keys.append(legacy_key)
     n = 0
-    if pdir.exists():
-        # rglob for parity with build_index's knowledge walk (count is approximate, "約").
-        n = sum(1 for p in pdir.rglob("*.md") if not p.name.endswith("-moc.md"))
+    for key in keys:
+        pdir = _Path(memory_root) / "knowledge" / key
+        if pdir.exists():
+            # rglob for parity with build_index's knowledge walk (count is approximate, "約").
+            n += sum(1 for p in pdir.rglob("*.md") if not p.name.endswith("-moc.md"))
     if n == 0:
         return ""
     hint = retrieval_hint if retrieval_hint is not None else _ORIENTATION_RETRIEVAL_HINT

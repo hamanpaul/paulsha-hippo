@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from paulsha_hippo.agent_profiles import AgentProfile, ExternalAgentRouter
 from paulsha_hippo.atomizer import agent_exec
 from paulsha_hippo.atomizer import llm_promoter
 from paulsha_hippo.atomizer.agent_exec import FakeAgentClient
@@ -253,6 +256,85 @@ class LLMPromoterTests(unittest.TestCase):
             promoter._run_chunk("second", [_frag(0)], 1)
 
         self.assertEqual(promoter.last_raw_output, "")
+
+    def test_router_session_schema_failure_restarts_all_chunks_and_persists_attempts(self):
+        def profile(profile_id: str, tier: int) -> AgentProfile:
+            return AgentProfile.from_mapping(
+                {
+                    "id": profile_id,
+                    "tier": tier,
+                    "priority": 1,
+                    "traits": ["test"],
+                    "task_classes": ["atomization"],
+                    "model": "test-model",
+                    "effort": "medium",
+                    "supported_efforts": ["medium"],
+                    "argv": [sys.executable, "-c", "pass"],
+                }
+            )
+
+        valid_0 = (
+            '[{"title":"specific finding zero","artifact_kind":"report",'
+            '"project":"paulshaclaw","tags":[],"body":"body zero",'
+            '"source_fragment_indices":[0],"relations":[]}]'
+        )
+        valid_1 = (
+            '[{"title":"specific finding one","artifact_kind":"report",'
+            '"project":"paulshaclaw","tags":[],"body":"body one",'
+            '"source_fragment_indices":[1],"relations":[]}]'
+        )
+        calls: list[tuple[str, str]] = []
+
+        def execute(agent, prompt, attempt):
+            calls.append((agent.id, prompt))
+            if agent.id == "first" and prompt == "chunk-1":
+                return "not schema", "", 0
+            return valid_0 if prompt == "chunk-0" else valid_1, "", 0
+
+        parts = []
+        for index in (0, 1):
+            fragment = _frag(index)
+            parts.append(
+                llm_promoter.budget.FragmentPart(
+                    original_fragment_index=index,
+                    part_index=1,
+                    part_count=1,
+                    body=fragment.body,
+                    fragment=fragment,
+                )
+            )
+        chunks = [
+            llm_promoter.budget.PromptChunk(
+                index=index,
+                count=2,
+                prompt=f"chunk-{index}",
+                estimated_tokens=1,
+                parts=(parts[index],),
+            )
+            for index in (0, 1)
+        ]
+        router = ExternalAgentRouter(
+            (profile("first", 1), profile("second", 2)),
+            executor=execute,
+        )
+        promoter = llm_promoter.LLMPromoter(
+            router,
+            skill_text="SKILL",
+            known_projects=["paulshaclaw"],
+        )
+        with mock.patch.object(llm_promoter.budget, "pack_prompt_chunks", return_value=chunks):
+            slices = promoter.promote([_frag(0), _frag(1)], CFG)
+
+        self.assertEqual(len(slices), 2)
+        self.assertEqual(calls, [
+            ("first", "chunk-0"),
+            ("first", "chunk-1"),
+            ("second", "chunk-0"),
+            ("second", "chunk-1"),
+        ])
+        self.assertEqual(promoter.last_provenance["profile_id"], "second")
+        self.assertEqual(len(promoter.last_provenance["attempts"]), 2)
+        self.assertEqual(promoter.last_provenance["attempts"][0]["failure_category"], "invalid_output")
 
 
 if __name__ == "__main__":

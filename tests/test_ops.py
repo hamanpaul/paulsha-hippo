@@ -6,17 +6,14 @@ import json
 import multiprocessing
 import os
 import sys
-import threading
 import unittest
-from contextlib import redirect_stdout
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
 from paulsha_hippo import ops, paths
-from paulsha_hippo.atomizer.agent_exec import AgentExecError, HttpAgentClient
 
 
 def _concurrent_init_worker(env, fail_second_replace, result_path):
@@ -36,8 +33,8 @@ def _concurrent_init_worker(env, fail_second_replace, result_path):
 
     def flaky(src, dst):
         calls["n"] += 1
-        if fail_second_replace and calls["n"] == 2:
-            raise OSError("injected second-replace failure (concurrent init)")
+        if fail_second_replace and calls["n"] == 1:
+            raise OSError("injected canonical-config commit failure")
         return real_replace(src, dst)
 
     try:
@@ -45,7 +42,7 @@ def _concurrent_init_worker(env, fail_second_replace, result_path):
              _mock.patch.object(_ops.os, "replace", side_effect=flaky):
             rc = _ops.run_init(
                 memory_root=None, backend="claude-headless",
-                base_url=None, api_key_env=None, model=None, assume_yes=True,
+                model=None, assume_yes=True,
             )
         outcome = f"ok:{rc}"
     except BaseException as exc:  # noqa: BLE001 — 交易失敗屬預期，記錄供父進程斷言
@@ -75,44 +72,18 @@ class InitConcurrencyTests(unittest.TestCase):
                     / "atomizer.override.yaml")
         return cfg, override
 
-    def test_rollback_spares_config_replaced_by_concurrent_writer(self):
-        # 決定性回歸（抓誤刪）：本交易 commit config 後、第二次 commit（override）失敗前，
-        # 模擬並行交易以自己的有效 config 替換同一路徑（inode 改變）。盲刪版 rollback 會
-        # unlink 該路徑而誤刪對方有效 config；硬化後 rollback 以 inode 佐證只移除本交易
-        # 所寫且未被替換者，對方 config 應完好保留。
+    def test_init_never_creates_legacy_override(self):
         with TemporaryDirectory() as tmp:
             cfg, override = self._paths(tmp)
-            foreign = ("memory_root: /foreign/valid\n"
-                       "distiller:\n  backend: custom-argv\n")
-            real_replace = os.replace
-            calls = {"n": 0}
-
-            def orchestrated_replace(src, dst):
-                calls["n"] += 1
-                if calls["n"] == 2:
-                    # 我方 config 已 commit 且被指紋化；此刻並行交易以有效 config 替換之
-                    cfg.parent.mkdir(parents=True, exist_ok=True)
-                    ftmp = cfg.parent / ".foreign.tmp"
-                    ftmp.write_text(foreign, encoding="utf-8")
-                    real_replace(str(ftmp), str(cfg))
-                    raise OSError("override commit fails after concurrent replace")
-                return real_replace(src, dst)
-
             with mock.patch.dict("os.environ", self._env(tmp)), \
-                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"), \
-                 mock.patch.object(ops.os, "replace", side_effect=orchestrated_replace):
-                with self.assertRaises(OSError):
-                    ops.run_init(
-                        memory_root=None, backend="claude-headless",
-                        base_url=None, api_key_env=None, model=None, assume_yes=True,
-                    )
-            # 併發交易寫入的有效 config 未被本交易 rollback 誤刪
-            self.assertTrue(cfg.exists(), "並行交易寫入的有效 config 不得被 rollback 誤刪")
-            self.assertEqual(cfg.read_text(encoding="utf-8"), foreign)
-            # 不殘留暫存檔（override 端本交易的 staged tmp 由 finally 清掉）
+                 mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
+                self.assertEqual(ops.run_init(
+                    memory_root=None, backend="claude-headless",
+                    model=None, assume_yes=True,
+                ), 0)
+            self.assertTrue(cfg.exists())
+            self.assertFalse(override.exists())
             self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
-            if override.parent.exists():
-                self.assertEqual(list(override.parent.glob("*.tmp")), [])
 
     def test_concurrent_init_second_commit_failure_keeps_valid_config(self):
         # 併發兩個 init（fork）：A 注入第二次 commit 失敗 → 其交易 rollback；B 正常寫入。
@@ -134,14 +105,11 @@ class InitConcurrencyTests(unittest.TestCase):
             self.assertFalse(pb.is_alive(), "worker B 逾時未結束")
             # 不變量：有效 config 存在（B 寫入），未被 A 的 rollback 誤刪
             self.assertTrue(cfg.exists(), "有效 config 不得被並行交易 rollback 誤刪")
-            self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
-            # 一致性：config 與 override 皆存在（B 成功寫入兩者），無「config 有／override 缺」
-            self.assertTrue(override.exists(), "不得留 config/override 不一致（override 缺）")
-            # PR-D Task 3：argv token 改以 json.dumps 加引號輸出（路徑含空白也安全），
-            # 以 yaml.safe_load 解析後比對結構，語意不變、不做未加引號的 substring 斷言。
+            self.assertFalse(override.exists())
             import yaml
-            override_data = yaml.safe_load(override.read_text(encoding="utf-8"))
-            self.assertEqual(override_data["agent_exec"]["command"][0], "/fake/bin/claude")
+            config_data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+            self.assertNotIn("selected_profile", config_data["external_agents"])
+            self.assertTrue(config_data["external_agents"]["profiles"])
             # 不殘留暫存檔
             self.assertEqual(list(cfg.parent.glob("*.tmp")), [])
             self.assertEqual(
@@ -151,7 +119,7 @@ class InitConcurrencyTests(unittest.TestCase):
 
 
 class InitTests(unittest.TestCase):
-    def test_init_claude_headless_writes_config_and_override(self):
+    def test_init_claude_headless_writes_complete_canonical_config_only(self):
         with TemporaryDirectory() as tmp:
             env = {
                 "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -163,40 +131,55 @@ class InitTests(unittest.TestCase):
                                    side_effect=lambda argv: ["/fake/abs/claude"] + list(argv[1:])):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
-                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 0)
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
-            self.assertIn("backend: claude-headless", cfg.read_text(encoding="utf-8"))
             import yaml
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+            self.assertNotIn("selected_profile", data["external_agents"])
+            self.assertTrue(data["external_agents"]["profiles"])
+            claude = next(
+                profile for profile in data["external_agents"]["profiles"]
+                if profile["id"] == "claude"
+            )
+            self.assertEqual(claude["argv"][0], "/fake/abs/claude")
+            self.assertEqual(data["memory_root"], f"{tmp}/memory")
             override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
-            data = yaml.safe_load(override.read_text(encoding="utf-8"))
-            self.assertEqual(str(data["schema_version"]), "1")
-            self.assertEqual(data["agent_exec"]["command"], ["/fake/abs/claude", "-p"])
+            self.assertFalse(override.exists())
 
-    def test_init_each_argv_preset_writes_registry_template(self):
+    def test_init_each_argv_preset_configures_canonical_profile(self):
         from paulsha_hippo import backends
-        for name in ("claude-headless", "codex-headless", "copilot-headless"):
+        for name in ("claude-headless", "codex-headless", "agy-headless"):
             with self.subTest(backend=name), TemporaryDirectory() as tmp:
                 env = {
                     "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
                     "PSC_CONFIG_ROOT": f"{tmp}/legacy/.config/paulshaclaw",
                     "HIPPO_MEMORY_ROOT": f"{tmp}/memory",
                 }
-                template = backends.PRESETS[name].argv_template
                 with mock.patch.dict("os.environ", env), \
                      mock.patch.object(ops, "resolve_backend_argv",
                                        side_effect=lambda argv: ["/fake/abs/" + argv[0]] + list(argv[1:])):
-                    rc = ops.run_init(memory_root=None, backend=name, base_url=None,
-                                      api_key_env=None, model=None, assume_yes=True)
+                    rc = ops.run_init(memory_root=None, backend=name, model=None, assume_yes=True)
                 self.assertEqual(rc, 0)
                 import yaml
                 data = yaml.safe_load(
+                    (Path(tmp) / "hippo-cfg" / "config.yaml").read_text(encoding="utf-8"))
+                expected = {
+                    "claude-headless": "claude",
+                    "codex-headless": "codex",
+                    "agy-headless": "agy",
+                }[name]
+                self.assertNotIn("selected_profile", data["external_agents"])
+                configured = next(
+                    profile for profile in data["external_agents"]["profiles"]
+                    if profile["id"] == expected
+                )
+                self.assertEqual(configured["argv"][0], "/fake/abs/" + name.removesuffix("-headless"))
+                self.assertFalse(
                     (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
-                     / "atomizer.override.yaml").read_text(encoding="utf-8"))
-                self.assertEqual(
-                    data["agent_exec"]["command"],
-                    ["/fake/abs/" + template[0]] + list(template[1:]))
+                     / "atomizer.override.yaml").exists()
+                )
 
     def test_init_argv_preset_includes_model_when_given(self):
         with TemporaryDirectory() as tmp:
@@ -209,14 +192,16 @@ class InitTests(unittest.TestCase):
                  mock.patch.object(ops, "resolve_backend_argv",
                                    side_effect=lambda argv: ["/fake/abs/codex"] + list(argv[1:])):
                 rc = ops.run_init(memory_root=None, backend="codex-headless",
-                                  base_url=None, api_key_env=None,
                                   model="gpt-5.4", assume_yes=True)
             self.assertEqual(rc, 0)
             import yaml
             data = yaml.safe_load(
-                (Path(tmp) / "legacy" / ".config" / "paulshaclaw"
-                 / "atomizer.override.yaml").read_text(encoding="utf-8"))
-            self.assertEqual(data["agent_exec"]["model"], "gpt-5.4")
+                (Path(tmp) / "hippo-cfg" / "config.yaml").read_text(encoding="utf-8"))
+            codex = next(
+                row for row in data["external_agents"]["profiles"]
+                if row["id"] == "codex"
+            )
+            self.assertEqual(codex["model"], "gpt-5.4")
 
     def test_init_argv_preset_backend_unavailable_fails_closed(self):
         with TemporaryDirectory() as tmp:
@@ -229,7 +214,7 @@ class InitTests(unittest.TestCase):
                  mock.patch.object(ops, "resolve_backend_argv",
                                    side_effect=ops.BackendUnavailableError("codex not found")):
                 rc = ops.run_init(memory_root=None, backend="codex-headless",
-                                  base_url=None, api_key_env=None, model=None, assume_yes=True)
+                                  model=None, assume_yes=True)
             self.assertEqual(rc, 2)
             self.assertFalse((Path(tmp) / "hippo-cfg" / "config.yaml").exists())
             self.assertFalse((Path(tmp) / "legacy" / ".config" / "paulshaclaw"
@@ -246,7 +231,7 @@ class InitTests(unittest.TestCase):
                  mock.patch.object(ops.shutil, "which", return_value=None):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
-                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 2)
             # blocking：驗證失敗前不得寫入任一設定檔——config 與 override 皆不存在，
@@ -256,13 +241,8 @@ class InitTests(unittest.TestCase):
             cfg = Path(tmp) / "hippo-cfg" / "config.yaml"
             self.assertFalse(cfg.exists())
 
-    def test_init_openai_compatible_requires_base_url(self):
-        rc = ops.run_init(memory_root=None, backend="openai-compatible",
-                          base_url=None, api_key_env=None, model=None, assume_yes=True)
-        self.assertEqual(rc, 2)
-
-    def test_init_openai_missing_base_url_writes_no_files(self):
-        # 驗證失敗（openai-compatible 缺 --base-url）前不得建立 config/override。
+    def test_init_retired_provider_backend_writes_no_files(self):
+        # direct provider backend is retired; validation must fail before any file write.
         with TemporaryDirectory() as tmp:
             env = {
                 "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -271,8 +251,8 @@ class InitTests(unittest.TestCase):
             }
             with mock.patch.dict("os.environ", env):
                 rc = ops.run_init(
-                    memory_root=None, backend="openai-compatible",
-                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    memory_root=None, backend="http",
+                    model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 2)
             self.assertFalse((Path(tmp) / "hippo-cfg" / "config.yaml").exists())
@@ -296,14 +276,13 @@ class InitTests(unittest.TestCase):
                  mock.patch.object(ops.shutil, "which", return_value=None):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
-                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 2)
             self.assertEqual(cfg.read_text(encoding="utf-8"),
                              "memory_root: /keep/me\ndistiller:\n  backend: custom-argv\n")
 
-    def test_init_claude_headless_commits_config_and_override_atomically(self):
-        # 驗證全過才落地：config 與 override 都寫入，且不殘留暫存檔（.tmp）。
+    def test_init_claude_headless_commits_one_canonical_config_atomically(self):
         with TemporaryDirectory() as tmp:
             env = {
                 "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -314,19 +293,17 @@ class InitTests(unittest.TestCase):
                  mock.patch.object(ops.shutil, "which", return_value="/fake/bin/claude"):
                 rc = ops.run_init(
                     memory_root=None, backend="claude-headless",
-                    base_url=None, api_key_env=None, model=None, assume_yes=True,
+                    model=None, assume_yes=True,
                 )
             self.assertEqual(rc, 0)
             cfg_dir = Path(tmp) / "hippo-cfg"
             self.assertTrue((cfg_dir / "config.yaml").is_file())
             override_dir = Path(tmp) / "legacy" / ".config" / "paulshaclaw"
-            self.assertTrue((override_dir / "atomizer.override.yaml").is_file())
+            self.assertFalse((override_dir / "atomizer.override.yaml").exists())
             leftover = list(cfg_dir.glob("*.tmp")) + list(override_dir.glob("*.tmp"))
             self.assertEqual(leftover, [])
 
-    def test_init_rolls_back_first_file_when_second_commit_fails(self):
-        # 硬化：驗證全過但 commit 第二個檔（override）時 IO 失敗——第一個已 commit 的
-        # 新檔（config）必須回復到不存在，且不殘留暫存檔，杜絕半初始化殘留。
+    def test_init_rolls_back_when_canonical_commit_fails(self):
         with TemporaryDirectory() as tmp:
             env = {
                 "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -338,7 +315,7 @@ class InitTests(unittest.TestCase):
 
             def flaky_replace(src, dst):
                 calls["n"] += 1
-                if calls["n"] == 2:
+                if calls["n"] == 1:
                     raise OSError("disk gone")
                 return real_replace(src, dst)
 
@@ -348,7 +325,7 @@ class InitTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     ops.run_init(
                         memory_root=None, backend="claude-headless",
-                        base_url=None, api_key_env=None, model=None, assume_yes=True,
+                        model=None, assume_yes=True,
                     )
             cfg_dir = Path(tmp) / "hippo-cfg"
             override_dir = Path(tmp) / "legacy" / ".config" / "paulshaclaw"
@@ -365,7 +342,7 @@ class InitTests(unittest.TestCase):
             cfg.write_text("memory_root: /keep/me\n", encoding="utf-8")
             with mock.patch.dict("os.environ", env):
                 ops.run_init(memory_root="/x", backend="custom-argv",
-                             base_url=None, api_key_env=None, model=None, assume_yes=False)
+                             model=None, assume_yes=False)
             self.assertIn("/keep/me", cfg.read_text(encoding="utf-8"))
 
 
@@ -441,10 +418,13 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("- backend presets（service-effective probe）:", out)
         self.assertIn("  - claude-headless: ✓ /abs/claude（2.1.206 (Claude Code)）", out)
         self.assertIn("  - codex-headless: ✗ probe rc=127：node not found", out)
-        self.assertIn("  - copilot-headless: ✗ executable 未安裝", out)
+        self.assertIn(
+            "  - copilot-headless: ✗ unavailable（命令契約未確認，選單不可選）",
+            out,
+        )
         self.assertIn("  - gemini-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
         self.assertIn("  - antigravity-headless: ✗ unavailable（命令契約未確認，選單不可選）", out)
-        self.assertIn("  - openai-compatible: - config 驅動（無本機執行檔需求）", out)
+        self.assertIn("  - custom-argv: - config 驅動（無本機執行檔需求）", out)
 
 
 class DoctorBackendProbeTests(unittest.TestCase):
@@ -461,9 +441,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
         base = dict(
             agent_exec_backend="custom-argv",
             agent_exec_command=("claude", "-p"),
-            agent_exec_base_url="",
             agent_exec_model="test-model",
-            agent_exec_api_key_env="",
             default_promoter="llm",
         )
         base.update(overrides)
@@ -496,38 +474,6 @@ class DoctorBackendProbeTests(unittest.TestCase):
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}):
                 self.assertEqual(ops.run_doctor(live_probe=True), 0)
-
-    def test_probe_openai_compatible_success_with_live_endpoint(self):
-        # openai-compatible 不再「PR-D 接手」綠燈——實際打 /v1/chat/completions
-        server = HTTPServer(("127.0.0.1", 0), _Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            cfg = self._fake_cfg(
-                agent_exec_backend="openai-compatible",
-                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
-            )
-            with mock.patch.dict("os.environ", self._ENV), \
-                 mock.patch("paulsha_hippo.atomizer.config.load_config",
-                            return_value=(cfg, "h")), \
-                 mock.patch.object(ops, "_service_manager_environment",
-                                   return_value={"PATH": "/usr/bin:/bin"}):
-                self.assertEqual(ops.run_doctor(live_probe=True), 0)
-        finally:
-            server.shutdown()
-
-    def test_probe_openai_compatible_unreachable_fails_closed(self):
-        # 端點不可達（連線拒絕）→ FAIL；早前版本此情境仍 exit 0（恢復 gate 誤判）
-        cfg = self._fake_cfg(
-            agent_exec_backend="openai-compatible",
-            agent_exec_base_url="http://127.0.0.1:1",
-        )
-        with mock.patch.dict("os.environ", self._ENV), \
-             mock.patch("paulsha_hippo.atomizer.config.load_config",
-                        return_value=(cfg, "h")), \
-             mock.patch.object(ops, "_service_manager_environment",
-                               return_value={"PATH": "/usr/bin:/bin"}):
-            self.assertEqual(ops.run_doctor(live_probe=True), 1)
 
     def test_service_effective_path_falls_back_without_systemd(self):
         with mock.patch.object(ops.subprocess, "run", side_effect=OSError("no systemctl")):
@@ -650,7 +596,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                 1,
             )
 
-    def test_probe_passes_when_api_key_only_in_manager_env(self):
+    def test_probe_rejects_api_key_only_in_manager_env(self):
         # B1 反向誤判：key 只設在 manager env（environment.d／set-environment）、
         # 互動 shell 沒有 → 服務實際可用，probe 不得誤判故障。
         self.assertNotIn("HIPPO_PROBE_FAKE_KEY", os.environ)
@@ -663,7 +609,7 @@ class DoctorBackendProbeTests(unittest.TestCase):
                     manager_env={"PATH": "/usr/bin:/bin",
                                  "HIPPO_PROBE_FAKE_KEY": "sk-manager"},
                 ),
-                0,
+                1,
             )
 
     def test_probe_fallback_marks_approximate_when_no_user_bus(self):
@@ -672,57 +618,16 @@ class DoctorBackendProbeTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             exe = self._key_gated_backend(tmp, "HIPPO_PROBE_FAKE_KEY")
             buf = io.StringIO()
-            with redirect_stdout(buf):
+            err = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(err):
                 rc = self._doctor_with_key_gated_backend(
                     exe,
                     shell_env={"HIPPO_PROBE_FAKE_KEY": "sk-shell-only"},
                     manager_env=None,
                 )
-            self.assertEqual(rc, 0)
-            self.assertIn("近似", buf.getvalue())
-            self.assertIn("非 service-effective", buf.getvalue())
-
-    def _doctor_openai_with_auth_server(self, *, shell_env: dict[str, str],
-                                        manager_env: dict[str, str] | None) -> int:
-        server = HTTPServer(("127.0.0.1", 0), _AuthRequiredHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            cfg = self._fake_cfg(
-                agent_exec_backend="openai-compatible",
-                agent_exec_base_url=f"http://127.0.0.1:{server.server_port}",
-                agent_exec_api_key_env="HIPPO_PROBE_HTTP_KEY",
-            )
-            with mock.patch.dict("os.environ", {**self._ENV, **shell_env}), \
-                 mock.patch("paulsha_hippo.atomizer.config.load_config",
-                            return_value=(cfg, "h")), \
-                 mock.patch.object(ops, "_service_manager_environment",
-                                   return_value=manager_env):
-                return ops.run_doctor(live_probe=True)
-        finally:
-            server.shutdown()
-
-    def test_probe_openai_compatible_key_only_in_shell_fails(self):
-        # B1 也涵蓋 openai-compatible：API key 解析須來自 manager env，
-        # 不得從 doctor 所在互動 shell 的 os.environ 借到 key 而誤判健康。
-        self.assertEqual(
-            self._doctor_openai_with_auth_server(
-                shell_env={"HIPPO_PROBE_HTTP_KEY": "sk-shell-only"},
-                manager_env={"PATH": "/usr/bin:/bin"},
-            ),
-            1,
-        )
-
-    def test_probe_openai_compatible_key_in_manager_env_passes(self):
-        self.assertNotIn("HIPPO_PROBE_HTTP_KEY", os.environ)
-        self.assertEqual(
-            self._doctor_openai_with_auth_server(
-                shell_env={},
-                manager_env={"PATH": "/usr/bin:/bin",
-                             "HIPPO_PROBE_HTTP_KEY": "sk-manager"},
-            ),
-            0,
-        )
+            self.assertEqual(rc, 1)
+            self.assertIn("近似", err.getvalue())
+            self.assertIn("非 service-effective", err.getvalue())
 
 
 class DoctorLiveProbeGateTests(unittest.TestCase):
@@ -743,9 +648,7 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
         base = dict(
             agent_exec_backend="custom-argv",
             agent_exec_command=self._RESOLVES_BUT_FAILS_LIVE,
-            agent_exec_base_url="",
             agent_exec_model="test-model",
-            agent_exec_api_key_env="",
             default_promoter="llm",
         )
         base.update(overrides)
@@ -802,19 +705,6 @@ class DoctorLiveProbeGateTests(unittest.TestCase):
             not_exec.chmod(0o644)  # 無執行權限
             cfg = self._fake_cfg(agent_exec_command=(str(not_exec), "-p"))
             self.assertEqual(self._doctor(cfg), 1)
-
-    def test_bare_doctor_openai_compatible_skips_http_probe(self):
-        # 端點不可達（live 檔必 FAIL，見 DoctorBackendProbeTests），裸 doctor
-        # 不打 HTTP → config 可載入即 PASS
-        cfg = self._fake_cfg(
-            agent_exec_backend="openai-compatible",
-            agent_exec_base_url="http://127.0.0.1:1",
-        )
-        with mock.patch.object(
-                ops, "_probe_openai_compatible",
-                side_effect=AssertionError("裸 doctor 不得真打 HTTP 端點")) as spy:
-            self.assertEqual(self._doctor(cfg), 0)
-        spy.assert_not_called()
 
     def test_gate_wiring_passes_live_kwarg_to_probe(self):
         # 跨批次契約（PR-C/PR-D mock 面）：run_doctor 以 live= kwarg 驅動 probe
@@ -918,14 +808,17 @@ class ServiceManagerEnvironmentTests(unittest.TestCase):
 
 class ProbeEnvironmentTests(unittest.TestCase):
     def test_manager_env_mode_excludes_interactive_environ(self):
-        # B1 核心：service-effective 模式下 probe env 只來自 manager env，
-        # 互動 shell 才有的變數（API key 等）不得滲入。
+        # B1 核心：service-effective 模式只取 manager 的 PATH；其餘子程序
+        # 環境由固定 minimal non-secret allowlist 建立，credential 不得滲入。
         with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
              mock.patch.object(ops, "_service_manager_environment",
                                return_value={"PATH": "/usr/bin:/bin", "HOME": "/home/u"}):
             env, service_effective = ops._probe_environment()
         self.assertTrue(service_effective)
-        self.assertEqual(env, {"PATH": "/usr/bin:/bin", "HOME": "/home/u"})
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertNotEqual(env["HOME"], "/home/u")
+        self.assertNotIn("HIPPO_SHELL_ONLY_VAR", env)
+        self.assertIn("HIPPO_SELF_SESSION", env)
 
     def test_manager_env_without_path_gets_conservative_default(self):
         with mock.patch.object(ops, "_service_manager_environment",
@@ -933,13 +826,14 @@ class ProbeEnvironmentTests(unittest.TestCase):
             env, service_effective = ops._probe_environment()
         self.assertTrue(service_effective)
         self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        self.assertNotEqual(env["HOME"], "/home/u")
 
-    def test_fallback_mode_keeps_interactive_approximation(self):
+    def test_fallback_mode_keeps_only_minimal_approximation(self):
         with mock.patch.dict("os.environ", {"HIPPO_SHELL_ONLY_VAR": "1"}), \
              mock.patch.object(ops, "_service_manager_environment", return_value=None):
             env, service_effective = ops._probe_environment()
         self.assertFalse(service_effective)
-        self.assertEqual(env["HIPPO_SHELL_ONLY_VAR"], "1")
+        self.assertNotIn("HIPPO_SHELL_ONLY_VAR", env)
         self.assertEqual(env["PATH"], "/usr/local/bin:/usr/bin:/bin")
 
 
@@ -954,6 +848,8 @@ class InstallServiceTests(unittest.TestCase):
             unit = Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.service"
             body = unit.read_text(encoding="utf-8")
             self.assertNotIn("paulsha-memory-dream", body)
+            self.assertIn("Environment=HIPPO_BUILD_VERSION=0.1.1", body)
+            self.assertIn("Environment=HIPPO_BUILD_COMMIT=", body)
             self.assertTrue((Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.timer").is_file())
 
     def test_falls_back_to_supervise_hint_without_systemd(self):
@@ -1018,103 +914,8 @@ class SuperviseTests(unittest.TestCase):
             self.assertFalse(ops._dream_timer_active())
 
 
-class _Handler(BaseHTTPRequestHandler):
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length))
-        self.server.captured = {"auth": self.headers.get("Authorization"), "payload": payload}  # type: ignore[attr-defined]
-        body = json.dumps({"choices": [{"message": {"content": "DISTILLED"}}]}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):  # 靜默
-        return
-
-
-class _AuthRequiredHandler(BaseHTTPRequestHandler):
-    """缺 Authorization header 即 401 的端點（模擬需認證的 openai-compatible 服務）。"""
-
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        if self.headers.get("Authorization"):
-            body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
-            self.send_response(200)
-        else:
-            body = json.dumps({"error": "missing api key"}).encode()
-            self.send_response(401)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):  # 靜默
-        return
-
-
-class HttpAgentClientTests(unittest.TestCase):
-    def _serve(self):
-        server = HTTPServer(("127.0.0.1", 0), _Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server
-
-    def test_posts_chat_completions_and_returns_content(self):
-        server = self._serve()
-        try:
-            with mock.patch.dict("os.environ", {"HIPPO_TEST_KEY": "sk-local"}):
-                client = HttpAgentClient(
-                    f"http://127.0.0.1:{server.server_port}", "gemma-test",
-                    api_key_env="HIPPO_TEST_KEY", timeout=10,
-                )
-                out = client.run("prompt-text")
-            self.assertEqual(out, "DISTILLED")
-            captured = server.captured  # type: ignore[attr-defined]
-            self.assertEqual(captured["auth"], "Bearer sk-local")
-            self.assertEqual(captured["payload"]["model"], "gemma-test")
-        finally:
-            server.shutdown()
-
-    def test_unreachable_endpoint_raises_agent_exec_error(self):
-        client = HttpAgentClient("http://127.0.0.1:1", "m", timeout=2)
-        with self.assertRaises(AgentExecError):
-            client.run("x")
-
-    def test_env_override_scopes_api_key_lookup(self):
-        # B1：doctor probe 注入 service-effective env——key 從注入的 env 解析
-        self.assertNotIn("HIPPO_PROBE_DIRECT_KEY", os.environ)
-        server = self._serve()
-        try:
-            client = HttpAgentClient(
-                f"http://127.0.0.1:{server.server_port}", "m",
-                api_key_env="HIPPO_PROBE_DIRECT_KEY", timeout=10,
-                env={"HIPPO_PROBE_DIRECT_KEY": "sk-injected"},
-            )
-            client.run("x")
-            self.assertEqual(server.captured["auth"], "Bearer sk-injected")  # type: ignore[attr-defined]
-        finally:
-            server.shutdown()
-
-    def test_env_override_excludes_process_environ(self):
-        # B1：一旦注入 env，就不得回頭從 os.environ 借 key（互動 shell 滲漏）
-        server = self._serve()
-        try:
-            with mock.patch.dict("os.environ", {"HIPPO_TEST_KEY": "sk-local"}):
-                client = HttpAgentClient(
-                    f"http://127.0.0.1:{server.server_port}", "m",
-                    api_key_env="HIPPO_TEST_KEY", timeout=10, env={},
-                )
-                client.run("x")
-            self.assertIsNone(server.captured["auth"])  # type: ignore[attr-defined]
-        finally:
-            server.shutdown()
-
-
 class BackendConfigTests(unittest.TestCase):
-    def test_openai_compatible_requires_base_url(self):
+    def test_direct_provider_backend_is_retired(self):
         from paulsha_hippo.atomizer import config as aconfig
 
         with TemporaryDirectory() as tmp:
@@ -1123,9 +924,9 @@ class BackendConfigTests(unittest.TestCase):
             cfg.write_text(base + "\n", encoding="utf-8")
             override = Path(tmp) / "override.yaml"
             override.write_text(
-                'schema_version: "1"\nagent_exec:\n  backend: openai-compatible\n', encoding="utf-8"
+                'schema_version: "1"\nagent_exec:\n  backend: http\n', encoding="utf-8"
             )
-            with self.assertRaises(aconfig.AtomizerConfigError):
+            with self.assertRaisesRegex(aconfig.AtomizerConfigError, "operator-redaction"):
                 aconfig.load_config(default_dir=tmp, override_path=override)
 
     def test_claude_headless_preset_config_valid(self):
@@ -1184,16 +985,64 @@ class InstallHooksResolverTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--python") + 1], sys.executable)
         run.assert_called_once()
 
+    def test_install_hooks_writes_build_receipt_after_success(self):
+        with TemporaryDirectory() as tmp:
+            hooks = Path(tmp) / "hooks"
+            hooks.mkdir()
+            with mock.patch.object(ops.subprocess, "run") as run, \
+                 mock.patch("paulsha_hippo.build_info.build_identity", return_value={
+                     "version": "0.1.1", "build_commit": "candidate"
+                 }):
+                run.return_value = mock.Mock(returncode=0)
+                rc = ops.run_install_hooks(memory_root=tmp, repo_root=None)
+            self.assertEqual(rc, 0)
+            receipt = json.loads((hooks / ".hippo-build.json").read_text())
+            self.assertEqual(receipt["build_commit"], "candidate")
+            self.assertEqual(receipt["python"], sys.executable)
+
+
+class SurfaceBuildAttestationTests(unittest.TestCase):
+    def test_matching_hook_and_service_build_receipts_pass(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hooks = root / "memory" / "hooks"
+            hooks.mkdir(parents=True)
+            (hooks / ".hippo-build.json").write_text(json.dumps({
+                "schema_version": "1", "version": "0.1.1",
+                "build_commit": "abc", "python": sys.executable,
+            }))
+            unit = root / ".config/systemd/user/paulsha-hippo-dream.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text(
+                "[Service]\nEnvironment=HIPPO_BUILD_VERSION=0.1.1\n"
+                "Environment=HIPPO_BUILD_COMMIT=abc\n"
+                f"ExecStart={sys.executable} -m paulsha_hippo.cli dream run\n"
+            )
+            lines, failed = ops._surface_build_attestation(
+                {"version": "0.1.1", "build_commit": "abc"},
+                root / "memory", home=root,
+            )
+            self.assertFalse(failed)
+            self.assertTrue(all("✓" in line for line in lines))
+
+    def test_surface_commit_mismatch_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hooks = root / "hooks"
+            hooks.mkdir()
+            (hooks / ".hippo-build.json").write_text(json.dumps({
+                "schema_version": "1", "version": "0.1.1",
+                "build_commit": "old", "python": sys.executable,
+            }))
+            lines, failed = ops._surface_build_attestation(
+                {"version": "0.1.1", "build_commit": "candidate"}, root,
+                home=root,
+            )
+            self.assertTrue(failed)
+            self.assertTrue(any(line.startswith("FAIL hooks") for line in lines))
+
 
 class FixBackendMigrationTests(unittest.TestCase):
-    _OVERRIDE = (
-        'schema_version: "1"\n'
-        "agent_exec:\n"
-        "  command:\n"
-        "    - claude\n"
-        "    - -p\n"
-    )
-
     def _env(self, tmp: str) -> dict[str, str]:
         return {
             "HIPPO_CONFIG_ROOT": f"{tmp}/hippo-cfg",
@@ -1202,11 +1051,22 @@ class FixBackendMigrationTests(unittest.TestCase):
             "PSC_MEMORY_ROOT": f"{tmp}/memory",
         }
 
-    def _write_override(self, tmp: str) -> Path:
-        override = Path(tmp) / "legacy" / ".config" / "paulshaclaw" / "atomizer.override.yaml"
-        override.parent.mkdir(parents=True, exist_ok=True)
-        override.write_text(self._OVERRIDE, encoding="utf-8")
-        return override
+    def _write_config(self, tmp: str) -> Path:
+        import yaml
+
+        source = Path(ops._PKG_ROOT) / "atomizer" / "atomizer.yaml"
+        document = yaml.safe_load(source.read_text(encoding="utf-8"))
+        for profile in document["external_agents"]["profiles"]:
+            profile["enabled"] = profile["id"] == "claude"
+            if profile["id"] == "claude":
+                profile["argv"][0] = "claude"
+        canonical = Path(tmp) / "hippo-cfg" / "config.yaml"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text(
+            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        return canonical
 
     def _real_exe(self, tmp: str) -> Path:
         exe = Path(tmp) / "bin" / "claude"
@@ -1218,7 +1078,7 @@ class FixBackendMigrationTests(unittest.TestCase):
 
     def test_fix_backend_rewrites_bare_command_and_backs_up(self):
         with TemporaryDirectory() as tmp:
-            override = self._write_override(tmp)
+            canonical = self._write_config(tmp)
             exe = self._real_exe(tmp)
 
             def fake_which(cmd, path=None):
@@ -1235,15 +1095,14 @@ class FixBackendMigrationTests(unittest.TestCase):
                 rc = ops.run_doctor(fix_backend=True)
 
             self.assertEqual(rc, 0)
-            body = override.read_text(encoding="utf-8")
-            self.assertIn(f"    - {exe}\n", body)
-            self.assertNotIn("\n    - claude\n", body)
-            backup = override.with_name(override.name + ".bak")
-            self.assertIn("    - claude\n", backup.read_text(encoding="utf-8"))
+            body = canonical.read_text(encoding="utf-8")
+            self.assertIn(f"  - {exe}\n", body)
+            backup = canonical.with_name(canonical.name + ".bak")
+            self.assertIn("  - claude\n", backup.read_text(encoding="utf-8"))
 
     def test_fix_backend_is_idempotent_on_second_run(self):
         with TemporaryDirectory() as tmp:
-            override = self._write_override(tmp)
+            canonical = self._write_config(tmp)
             exe = self._real_exe(tmp)
 
             def fake_which(cmd, path=None):
@@ -1254,27 +1113,27 @@ class FixBackendMigrationTests(unittest.TestCase):
             with mock.patch.dict("os.environ", self._env(tmp)), \
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}), \
-                 mock.patch.object(ops.shutil, "which", side_effect=fake_which):
+                mock.patch.object(ops.shutil, "which", side_effect=fake_which):
                 self.assertEqual(ops.run_doctor(fix_backend=True), 0)
-                first_body = override.read_text(encoding="utf-8")
+                first_body = canonical.read_text(encoding="utf-8")
                 self.assertEqual(ops.run_doctor(fix_backend=True), 0)
-                second_body = override.read_text(encoding="utf-8")
+                second_body = canonical.read_text(encoding="utf-8")
 
             self.assertEqual(first_body, second_body)
-            backup = override.with_name(override.name + ".bak")
+            backup = canonical.with_name(canonical.name + ".bak")
             # 第二輪 no-op：備份仍是第一輪存下的原始裸命令版
-            self.assertIn("    - claude\n", backup.read_text(encoding="utf-8"))
+            self.assertIn("  - claude\n", backup.read_text(encoding="utf-8"))
 
-    def test_fix_backend_without_override_is_noop(self):
+    def test_fix_backend_without_canonical_config_fails_closed(self):
         with TemporaryDirectory() as tmp:
             with mock.patch.dict("os.environ", self._env(tmp)), \
                  mock.patch.object(ops, "_probe_backend_service_effective",
                                    return_value=("- distiller backend：✓ mocked", False)):
-                self.assertEqual(ops.run_doctor(fix_backend=True), 0)
+                self.assertEqual(ops.run_doctor(fix_backend=True), 1)
 
     def test_fix_backend_unresolvable_everywhere_fails(self):
         with TemporaryDirectory() as tmp:
-            self._write_override(tmp)
+            self._write_config(tmp)
             with mock.patch.dict("os.environ", self._env(tmp)), \
                  mock.patch.object(ops, "_service_manager_environment",
                                    return_value={"PATH": "/usr/bin:/bin"}), \
@@ -1289,14 +1148,13 @@ class BackendRegistryWiringTests(unittest.TestCase):
 
     def test_init_rejects_unknown_backend(self):
         rc = ops.run_init(memory_root=None, backend="definitely-not-a-backend",
-                          base_url=None, api_key_env=None, model=None, assume_yes=True)
+                          model=None, assume_yes=True)
         self.assertEqual(rc, 2)
 
     def test_init_rejects_unavailable_presets(self):
         for name in ("gemini-headless", "antigravity-headless"):
             with self.subTest(backend=name):
-                rc = ops.run_init(memory_root=None, backend=name, base_url=None,
-                                  api_key_env=None, model=None, assume_yes=True)
+                rc = ops.run_init(memory_root=None, backend=name, model=None, assume_yes=True)
                 self.assertEqual(rc, 2)
 
 
@@ -1317,7 +1175,7 @@ class InitBackendChoicesTests(unittest.TestCase):
 
 
 class SuperviseCliWiringTests(unittest.TestCase):
-    def test_supervise_cli_forwards_once_and_overrides(self):
+    def test_supervise_cli_forwards_once_and_runtime_options(self):
         from paulsha_hippo import cli as memory_cli
         captured: dict = {}
 
@@ -1329,11 +1187,11 @@ class SuperviseCliWiringTests(unittest.TestCase):
             rc = memory_cli.main([
                 "dream", "supervise", "--interval", "5", "--once",
                 "--memory-root", "/mr", "--max-load", "99.5",
-                "--promoter", "identity", "--agent-command", "python x.py",
+                "--promoter", "identity",
             ])
         self.assertEqual(rc, 0)
         self.assertTrue(captured["once"])
         self.assertEqual(captured["interval"], 5)
         self.assertEqual(captured["extra_argv"], [
             "--memory-root", "/mr", "--max-load", "99.5",
-            "--promoter", "identity", "--agent-command", "python x.py"])
+            "--promoter", "identity"])

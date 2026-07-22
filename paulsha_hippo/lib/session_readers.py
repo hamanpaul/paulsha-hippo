@@ -11,14 +11,21 @@ from typing import Any
 
 def read_copilot_history(config_root: str | Path, session_id: str) -> dict[str, Any]:
     base = Path(config_root)
-    if base.name == "history-session-state":
-        base_dir = base
+    if base.name in {"history-session-state", "session-state"}:
+        copilot_root = base.parent
     elif base.name == ".copilot":
-        base_dir = base / "history-session-state"
+        copilot_root = base
     elif base.name == "paulshaclaw" and base.parent.name == ".config":
-        base_dir = base.parents[1] / ".copilot" / "history-session-state"
+        copilot_root = base.parents[1] / ".copilot"
     else:
-        base_dir = base / ".copilot" / "history-session-state"
+        copilot_root = base / ".copilot"
+
+    # Current Copilot CLI writes one append-only event stream per session.  Keep
+    # the historical aggregate JSON reader below for old installations.
+    current_events = copilot_root / "session-state" / session_id / "events.jsonl"
+    if current_events.is_file():
+        return _read_copilot_events(current_events)
+    base_dir = copilot_root / "history-session-state"
     matches = sorted(base_dir.glob(f"session_{session_id}_*.json")) if base_dir.is_dir() else []
     if not matches:
         return {"user_prompts": [], "assistant_messages": [], "assistant_summary": ""}
@@ -40,6 +47,68 @@ def read_copilot_history(config_root: str | Path, session_id: str) -> dict[str, 
         "assistant_messages": assistant_messages,
         "assistant_summary": assistant_messages[-1] if assistant_messages else "",
     }
+
+
+def _read_copilot_events(path: Path) -> dict[str, Any]:
+    prompts: list[str] = []
+    assistant_messages: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        role, content = _copilot_event_payload(event)
+        if not content:
+            continue
+        if role == "user":
+            prompts.append(content)
+        elif role == "assistant":
+            assistant_messages.append(content)
+    return {
+        "user_prompts": prompts,
+        "assistant_messages": assistant_messages,
+        "assistant_summary": assistant_messages[-1] if assistant_messages else "",
+    }
+
+
+def _copilot_event_payload(event: dict[str, Any]) -> tuple[str | None, str]:
+    """Normalize the observed current event variants without assuming one schema."""
+    role = event.get("role")
+    event_type = str(event.get("type") or event.get("event") or "").lower()
+    if role not in {"user", "assistant"}:
+        if "user" in event_type or "prompt" in event_type:
+            role = "user"
+        elif "assistant" in event_type or "response" in event_type or "message" in event_type:
+            role = "assistant"
+    payload: Any = event
+    for key in ("data", "message", "payload", "content"):
+        if isinstance(payload, dict) and key in payload:
+            candidate = payload[key]
+            if isinstance(candidate, dict):
+                payload = candidate
+                if role not in {"user", "assistant"}:
+                    role = payload.get("role") if payload.get("role") in {"user", "assistant"} else role
+            elif isinstance(candidate, str) and key == "content":
+                return role, candidate.strip()
+    if isinstance(payload, dict):
+        content = payload.get("content") or payload.get("text") or payload.get("message")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(block.get("text"))
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            )
+        if isinstance(content, str):
+            return role, content.strip()
+    return role, ""
 
 
 

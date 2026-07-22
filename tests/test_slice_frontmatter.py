@@ -100,14 +100,14 @@ class BuildFromProposalTests(unittest.TestCase):
         ).hexdigest()[:16]
         self.assertEqual(built.slice_id, expected)
 
-    def test_runtime_title_retained_without_storing_frontmatter_field(self):
+    def test_canonical_title_is_retained_in_frontmatter(self):
         built = slice_frontmatter.build_from_proposal(_proposal(), _SESSION_META)
         self.assertEqual(built.title, "alpha")
-        self.assertNotIn("title", built.frontmatter)
+        self.assertEqual(built.frontmatter["title"], "alpha")
 
     def test_union_frontmatter_with_tags(self):
         built = slice_frontmatter.build_from_proposal(_proposal(), _SESSION_META)
-        self.assertNotIn("title", built.frontmatter)
+        self.assertEqual(built.frontmatter["title"], "alpha")
         self.assertEqual(built.frontmatter["project"], "prplos-core")
         self.assertEqual(built.frontmatter["artifact_kind"], "report")
         self.assertEqual(built.frontmatter["tags"], ["pwhm", "fsm"])
@@ -160,7 +160,7 @@ class BuildFromProposalTests(unittest.TestCase):
         rendered = slice_frontmatter.render(built)
         self.assertIn('tags: ["pwhm", "fsm"]', rendered)
         self.assertIn("source_fragments: [0, 1]", rendered)
-        self.assertNotIn("\ntitle:", rendered)
+        self.assertIn('\ntitle: "alpha"', rendered)
 
     def test_legacy_build_leaves_runtime_title_unset(self):
         built = slice_frontmatter.build(_frag(), CFG)

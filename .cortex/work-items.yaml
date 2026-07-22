@@ -1,0 +1,16 @@
+version: 1
+work_items:
+  issue-34-atomization-release:
+    title: 'issue-34-atomization-release'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#34'
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#39'
+      - kind: openspec
+        ref: 'issue-34-atomization-release'
+      - kind: path
+        ref: 'openspec/changes/issue-34-atomization-release/proposal.md'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-07-15-issue-34-atomization-release.md'
+    excludes: []

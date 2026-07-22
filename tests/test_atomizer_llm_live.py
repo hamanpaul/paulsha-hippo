@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from paulsha_hippo import backends, cli
+from paulsha_hippo import backends, cli, paths
 from paulsha_hippo.atomizer.agent_exec import AgentExecClient, AgentExecError
 from paulsha_hippo.lib.lifecycle.gate import run_static_gate_check_file
 
@@ -18,7 +18,9 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "raw" / "s
 
 _LIVE_TIMEOUT_SECONDS = 300
 
-_MATRIX_PRESETS = ("claude-headless", "codex-headless", "copilot-headless")
+_MATRIX_PRESETS = (
+    "claude-headless", "codex-headless", "agy-headless",
+)
 
 
 class SmokeMatrixCoverageTests(unittest.TestCase):
@@ -55,6 +57,8 @@ class AtomizerLlmLiveMatrixTests(unittest.TestCase):
     """
 
     def _smoke(self, preset_name: str) -> None:
+        import yaml
+
         preset = backends.PRESETS[preset_name]
         # 第一層：executable/version probe（互動環境；快、免 LLM 配額）。
         # live=True 才真跑 `<exe> --version`——本層意圖即實際版本 probe，非解析級。
@@ -77,26 +81,31 @@ class AtomizerLlmLiveMatrixTests(unittest.TestCase):
             shutil.copyfile(FIXTURE, raw)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            override = root / "atomizer.override.yaml"
-            command_lines = "".join(
-                f"    - {json.dumps(item, ensure_ascii=False)}\n" for item in argv)
-            override.write_text(
-                (
-                    f'known_projects_file: "{projects}"\n'
-                    "agent_exec:\n"
-                    "  command:\n"
-                    f"{command_lines}"
-                    f"  timeout_seconds: {_LIVE_TIMEOUT_SECONDS}\n"
-                    f"  model: {preset_name}\n"
-                ),
-                encoding="utf-8",
-            )
+            canonical = paths.atomizer_config_path()
+            document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+            document["known_projects_file"] = str(projects)
+            document["external_agents"]["profiles"] = [{
+                "id": preset_name,
+                "enabled": True,
+                "tier": 1,
+                "priority": 1,
+                "traits": ["live-smoke"],
+                "task_classes": ["atomization"],
+                "model": preset_name,
+                "supported_models": [preset_name],
+                "effort": "medium",
+                "supported_efforts": ["medium"],
+                "timeout": _LIVE_TIMEOUT_SECONDS,
+                "argv": argv,
+            }]
+            canonical.write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = cli.main([
                     "atomize", "--memory-root", str(root),
                     "--now", "2026-07-10T03:00:00Z",
-                    "--promoter", "llm", "--override", str(override),
+                    "--promoter", "llm",
                 ])
             self.assertEqual(rc, 0, buf.getvalue())
             slice_paths = sorted((root / "knowledge").rglob("*.md"))
@@ -129,6 +138,8 @@ FIXTURE_LEGACY = FIXTURE
 )
 class AtomizerLlmLiveTests(unittest.TestCase):
     def test_live_llm_atomize_with_256k_declaration_produces_gate_valid_slice(self):
+        import yaml
+
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             raw = root / "inbox" / "research" / "claude" / "2026-05-31" / "s1.md"
@@ -136,11 +147,12 @@ class AtomizerLlmLiveTests(unittest.TestCase):
             shutil.copyfile(FIXTURE, raw)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            override = root / "atomizer.override.yaml"
-            override.write_text(
-                f'known_projects_file: "{projects}"\ncontext_window: 262144\n',
-                encoding="utf-8",
-            )
+            canonical = paths.atomizer_config_path()
+            document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+            document["known_projects_file"] = str(projects)
+            document["context_window"] = 262144
+            canonical.write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
             rc = cli.main(["atomize",
                     "--memory-root",
@@ -149,8 +161,6 @@ class AtomizerLlmLiveTests(unittest.TestCase):
                     "2026-06-02T03:00:00Z",
                     "--promoter",
                     "llm",
-                    "--override",
-                    str(override),
                 ]
             )
 
@@ -164,7 +174,7 @@ class AtomizerLlmLiveTests(unittest.TestCase):
                 json.dumps(
                     {
                         "smoke": "atomize-live-256k-context-declaration",
-                        "backend": "co-gem-zero-tool",
+                        "backend": "canonical-profile-router",
                         "declared_context_window": 262144,
                         "slices": len(slice_paths),
                     },

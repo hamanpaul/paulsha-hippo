@@ -112,6 +112,7 @@ def append_edges(
     *,
     now: str,
     config_hash: str,
+    publication_id: str | None = None,
 ) -> None:
     """Validate and append one session's relation set under one ledger lock/fsync."""
     normalized: list[tuple[str, str, str]] = []
@@ -157,6 +158,8 @@ def append_edges(
                     "to": to,
                     "atomizer_config_hash": config_hash,
                 }
+                if publication_id:
+                    event["publication_id"] = publication_id
                 lines.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
             if lines:
                 handle.seek(0, os.SEEK_END)
@@ -185,6 +188,22 @@ def read_edges(memory_root: Path) -> list[dict[str, Any]]:
     if not ledger_path.exists():
         return []
 
+    committed_publications: set[str] = set()
+    publication_journal = memory_root / "runtime" / "ledger" / "publication.jsonl"
+    if publication_journal.exists():
+        try:
+            for line in publication_journal.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event") == "publish_commit" and isinstance(event.get("publication_id"), str):
+                    committed_publications.add(event["publication_id"])
+        except (OSError, UnicodeError):
+            # A missing/unreadable publication journal must not expose a
+            # transaction-bound edge to MOC/index consumers.
+            committed_publications = set()
+
     edges = []
     with open(ledger_path, "r") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_SH)
@@ -196,6 +215,9 @@ def read_edges(memory_root: Path) -> list[dict[str, Any]]:
 
                 try:
                     edge = json.loads(line)
+                    publication_id = edge.get("publication_id")
+                    if publication_id and publication_id not in committed_publications:
+                        continue
                     edges.append(edge)
                 except json.JSONDecodeError as e:
                     raise RelationsLedgerError(

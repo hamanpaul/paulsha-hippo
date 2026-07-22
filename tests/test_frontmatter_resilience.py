@@ -84,7 +84,7 @@ class ImporterEscapingTests(unittest.TestCase):
             "session_id": "s-json",
             "assistant_summary": "semantic outcome remains separate",
             "session_title": '{"verdict":"needs-attention"}',
-            "title_source": "gemma4",
+            "title_source": "external-agent",
         }
         markdown = render_markdown(session, project="serialwrap")
         fm = _read_frontmatter_block(markdown)

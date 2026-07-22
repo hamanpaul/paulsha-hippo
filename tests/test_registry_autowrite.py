@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +25,10 @@ class RegistryAutoWriteTest(unittest.TestCase):
         self.queue.mkdir(parents=True)
         self.hippo_config = self.base / "hippo-config"
         self.hippo_config.mkdir()
+        shutil.copyfile(
+            REPO_ROOT / "paulsha_hippo" / "atomizer" / "atomizer.yaml",
+            self.hippo_config / "config.yaml",
+        )
         self.env = mock.patch.dict(
             os.environ, {"HIPPO_CONFIG_ROOT": str(self.hippo_config)}, clear=False
         )
@@ -41,9 +46,12 @@ class RegistryAutoWriteTest(unittest.TestCase):
             pass
 
     def enable_auto_write(self):
-        (self.hippo_config / "config.yaml").write_text(
-            "project_registry:\n  auto_write: true\n", encoding="utf-8"
-        )
+        import yaml
+
+        path = self.hippo_config / "config.yaml"
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document["project_registry"] = {"auto_write": True}
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
     def make_repo(self, name="widget", remote="git@github.com:acme/widget.git"):
         repo = self.base / name

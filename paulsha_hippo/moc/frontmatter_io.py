@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +100,27 @@ def dump(frontmatter: dict[str, Any], body: str) -> str:
 def update(path: Path, updates: dict[str, Any]) -> None:
     fm, body = read(path.read_text(encoding="utf-8"))
     fm.update(updates)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(dump(fm, body), encoding="utf-8")
-    tmp.replace(path)
+    # A target may already consume the complete NAME_MAX budget.  Deriving the
+    # temporary name from ``path.name`` can then make the update itself fail
+    # with ENAMETOOLONG.  A short same-directory name keeps os.replace atomic
+    # without truncating the real slice id or final filename.
+    fd, tmp_name = tempfile.mkstemp(prefix=".hippo-fm-", dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(dump(fm, body))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass

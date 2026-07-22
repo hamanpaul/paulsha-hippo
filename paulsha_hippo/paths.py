@@ -127,6 +127,11 @@ def config_path(*parts: PathPart) -> Path:
     return config_root().joinpath(*parts)
 
 
+def atomizer_config_path() -> Path:
+    """Canonical Hippo-owned runtime distiller config path."""
+    return hippo_config_root() / "config.yaml"
+
+
 def projects_config_path(memory_root_value: str | Path | None = None) -> Path:
     """projects.yaml 定位——沿 paulshaclaw facade 契約（legacy 優先序不變）。"""
     legacy_base = _env_path("PSC_CONFIG_ROOT")

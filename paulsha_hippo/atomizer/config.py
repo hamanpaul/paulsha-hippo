@@ -2,7 +2,7 @@
 import copy
 import hashlib
 import json
-import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +10,16 @@ from types import MappingProxyType
 from typing import Any
 
 from paulsha_hippo import paths
+from paulsha_hippo.config_migration import PROHIBITED_KEYS
+from paulsha_hippo.agent_profiles import (
+    AgentProfile,
+    FIXED_MAX_AGENT_CALLS,
+    FIXED_MAX_ATTEMPTS,
+    FIXED_TIMEOUT_SECONDS,
+    ProfileConfigError,
+    default_profiles,
+    profiles_from_config,
+)
 
 from .limits import MIN_CONTEXT_WINDOW
 
@@ -17,14 +27,11 @@ from .limits import MIN_CONTEXT_WINDOW
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_AGENT_EXEC_COMMAND = (
-    "/bin/bash",
-    "-c",
-    'set -eu; export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v22.20.0/bin:$PATH"; prompt=$(cat); exec "$HOME/.local/bin/co-gem" -s --no-color --available-tools=none --disable-builtin-mcps --no-custom-instructions --no-ask-user --no-remote --no-remote-export -p "$prompt"',
+    "co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin",
 )
 DEFAULT_AGENT_EXEC_TIMEOUT = 300
-DEFAULT_AGENT_EXEC_MODEL = "gem"
+DEFAULT_AGENT_EXEC_MODEL = "local"
 DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS = 2048
-DEFAULT_AGENT_EXEC_UPSTREAM_URL = "http://127.0.0.1:8080"
 DEFAULT_CONTEXT_WINDOW = MIN_CONTEXT_WINDOW
 DEFAULT_MAX_INPUT_TOKENS = 12000
 DEFAULT_MAX_PROMPT_ARGV_BYTES = 48 * 1024
@@ -57,10 +64,11 @@ class AtomizerConfig:
     agent_exec_timeout: int = DEFAULT_AGENT_EXEC_TIMEOUT
     agent_exec_model: str = DEFAULT_AGENT_EXEC_MODEL
     agent_exec_max_output_tokens: int = DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS
-    agent_exec_upstream_url: str = DEFAULT_AGENT_EXEC_UPSTREAM_URL
-    agent_exec_backend: str = "custom-argv"
-    agent_exec_base_url: str = ""
-    agent_exec_api_key_env: str = ""
+    agent_exec_backend: str = "external-cli"
+    external_profiles: tuple[AgentProfile, ...] = field(default_factory=default_profiles)
+    router_deadline_seconds: int = FIXED_TIMEOUT_SECONDS
+    router_max_attempts: int = FIXED_MAX_ATTEMPTS
+    router_max_agent_calls: int = FIXED_MAX_AGENT_CALLS
     context_window: int = DEFAULT_CONTEXT_WINDOW
     max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS
     max_prompt_argv_bytes: int = DEFAULT_MAX_PROMPT_ARGV_BYTES
@@ -132,6 +140,21 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
             result[key] = value
     
     return result
+
+
+def _nested_prohibited_fields(value: object, path: str = "") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}" if path else key
+            if key.casefold() in PROHIBITED_KEYS and child not in (None, "", [], {}, ()):
+                found.append(child_path)
+            found.extend(_nested_prohibited_fields(child, child_path))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, child in enumerate(value):
+            found.extend(_nested_prohibited_fields(child, f"{path}[{index}]"))
+    return sorted(set(found))
 
 
 def _resolve_override(override_path):
@@ -221,6 +244,26 @@ def sanitize_project_component(value: str) -> str:
     return text or "_unknown"
 
 
+def project_directory_key(value: str, *, hash_length: int = 12) -> str:
+    """Return a readable, collision-resistant filesystem key for a rich ID.
+
+    The canonical project value remains untouched in frontmatter and ledgers.
+    Simple legacy identifiers keep their old directory names; rich identifiers
+    receive a stable ``--p-<hash>`` suffix so URL/path sanitization collisions
+    cannot merge two projects on disk.
+    """
+    canonical = str(value or "").strip()
+    if not canonical:
+        return "_unknown"
+    if re.fullmatch(r"[A-Za-z0-9._-]+", canonical):
+        return sanitize_project_component(canonical)
+    prefix = sanitize_project_component(canonical)
+    prefix = re.sub(r"_+", "-", prefix).strip("-_") or "project"
+    prefix = prefix[:64].rstrip("-_") or "project"
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:hash_length]
+    return f"{prefix}--p-{digest}"
+
+
 def resolve_command_argv(
     command: Sequence[str], *, base_dir: str | Path = PROJECT_ROOT
 ) -> tuple[str, ...]:
@@ -240,25 +283,33 @@ def resolve_command_argv(
 
 
 def resolve_agent_exec_settings() -> tuple[tuple[str, ...], str]:
-    env_upstream = os.environ.get("PSC_CLAUDE_GEMMA4_UPSTREAM_URL")
+    """Return the first configured external CLI command and its model.
+
+    The second value is deliberately a model label, not an endpoint.  This
+    compatibility-shaped helper has no provider URL or credential lookup and
+    is retained for importer callers that need a command tuple.
+    """
     try:
         cfg, _ = load_config()
         command = resolve_command_argv(cfg.agent_exec_command)
-        upstream = cfg.agent_exec_upstream_url
+        model = cfg.agent_exec_model
+        if cfg.external_profiles:
+            command = cfg.external_profiles[0].render_argv()
+            model = cfg.external_profiles[0].model
     except Exception:
         command = resolve_command_argv(DEFAULT_AGENT_EXEC_COMMAND)
-        upstream = DEFAULT_AGENT_EXEC_UPSTREAM_URL
-    if env_upstream is not None:
-        return command, env_upstream
-    return command, upstream
+        model = DEFAULT_AGENT_EXEC_MODEL
+    return command, model
 
 
 def build_agent_exec_env(
     *,
-    upstream_url: str,
     max_output_tokens: int | None = None,
 ) -> dict[str, str]:
-    env = {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": upstream_url}
+    # Kept as a compatibility helper for callers that construct a launcher env.
+    # Hippo never resolves or forwards provider URLs; only the fixed output cap
+    # is a non-secret value that may cross the child-process boundary.
+    env: dict[str, str] = {}
     if max_output_tokens is not None:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
     return env
@@ -280,24 +331,45 @@ def load_config(
     Raises:
         AtomizerConfigError: If config is invalid or schema unsupported
     """
-    # Resolve default config directory
+    # A no-argument call is the production runtime contract and must read the
+    # canonical managed file.  Explicit ``override_path=None`` is retained as
+    # an isolated package-template helper for unit tests and migration tools;
+    # production CLIs never pass it.
+    using_canonical_runtime_config = False
     if default_dir is None:
-        config_dir = DEFAULT_CONFIG_DIR
+        if override_path is _DEFAULT_SENTINEL:
+            default_config_path = paths.atomizer_config_path()
+            if not default_config_path.is_file():
+                raise AtomizerConfigError(
+                    f"Canonical runtime config not found: {default_config_path}; run hippo init"
+                )
+            using_canonical_runtime_config = True
+        else:
+            default_config_path = DEFAULT_CONFIG_DIR / "atomizer.yaml"
     else:
-        config_dir = Path(default_dir)
+        default_config_path = Path(default_dir) / "atomizer.yaml"
     
     # Load default config
-    default_config_path = config_dir / "atomizer.yaml"
     if not default_config_path.exists():
         raise AtomizerConfigError(f"Default config not found: {default_config_path}")
     
     config_data = dict(_read_mapping(default_config_path))
     
     # Merge override if path resolves and exists
-    resolved_override = _resolve_override(override_path)
+    # Once the managed canonical file exists, the runtime must not silently
+    # merge the legacy provider/override surface.  Explicit override paths stay
+    # available for isolated tests and operator-reviewed dry runs.
+    resolved_override = None if using_canonical_runtime_config else _resolve_override(override_path)
     if resolved_override is not None and resolved_override.exists():
         override_data = _read_mapping(resolved_override)
         config_data = _deep_merge(config_data, override_data)
+
+    nested_prohibited = _nested_prohibited_fields(config_data)
+    if nested_prohibited:
+        raise AtomizerConfigError(
+            "operator-redaction-required: prohibited direct-provider fields: "
+            + ", ".join(nested_prohibited)
+        )
     
     # Validate schema version
     schema_version = str(config_data.get("schema_version", ""))
@@ -341,6 +413,10 @@ def load_config(
     default_phase = config_data.get("default_phase", "review")
 
     agent_exec_config = config_data.get("agent_exec", {})
+    if using_canonical_runtime_config and agent_exec_config not in (None, "", {}, []):
+        raise AtomizerConfigError(
+            "canonical runtime config must use external_agents.profiles; agent_exec is retired"
+        )
     if not isinstance(agent_exec_config, Mapping):
         raise AtomizerConfigError(
             f"agent_exec must be a mapping, got {type(agent_exec_config).__name__}"
@@ -363,17 +439,6 @@ def load_config(
         ),
         "agent_exec.max_output_tokens",
     )
-    agent_exec_upstream_url = _require_non_empty_string(
-        agent_exec_config.get(
-            "upstream_url",
-            os.environ.get(
-                "PSC_CLAUDE_GEMMA4_UPSTREAM_URL",
-                DEFAULT_AGENT_EXEC_UPSTREAM_URL,
-            ),
-        ),
-        "agent_exec.upstream_url",
-    )
-
     default_promoter = _require_non_empty_string(
         config_data.get("promoter", "identity"),
         "promoter",
@@ -425,13 +490,84 @@ def load_config(
         if actual != expected:
             raise AtomizerConfigError(f"{field_name} is fixed at {expected}, got {actual}")
     
-    agent_exec_backend = str(agent_exec_config.get("backend", "custom-argv"))
-    if agent_exec_backend not in ("custom-argv", "openai-compatible", "claude-headless"):
+    agent_exec_backend = str(agent_exec_config.get("backend", "external-cli"))
+    if agent_exec_backend in {"openai-compatible", "http", "tcp"}:
+        raise AtomizerConfigError(
+            "operator-redaction-required: retired direct-provider backend "
+            "agent_exec.backend"
+        )
+    if agent_exec_backend not in ("custom-argv", "external-cli", "claude-headless"):
         raise AtomizerConfigError(f"Unsupported agent_exec.backend: {agent_exec_backend}")
-    agent_exec_base_url = str(agent_exec_config.get("base_url", "") or "")
-    agent_exec_api_key_env = str(agent_exec_config.get("api_key_env", "") or "")
-    if agent_exec_backend == "openai-compatible" and not agent_exec_base_url:
-        raise AtomizerConfigError("agent_exec.backend=openai-compatible requires agent_exec.base_url")
+    prohibited = []
+    for field_name in (
+        "base_url", "api_key_env", "upstream_url", "provider_url", "oauth",
+        "oauth_state", "secret_path", "credential_env", "credential_store",
+    ):
+        value = agent_exec_config.get(field_name)
+        if value not in (None, "", [], {}):
+            prohibited.append(f"agent_exec.{field_name}")
+    for field_name in (
+        "base_url", "api_key_env", "upstream_url", "provider_url", "oauth",
+        "oauth_state", "secret_path", "credential_env", "credential_store",
+    ):
+        value = config_data.get(field_name)
+        if value not in (None, "", [], {}):
+            prohibited.append(field_name)
+    if config_data.get("distiller") not in (None, "", {}, []):
+        prohibited.append("distiller")
+    if prohibited:
+        raise AtomizerConfigError(
+            "operator-redaction-required: prohibited direct-provider fields: "
+            + ", ".join(sorted(set(prohibited)))
+        )
+
+    external_agents = config_data.get("external_agents", {})
+    if external_agents is None:
+        external_agents = {}
+    if not isinstance(external_agents, Mapping):
+        raise AtomizerConfigError("external_agents must be a mapping")
+    try:
+        external_profiles = profiles_from_config(external_agents.get("profiles"))
+        # Explicit package-template tests may still exercise the former custom
+        # command compatibility parser.  Canonical runtime can never enter this
+        # branch because agent_exec is rejected above.
+        if not using_canonical_runtime_config and agent_exec_command != DEFAULT_AGENT_EXEC_COMMAND:
+            custom = AgentProfile.from_mapping(
+                {
+                    "id": "custom-local",
+                    "tier": 3,
+                    "priority": 1,
+                    "traits": ["custom", "fallback"],
+                    "task_classes": ["atomization", "title", "skillopt"],
+                    "model": agent_exec_model,
+                    "effort": "medium",
+                    "supported_efforts": ["low", "medium", "high", "xhigh"],
+                    "argv": list(agent_exec_command),
+                }
+            )
+            # An explicit legacy command is an operator-selected custom
+            # profile.  Do not unexpectedly launch unrelated installed CLIs
+            # before it; the declared profile itself remains subject to the
+            # same stdin/shell/env safety contract.
+            external_profiles = (custom,)
+    except ProfileConfigError as exc:
+        raise AtomizerConfigError(str(exc)) from exc
+    router_deadline = _parse_positive_int(
+        external_agents.get("deadline_seconds", FIXED_TIMEOUT_SECONDS),
+        "external_agents.deadline_seconds",
+    )
+    router_attempts = _parse_positive_int(
+        external_agents.get("max_attempts", FIXED_MAX_ATTEMPTS),
+        "external_agents.max_attempts",
+    )
+    router_calls = _parse_positive_int(
+        external_agents.get("max_agent_calls", FIXED_MAX_AGENT_CALLS),
+        "external_agents.max_agent_calls",
+    )
+    if router_deadline > FIXED_TIMEOUT_SECONDS or router_attempts > FIXED_MAX_ATTEMPTS or router_calls > FIXED_MAX_AGENT_CALLS:
+        raise AtomizerConfigError(
+            "external_agents budgets cannot exceed fixed bounded limits"
+        )
 
     # Build config object
     cfg = AtomizerConfig(
@@ -446,10 +582,11 @@ def load_config(
         agent_exec_timeout=agent_exec_timeout,
         agent_exec_model=agent_exec_model,
         agent_exec_max_output_tokens=agent_exec_max_output_tokens,
-        agent_exec_upstream_url=agent_exec_upstream_url,
         agent_exec_backend=agent_exec_backend,
-        agent_exec_base_url=agent_exec_base_url,
-        agent_exec_api_key_env=agent_exec_api_key_env,
+        external_profiles=external_profiles,
+        router_deadline_seconds=router_deadline,
+        router_max_attempts=router_attempts,
+        router_max_agent_calls=router_calls,
         context_window=context_window,
         max_input_tokens=max_input_tokens,
         max_prompt_argv_bytes=max_prompt_argv_bytes,

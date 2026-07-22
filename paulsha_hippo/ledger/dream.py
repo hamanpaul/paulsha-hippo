@@ -6,6 +6,7 @@ Minimal, deterministic, flock-protected JSONL writes and reads.
 import fcntl
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,3 +105,110 @@ def backlog_depth(memory_root: Path) -> int:
         count += 1
 
     return count
+
+
+def backlog_census(memory_root: Path, *, now: str | None = None) -> dict[str, Any]:
+    """Return one truthful, non-mutating backlog/health census."""
+    from . import processing
+
+    folded = processing.fold_events(memory_root)
+    states = {
+        session_key: str(event.get("state", ""))
+        for session_key, event in folded.items()
+        if event.get("state")
+    }
+    raw_paths = []
+    inbox = memory_root / "inbox"
+    if inbox.exists():
+        raw_paths = [
+            path for path in inbox.rglob("*.md")
+            if "_slices" not in path.relative_to(inbox).parts
+        ]
+    quarantine = memory_root / "runtime" / "quarantine" / "inbox"
+    quarantined = len(list(quarantine.glob("*.md"))) if quarantine.exists() else 0
+    reason_counts: dict[str, int] = {}
+    for session_key, event in folded.items():
+        if event.get("state") == "parked":
+            reason = str(event.get("failure_category") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    oldest = None
+    oldest_timestamp = None
+    for path in raw_paths:
+        try:
+            timestamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError:
+            continue
+        if oldest_timestamp is None or timestamp < oldest_timestamp:
+            oldest_timestamp = timestamp
+            oldest = timestamp.isoformat().replace("+00:00", "Z")
+    for event in folded.values():
+        if event.get("state") not in {"split", "parked"}:
+            continue
+        raw_timestamp = event.get("ts")
+        if not isinstance(raw_timestamp, str):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        if oldest_timestamp is None or timestamp < oldest_timestamp:
+            oldest_timestamp = timestamp
+            oldest = timestamp.isoformat().replace("+00:00", "Z")
+    promoted = sum(state == "promoted" for state in states.values())
+    split_sessions = {key for key, state in states.items() if state == "split"}
+    retrying_sessions = {
+        key for key in split_sessions
+        if int(folded.get(key, {}).get("attempts", 0) or 0) > 0
+    }
+    quarantine_states = sum(state == "quarantined" for state in states.values())
+    generic_title = 0
+    unknown_project = 0
+    invalid_frontmatter = 0
+    invalid_checksum = 0
+    knowledge = memory_root / "knowledge"
+    if knowledge.exists():
+        from ..lib.lifecycle.schema import compute_checksum
+        from ..moc import frontmatter_io
+        from ..noise import is_generic_title
+
+        for path in knowledge.rglob("*.md"):
+            try:
+                frontmatter, body = frontmatter_io.read(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                invalid_frontmatter += 1
+                continue
+            required = ("slice_id", "project", "checksum", "memory_layer")
+            if not frontmatter or any(field not in frontmatter for field in required):
+                invalid_frontmatter += 1
+                continue
+            if str(frontmatter.get("checksum")) != compute_checksum(body):
+                invalid_checksum += 1
+            title = frontmatter.get("atom_title") or frontmatter.get("title") or frontmatter.get("session_title")
+            generic_title += int(is_generic_title(str(title or "")))
+            unknown_project += int(str(frontmatter.get("project") or "") in {"", "_unknown"})
+    result = {
+        "raw": len(raw_paths),
+        "split": len(split_sessions),
+        "retrying": len(retrying_sessions),
+        "parked": sum(state == "parked" for state in states.values()),
+        "quarantined": max(quarantined, quarantine_states),
+        "promoted": promoted,
+        "generic_title": generic_title,
+        "unknown_project": unknown_project,
+        "invalid_frontmatter": invalid_frontmatter,
+        "invalid_checksum": invalid_checksum,
+        "oldest_backlog_at": oldest,
+        "oldest_backlog_age_seconds": None,
+        "reason_counts": reason_counts,
+    }
+    if oldest_timestamp is not None and now:
+        try:
+            current = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            result["oldest_backlog_age_seconds"] = max(0, int((current - oldest_timestamp).total_seconds()))
+        except ValueError:
+            pass
+    return result

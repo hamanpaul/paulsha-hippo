@@ -18,7 +18,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from paulsha_hippo import cli as memory_cli
+from paulsha_hippo import cli as memory_cli, paths
 from paulsha_hippo.ledger import processing
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "atomizer"
@@ -32,34 +32,31 @@ def _seed(root: Path) -> None:
     shutil.copyfile(RAW_FIXTURE, raw)
 
 
-def _write_override(root: Path, agent_script: str, *, timeout_seconds: int = 300) -> Path:
+def _write_profile(root: Path, agent_script: str, *, timeout_seconds: int = 300) -> None:
+    import yaml
+
     projects = root / "projects.yaml"
     projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-    override = root / "atomizer.override.yaml"
-    override.write_text(
-        "\n".join(
-            (
-                f'known_projects_file: "{projects}"',
-                "agent_exec:",
-                "  command:",
-                f"    - {sys.executable}",
-                f"    - {FIXTURES / agent_script}",
-                f"  timeout_seconds: {timeout_seconds}",
-                "  model: mock-backend",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return override
+    canonical = paths.atomizer_config_path()
+    document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
+    document["known_projects_file"] = str(projects)
+    document["external_agents"]["profiles"] = [{
+        "id": "mock-backend", "enabled": True, "tier": 1, "priority": 1,
+        "traits": ["test"], "task_classes": ["atomization"],
+        "model": "mock", "supported_models": ["mock"],
+        "effort": "medium", "supported_efforts": ["medium"],
+        "timeout": timeout_seconds,
+        "argv": [sys.executable, str(FIXTURES / agent_script)],
+    }]
+    canonical.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
 
-def _atomize(root: Path, override: Path, now: str) -> tuple[int, str]:
+def _atomize(root: Path, now: str) -> tuple[int, str]:
     buf = io.StringIO()
     with redirect_stdout(buf):
         rc = memory_cli.main([
             "atomize", "--memory-root", str(root), "--now", now,
-            "--promoter", "llm", "--override", str(override),
+            "--promoter", "llm",
         ])
     return rc, buf.getvalue()
 
@@ -74,8 +71,8 @@ class ProseWrappedJsonTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
-            override = _write_override(root, "prose-agent.py")
-            rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
+            _write_profile(root, "prose-agent.py")
+            rc, out = _atomize(root, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
             self.assertEqual(processing.state_of(root, SESSION_KEY), "parked")
             self.assertEqual(list((root / "knowledge").rglob("*.md")), [])
@@ -86,9 +83,9 @@ class TruncatedOutputTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
-            override = _write_override(root, "truncated-agent.py")
+            _write_profile(root, "truncated-agent.py")
 
-            rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
+            rc, out = _atomize(root, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
             state = processing.state_of(root, SESSION_KEY)
             self.assertEqual(state, "parked")
@@ -111,7 +108,7 @@ class TruncatedOutputTests(unittest.TestCase):
 
             # parked 不再吃 atomize 預算（spec §3.1.2）
             attempts_before = int(event["attempts"])
-            rc, _ = _atomize(root, override, "2026-07-10T12:00:00Z")
+            rc, _ = _atomize(root, "2026-07-10T12:00:00Z")
             self.assertEqual(rc, 0)
             event_after = processing.fold_events(root)[SESSION_KEY]
             self.assertEqual(event_after["state"], "parked")
@@ -124,11 +121,13 @@ class NonZeroExitTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
-            override = _write_override(root, "failing-agent.py")
-            rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
+            _write_profile(root, "failing-agent.py")
+            rc, out = _atomize(root, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 0)
             self.assertEqual(processing.state_of(root, SESSION_KEY), "parked")
-            self.assertIn("exited with code 3", out)
+            self.assertIn("exit 3", out)
+            event = processing.fold_events(root)[SESSION_KEY]
+            self.assertEqual(event["failure_category"], "transient")
             self.assertEqual(_cache_json_files(root), [])
 
 
@@ -137,11 +136,11 @@ class TimeoutTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
-            override = _write_override(root, "hanging-agent.py", timeout_seconds=1)
-            rc, out = _atomize(root, override, "2026-07-10T00:00:00Z")
+            _write_profile(root, "hanging-agent.py", timeout_seconds=1)
+            rc, out = _atomize(root, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 1)
             self.assertIsNone(processing.state_of(root, SESSION_KEY))
-            self.assertIn("timeout_seconds is fixed at 300", out)
+            self.assertIn("timeout is fixed at 300", out)
             self.assertEqual(_cache_json_files(root), [])
 
 

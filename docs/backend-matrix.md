@@ -1,61 +1,38 @@
-# Backend preset 矩陣（#10）
+# External headless profile 矩陣
 
-> registry 真源：`paulsha_hippo/backends.py`（`PRESETS`，契約見
-> `docs/superpowers/specs/2026-07-10-all-issues-resolution-design.md` §3.5）。
-> 本文件記錄各 preset 的 argv 契約、doctor probe、前置條件與實測狀態
-> （基線 2026-07-10）。機制：argv presets 全走 custom-argv 機制——prompt 由
-> stdin 餵入、stdout 取回輸出（`AgentExecClient`）；HTTP 檔位走
-> `HttpAgentClient`。機制零新增。
+這份矩陣描述目前 release candidate 的 runtime contract。Hippo 不提供 HTTP/TCP
+provider client，也不保存 API key、OAuth、provider URL 或 credential env-name；
+登入與 launcher 由外部 CLI 自己負責。
 
-| preset | argv template | doctor probe | 前置條件 | 實測狀態（2026-07-10） |
-|---|---|---|---|---|
-| `claude-headless` | `claude -p` | `claude --version` | Claude Code 已登入 | ✓ v0.1.0 既有已驗檔位（原生執行檔，無 node PATH 問題） |
-| `codex-headless` | `codex exec --skip-git-repo-check --sandbox read-only --color never -` | `codex --version` | Codex CLI 已登入 | ✓ stdin→stdout round-trip：stdout 僅含 final message，log 全走 stderr |
-| `copilot-headless` | `copilot -s --no-color` | `copilot --version` | Copilot CLI 已登入 | ✓ stdin 為唯一 prompt 來源。⚠ 帶非空 `-p` 時 stdin 注入不可靠（實測內容丟失、agent 徘徊），preset 刻意不用 `-p` |
-| `gemini-headless` | —（unavailable；候選未驗證：`gemini -p "執行 stdin 提供的任務指示"`，僅由 `--help` 推得、不入 registry template） | —（unavailable 宣告層短路） | 升級前提見下節 | ✗ unavailable：無成功 stdin→stdout round-trip 實證——2026-07-10 實測 `--version` rc=0、headless 呼叫 rc=41（selectedType=vertex-ai 無 `GOOGLE_CLOUD_PROJECT`/`GOOGLE_API_KEY` env）；依 spec §8「接不上就標 unavailable + 回報，不猜 argv」。`init` 選單顯示但選了 rc 2；不在 smoke 矩陣 |
-| `antigravity-headless` | —（未確認） | — | — | ✗ unavailable：命令契約未確認（spec §2 非目標）；`init --backend` 選單顯示但選了會 rc 2 |
-| `openai-compatible` | —（HTTP） | —（integration smoke） | `base_url` 必填；key 一律走 `api_key_env`（config 不放值） | env-gate smoke：`HIPPO_SMOKE_OPENAI_BASE_URL`（見 `tests/test_openai_smoke_integration.py`） |
-| `custom-argv` | 使用者自訂 | — | argv[0] 建議絕對路徑 | ✓ 既有機制（預設 gemma4 wrapper 沿用） |
+| tier | profile | traits / task class | default model / effort | tokenized headless argv | 狀態 |
+|---|---|---|---|---|---|
+| 1 | `claude` | judge、reasoner / atomization、title | `sonnet` / `high` | `claude --model {MODEL} --effort {EFFORT} --safe-mode ... --tools '' ... --print` | 內建 tools/MCP/customizations 停用；仍須 service-effective live probe |
+| 1 | `codex` | judge、reasoner / atomization、title | `gpt-5` / `high` | `codex exec --model {MODEL} -c model_reasoning_effort=high ... --ignore-user-config --disable shell_tool -` | 固定 high 映射符合目前 CLI；其他 effort 必須在 argv 明確映射後再 probe |
+| 2 | `agy` | fast、responsive / title | `default` / `medium` | `agy --model {MODEL} --effort {EFFORT} --mode plan --sandbox --print` | 原生 CLI 無可證明的 zero-tool flag，預設不進 Dream atomization eligible set |
+| 2 | `cg` | heavy-implementation、fast / atomization、title | `default` / `high` | `cg --model {MODEL} --effort {EFFORT} --headless --stdin` | 預設 disabled；alias-only 或 zero-tool 契約未證實時不得啟用 |
+| 3 | `co-gem` | low-cost、fallback / atomization、title | `local` / `low` | `co-gem --model {MODEL} --effort {EFFORT} --headless --stdin` | 預設 disabled；本機 launcher headless smoke 通過後才可啟用 |
+| 3 | `claude-gem` | low-cost、fallback / atomization、title | `local` / `low` | `claude-gem --model {MODEL} --effort {EFFORT} --headless --stdin` | 預設 disabled；本機 executable/契約驗證後才可啟用 |
+| 3 | custom local | operator-defined traits/task class/model/effort | operator-defined | tokenized argv；不可含 shell wrapper 或 prompt token | 需 operator 以 profile manifest 配置 |
 
-## unavailable preset 升級前提（gemini-headless／antigravity-headless）
+Router 依 `(tier, priority, profile id)` 決定順序，整個 session 使用同一份 frozen
+prompt；每次最多 6 attempts / 6 agent calls、每 chunk 300 秒，失敗 profile 進
+circuit cooldown。只允許明確的失敗類別 fallback；安全設定錯誤不會降級繞過。成功
+但使用 Tier 2/3 時 provenance 會記 `degraded-success` 與先前 attempts。
 
-翻 `available=True` 的必要前提（缺一不可，同一 PR 完成）：
+所有 profile 必須使用 `shell=False` 的 tokenized argv；prompt 只走 stdin。`{PROMPT}`、
+shell alias/function、shell metacharacter、`--yolo`、`--autopilot`、permission bypass、
+tool/MCP/remote fallback 均拒絕。child env 是固定 allowlist，外部 launcher 可在
+Hippo 邊界外處理認證。
 
-1. 真實認證備妥後，以候選 argv 完成**一次成功的 stdin→stdout round-trip**
-   （rc=0、stdout 取回可解析回覆本文），並把實測記錄更新進上表。
-2. registry（`paulsha_hippo/backends.py`）同步：`argv_template` 填入實測定案
-   argv、`available=True`。
-3. 同 PR 補對應 live smoke（`tests/test_atomizer_llm_live.py`）——
-   `SmokeMatrixCoverageTests` 強制「available 的 argv preset 必在 smoke 矩陣」，
-   漏補即 FAIL。
+每個 profile 另有明確 `enabled` gate；停用 profile 會在 executable probe 前即標成
+`ineligible/disabled`，不消耗 agent call。Provenance 同時記錄 tier 與 tier 內 priority。
 
-實測證據記錄（gemini-headless，2026-07-10）：`gemini --version` rc=0；headless
-round-trip **失敗 rc=41**——本機認證 selectedType=vertex-ai 而無對應 env
-（`GOOGLE_CLOUD_PROJECT`/`GOOGLE_API_KEY`）。候選 argv 僅由 `--help` 文字
-（`-p`：「Appended to input on stdin (if any)」）推得，無任何成功實證——依
-spec §8 風險表「不猜 argv」標 unavailable。antigravity-headless：執行檔不存在、
-命令契約未確認（spec §2 非目標）。
+## 驗證邊界
 
-## systemd service 環境注意
-
-- `codex`／`gemini` 是 node script（`#!/usr/bin/env node`）：即使 config 寫了
-  絕對路徑 argv[0]，systemd --user service 的 PATH 沒有 node 目錄時仍會啟動
-  失敗。解法：service unit 加 `Environment=PATH=...`（含 node bin 目錄）或改用
-  self-contained backend（`claude-headless`／`openai-compatible`）。
-  `hippo doctor` 的 preset probe 以 service-effective PATH 執行，能直接暴露
-  這類故障。
-- 蒸餾子程序一律帶 `HIPPO_SELF_SESSION=1`（`agent_exec` 注入）——三家 CLI 的
-  hippo hooks 讀到即跳過 queue write，不會遞迴自捕捉。
-
-## smoke 執行方式
-
-    # 三 available preset 真蒸餾（claude/codex/copilot；probe 失敗者 skip 並回報
-    # 原因；unavailable preset 不在矩陣，見上節升級前提）
-    PSC_ATOMIZE_LIVE=1 python3 -m pytest tests/test_atomizer_llm_live.py -v -s -ra
-
-    # openai-compatible 真端點（integration profile）
-    HIPPO_SMOKE_OPENAI_BASE_URL=<endpoint> HIPPO_SMOKE_OPENAI_MODEL=<model> \
-    python3 -m pytest tests/test_openai_smoke_integration.py -v -s
-
-    # mock 情境矩陣（散文包 JSON／截斷／non-zero／timeout；一般 CI 內建）
-    python3 -m pytest tests/test_atomizer_backend_matrix.py -v
+- `tests/test_external_agent_profiles.py` 與 backend matrix 測試覆蓋 tier ordering、
+  safety rejection、bounded fallback、cache separation 與 minimal env。
+- `tests/test_atomizer_llm_live.py` 的真 CLI probe 只有在 operator 明確設定 live gate
+  時執行；未執行不會被標成 passed。
+- service-effective eligibility、每個 profile 的 live smoke、installed hook/service
+  chain、三次 systemd soak 與 consumer `offered → Read` 仍是 release readiness matrix
+  的待驗證 gates。

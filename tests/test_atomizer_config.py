@@ -8,6 +8,7 @@ from pathlib import Path
 from paulsha_hippo.atomizer.config import (
     AtomizerConfig,
     AtomizerConfigError,
+    DEFAULT_CONFIG_DIR,
     _deep_merge,
     load_config,
     resolve_command_argv,
@@ -19,7 +20,7 @@ class TestAtomizerConfig(unittest.TestCase):
 
     def test_load_defaults(self):
         """load_config(override_path=None) returns cfg with expected defaults and hash."""
-        cfg, hash_value = load_config(override_path=None)
+        cfg, hash_value = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
         
         self.assertEqual(cfg.default_artifact_kind, "report")
         self.assertEqual(cfg.default_phase, "review")
@@ -32,7 +33,7 @@ class TestAtomizerConfig(unittest.TestCase):
     def test_override_merges_and_changes_hash(self):
         """Base hash differs after override file with split.max_fragment_chars: 100."""
         # Load default config and get hash
-        cfg_default, hash_default = load_config(override_path=None)
+        cfg_default, hash_default = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
         
         # Create override file with modified max_fragment_chars
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
@@ -40,7 +41,9 @@ class TestAtomizerConfig(unittest.TestCase):
             f.write("split:\n  max_fragment_chars: 100\n")
         
         try:
-            cfg_override, hash_override = load_config(override_path=override_path)
+            cfg_override, hash_override = load_config(
+                default_dir=DEFAULT_CONFIG_DIR, override_path=override_path
+            )
             
             # Hash should change
             self.assertNotEqual(hash_default, hash_override)
@@ -67,8 +70,8 @@ class TestAtomizerConfig(unittest.TestCase):
 
     def test_hash_deterministic(self):
         """Repeated default config loads produce same hash."""
-        _, hash1 = load_config(override_path=None)
-        _, hash2 = load_config(override_path=None)
+        _, hash1 = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
+        _, hash2 = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
         
         self.assertEqual(hash1, hash2)
 
@@ -83,7 +86,7 @@ class TestAtomizerConfig(unittest.TestCase):
                 AtomizerConfigError,
                 r"context_window must be at least 32768, got 32767",
             ):
-                load_config(override_path=override_path)
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=override_path)
         finally:
             override_path.unlink()
 
@@ -98,7 +101,9 @@ class TestAtomizerConfig(unittest.TestCase):
                     f.write(f"context_window: {value}\n")
 
                 try:
-                    cfg, _ = load_config(override_path=override_path)
+                    cfg, _ = load_config(
+                        default_dir=DEFAULT_CONFIG_DIR, override_path=override_path
+                    )
                     self.assertEqual(cfg.context_window, value)
                 finally:
                     override_path.unlink()
@@ -114,7 +119,9 @@ class TestAtomizerConfig(unittest.TestCase):
                 f.write(f"context_window: {value}\n")
 
             try:
-                _, hash_value = load_config(override_path=override_path)
+                _, hash_value = load_config(
+                    default_dir=DEFAULT_CONFIG_DIR, override_path=override_path
+                )
                 hashes.append(hash_value)
             finally:
                 override_path.unlink()
@@ -153,7 +160,10 @@ class TestAtomizerConfig(unittest.TestCase):
                         AtomizerConfigError,
                         expected_error,
                     ):
-                        load_config(override_path=override_path)
+                        load_config(
+                            default_dir=DEFAULT_CONFIG_DIR,
+                            override_path=override_path,
+                        )
                 finally:
                     override_path.unlink()
 
@@ -165,7 +175,7 @@ class TestAtomizerConfig(unittest.TestCase):
 
         try:
             with self.assertRaises(AtomizerConfigError):
-                load_config(override_path=override_path)
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=override_path)
         finally:
             override_path.unlink()
 
@@ -179,7 +189,10 @@ class TestAtomizerConfig(unittest.TestCase):
 
                 try:
                     with self.assertRaises(AtomizerConfigError):
-                        load_config(override_path=override_path)
+                        load_config(
+                            default_dir=DEFAULT_CONFIG_DIR,
+                            override_path=override_path,
+                        )
                 finally:
                     override_path.unlink()
 
@@ -191,13 +204,13 @@ class TestAtomizerConfig(unittest.TestCase):
 
         try:
             with self.assertRaises(AtomizerConfigError):
-                load_config(override_path=override_path)
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=override_path)
         finally:
             override_path.unlink()
 
     def test_config_maps_are_immutable(self):
         """Frozen config must not expose mutable mapping internals."""
-        cfg, _ = load_config(override_path=None)
+        cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
 
         with self.assertRaises(TypeError):
             cfg.artifact_kind_map["injected"] = "malicious"
@@ -221,16 +234,18 @@ class TestAtomizerConfig(unittest.TestCase):
 
 class AgentExecConfigTests(unittest.TestCase):
     def test_agent_exec_and_promoter_defaults(self):
-        cfg, _ = load_config(override_path=None)
+        cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
 
         self.assertTrue(cfg.agent_exec_command)
         self.assertGreater(cfg.agent_exec_timeout, 0)
-        self.assertTrue(cfg.agent_exec_upstream_url.startswith("http"))
+        self.assertEqual(cfg.agent_exec_backend, "external-cli")
+        self.assertGreaterEqual(len(cfg.external_profiles), 6)
+        self.assertNotIn("upstream_url", cfg.__dict__)
         self.assertIn(cfg.default_promoter, ("identity", "llm"))
         self.assertTrue(cfg.skill_path)
         self.assertTrue(cfg.known_projects_file)
 
-    def test_upstream_url_override_and_hash(self):
+    def test_retired_provider_fields_are_rejected(self):
         import pathlib
         from paulsha_hippo.atomizer import config as cfgmod
 
@@ -241,16 +256,15 @@ class AgentExecConfigTests(unittest.TestCase):
             "    - '^#'\n"
             "  max_fragment_chars: 8000\n"
             "agent_exec:\n"
-            "  upstream_url: http://10.0.0.5:9001\n"
+            "  api_key_env: HIPPO_PROVIDER_KEY\n"
         )
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d)
             (p / "atomizer.yaml").write_text(base, encoding="utf-8")
-            cfg, hash_value = cfgmod.load_config(default_dir=p, override_path=None)
-            self.assertEqual(cfg.agent_exec_upstream_url, "http://10.0.0.5:9001")
-            self.assertEqual(len(hash_value), 64)
+            with self.assertRaisesRegex(cfgmod.AtomizerConfigError, "operator-redaction"):
+                cfgmod.load_config(default_dir=p, override_path=None)
 
-    def test_resolve_agent_exec_settings_prefers_env_upstream(self):
+    def test_resolve_agent_exec_settings_has_no_endpoint(self):
         from paulsha_hippo.atomizer import config as cfgmod
 
         with mock.patch.dict(
@@ -258,8 +272,10 @@ class AgentExecConfigTests(unittest.TestCase):
             {"PSC_CLAUDE_GEMMA4_UPSTREAM_URL": "http://10.0.0.9:9002"},
             clear=False,
         ):
-            _, upstream = cfgmod.resolve_agent_exec_settings()
-        self.assertEqual(upstream, "http://10.0.0.9:9002")
+            command, model = cfgmod.resolve_agent_exec_settings()
+        self.assertTrue(command)
+        self.assertTrue(model)
+        self.assertNotIn("http://", " ".join(command))
 
     def test_missing_known_projects_file_uses_facade_default(self):
         from paulsha_hippo.atomizer import config as cfgmod
@@ -271,7 +287,10 @@ class AgentExecConfigTests(unittest.TestCase):
             agents_root = p / "custom-agents"
             with mock.patch.dict(
                 "os.environ",
-                {"PSC_AGENTS_ROOT": str(agents_root)},
+                {
+                    "PSC_AGENTS_ROOT": str(agents_root),
+                    "PSC_CONFIG_ROOT": "",
+                },
                 clear=False,
             ):
                 cfg, _ = cfgmod.load_config(default_dir=p, override_path=None)
@@ -288,7 +307,7 @@ class AgentExecConfigTests(unittest.TestCase):
 
         try:
             with self.assertRaises(AtomizerConfigError):
-                load_config(override_path=override_path)
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=override_path)
         finally:
             override_path.unlink()
 
@@ -299,14 +318,14 @@ class AgentExecConfigTests(unittest.TestCase):
 
         try:
             with self.assertRaises(AtomizerConfigError):
-                load_config(override_path=override_path)
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=override_path)
         finally:
             override_path.unlink()
 
     def test_resolve_command_argv_expands_repo_relative_script(self):
-        resolved = resolve_command_argv(("scripts/claude-gemma4",))
+        resolved = resolve_command_argv(("scripts/build_release_artifact.py",))
         self.assertTrue(Path(resolved[0]).is_absolute())
-        self.assertTrue(resolved[0].endswith("/scripts/claude-gemma4"))
+        self.assertTrue(resolved[0].endswith("/scripts/build_release_artifact.py"))
 
     def test_max_output_tokens_default_and_in_hash(self):
         import tempfile, pathlib

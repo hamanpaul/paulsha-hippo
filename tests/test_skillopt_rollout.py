@@ -82,7 +82,7 @@ class AtomizeRolloutTests(unittest.TestCase):
 
         self.assertEqual(rollout("---\nname: atomize\n---\nbody\n", []), [])
 
-    def test_missing_config_uses_default_override_resolution(self):
+    def test_missing_config_uses_canonical_profile_model(self):
         default_cfg = AtomizerConfig(
             schema_version="1",
             boundary_patterns=(r"^#{1,6}\s",),
@@ -91,23 +91,10 @@ class AtomizeRolloutTests(unittest.TestCase):
             phase_map={},
             default_artifact_kind="report",
             default_phase="review",
-            agent_exec_model="model-from-default-override",
-        )
-        disabled_cfg = AtomizerConfig(
-            schema_version="1",
-            boundary_patterns=(r"^#{1,6}\s",),
-            max_fragment_chars=8000,
-            artifact_kind_map={},
-            phase_map={},
-            default_artifact_kind="report",
-            default_phase="review",
-            agent_exec_model="model-with-overrides-disabled",
         )
         promoted: dict[str, object] = {}
 
         def fake_load_config(*args, **kwargs):
-            if kwargs.get("override_path", mock.sentinel.unset) is None:
-                return disabled_cfg, "disabled"
             return default_cfg, "default"
 
         class FakePromoter:
@@ -130,7 +117,7 @@ class AtomizeRolloutTests(unittest.TestCase):
 
         load_config_mock.assert_called_once_with()
         self.assertIs(promoted["cfg"], default_cfg)
-        self.assertEqual(promoted["model"], "model-from-default-override")
+        self.assertEqual(promoted["model"], "sonnet")
 
 
 if __name__ == "__main__":

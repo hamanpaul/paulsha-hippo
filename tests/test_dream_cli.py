@@ -215,11 +215,43 @@ class DreamCliTests(unittest.TestCase):
             root = Path(tmp)
             _seed(root)
             buf = io.StringIO()
-            with redirect_stdout(buf):
+            with patch(
+                "paulsha_hippo.dream.cli.dream_ledger.backlog_census",
+                side_effect=AssertionError("status must not rescan knowledge"),
+            ), redirect_stdout(buf):
                 rc = cli.main(["dream", "status", "--memory-root", str(root)])
             self.assertEqual(rc, 0)
             payload = json.loads(buf.getvalue())
             self.assertEqual(payload["backlog_depth"], 1)
+            self.assertIn("build_commit", payload["build_identity"])
+            self.assertTrue(payload["config_identity"]["hash"])
+            self.assertTrue(payload["config_identity"]["external_profiles"])
+            self.assertTrue(all(
+                "command_fingerprint" in row
+                for row in payload["config_identity"]["external_profiles"]
+            ))
+            self.assertIsNone(payload["health"])
+            self.assertEqual(payload["health_source"], "unavailable")
+
+    def test_status_reuses_last_run_health_without_full_census(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dream.append_run(root, {
+                "ts": "2026-07-22T00:00:00Z",
+                "status": "ok",
+                "health": {"generic_title": 3, "invalid_checksum": 0},
+            })
+            buf = io.StringIO()
+            with patch(
+                "paulsha_hippo.dream.cli.dream_ledger.backlog_census",
+                side_effect=AssertionError("status must not rescan knowledge"),
+            ), redirect_stdout(buf):
+                rc = cli.main(["dream", "status", "--memory-root", str(root)])
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["health"], {"generic_title": 3, "invalid_checksum": 0})
+            self.assertEqual(payload["health_source"], "last-run-ledger")
 
 
 if __name__ == "__main__":

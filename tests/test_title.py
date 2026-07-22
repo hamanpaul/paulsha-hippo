@@ -1,5 +1,10 @@
-from paulsha_hippo.importer import title
+import importlib
+from unittest import mock
 
+import pytest
+
+from paulsha_hippo.atomizer.config import AtomizerConfigError
+from paulsha_hippo.importer import title
 
 def test_generate_uses_runner_and_truncates_to_20():
     long = "這是一個非常長的標題會超過二十個中文字所以一定要被截斷對吧真的很長"
@@ -7,7 +12,7 @@ def test_generate_uses_runner_and_truncates_to_20():
         {"user_prompts": ["問題"], "assistant_summary": "答案"},
         runner=lambda text, cmd, timeout: long,
     )
-    assert source == "gemma4"
+    assert source == "external-agent"
     assert len(out) <= 20
 
 
@@ -24,10 +29,70 @@ def test_generate_falls_back_when_runner_raises():
 def test_default_runner_fails_fast_when_backend_unreachable(monkeypatch):
     import paulsha_hippo.importer.title as t
 
-    monkeypatch.setattr(t, "_gemma4_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(t, "_default_runner", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
     out, source = t.generate_title({"user_prompts": ["主題"], "assistant_summary": "y"})
     assert source == "fallback"
     assert out == "主題"
+
+
+def test_default_runner_uses_canonical_profiles_not_legacy_agent_exec():
+    import paulsha_hippo.importer.title as t
+    t = importlib.reload(t)
+
+    configured = mock.Mock(
+        external_profiles=("canonical-profile",),
+        router_deadline_seconds=300,
+        router_max_attempts=2,
+        router_max_agent_calls=3,
+        agent_exec_command=("legacy", "single-command"),
+    )
+    router = mock.Mock()
+    router.run.return_value = "canonical title"
+    with (
+        mock.patch.object(t.atomizer_config, "load_config", return_value=(configured, "cfg")),
+        mock.patch.object(t, "ExternalAgentRouter", return_value=router) as router_factory,
+    ):
+        output = t._default_runner("prompt", None, 60)
+
+    assert output == "canonical title"
+    router_factory.assert_called_once_with(
+        ("canonical-profile",),
+        task_class="title",
+        deadline_seconds=60,
+        max_attempts=2,
+        max_agent_calls=3,
+    )
+
+
+def test_default_runner_propagates_canonical_config_policy_error(monkeypatch):
+    import paulsha_hippo.importer.title as t
+    t = importlib.reload(t)
+
+    def fail_load_config():
+        raise AtomizerConfigError("canonical policy invalid")
+
+    monkeypatch.setattr(t.atomizer_config, "load_config", fail_load_config)
+    with pytest.raises(AtomizerConfigError, match="canonical policy invalid"):
+        t.generate_title({"user_prompts": ["prompt"], "assistant_summary": "summary"})
+
+
+def test_apply_does_not_resolve_legacy_agent_exec_command(tmp_path, monkeypatch):
+    import paulsha_hippo.importer.title as t
+
+    monkeypatch.setattr(t, "_default_runner", lambda text, command, timeout: "canonical title")
+    monkeypatch.setattr(
+        t.atomizer_config,
+        "resolve_agent_exec_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy command resolver used")),
+    )
+
+    result = t.apply(
+        {"session_id": "canonical", "user_prompts": ["prompt"], "assistant_summary": "summary"},
+        memory_root=tmp_path,
+    )
+
+    assert result["session_title"] == "canonical title"
+    assert result["title_source"] == "external-agent"
 
 
 def test_generate_falls_back_on_empty_llm_output():
@@ -50,7 +115,7 @@ def test_apply_caches_and_sets_fields(tmp_path):
     title.apply(dict(sess), memory_root=tmp_path, runner=runner)
     assert s1["session_title"] == "簡短標題"
     assert s1["assistant_summary"] == "b"
-    assert s1["title_source"] == "gemma4"
+    assert s1["title_source"] == "external-agent"
     assert len(calls) == 1  # second call hit cache
 
 
@@ -72,7 +137,7 @@ def test_pipeline_injects_title_into_inbox(tmp_path, monkeypatch):
     decision = pipeline.ingest_queue_item(qp, memory_root=tmp_path, dry_run=True)
     rendered = decision["rendered"]
     assert "title: UART 升級修復" in rendered
-    assert "title_source: gemma4" in rendered
+    assert "title_source: external-agent" in rendered
     assert "## Summary\n已修好 UART 升級流程並加上重試。" in rendered
 
 
@@ -88,61 +153,6 @@ def test_apply_does_not_cache_fallback(tmp_path):
     title.apply(dict(sess), memory_root=tmp_path, runner=runner)
     assert s1["title_source"] == "fallback"
     assert len(calls) == 2  # fallback not cached → re-attempted (補生 when gemma4 returns)
-
-
-def test_gemma4_reachable_targets_upstream_url(monkeypatch):
-    import paulsha_hippo.importer.title as t
-
-    seen = {}
-
-    def fake_conn(addr, timeout):
-        seen["addr"] = addr
-        raise OSError("refused")
-
-    monkeypatch.setenv("PSC_CLAUDE_GEMMA4_UPSTREAM_URL", "http://10.0.0.5:9001")
-    monkeypatch.setattr(t.socket, "create_connection", fake_conn)
-    assert t._gemma4_reachable() is False
-    assert seen["addr"] == ("10.0.0.5", 9001)  # checks upstream host:port, not localhost:8001
-
-
-def test_gemma4_reachable_false_on_malformed_upstream(monkeypatch):
-    import paulsha_hippo.importer.title as t
-
-    attempts = {"n": 0}
-
-    def fake_conn(addr, timeout):
-        attempts["n"] += 1
-        raise OSError("should not be called")
-
-    monkeypatch.setattr(t.socket, "create_connection", fake_conn)
-    for bad in ["192.0.2.10:8001", "not-a-url", "ftp://host:1", ""]:
-        monkeypatch.setenv("PSC_CLAUDE_GEMMA4_UPSTREAM_URL", bad)
-        assert t._gemma4_reachable() is False
-    assert attempts["n"] == 0  # malformed URL never triggers a connection (no localhost probe)
-
-
-def test_default_runner_threads_upstream_env(monkeypatch):
-    import importlib
-    import subprocess
-    import paulsha_hippo.importer.title as t
-
-    t = importlib.reload(t)
-    seen = {}
-
-    def fake_run(command, **kwargs):
-        seen["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(command, 0, stdout="標題", stderr="")
-
-    monkeypatch.setattr(t, "_gemma4_reachable", lambda *a, **k: True)
-    monkeypatch.setattr(
-        t.atomizer_config,
-        "resolve_agent_exec_settings",
-        lambda: (("scripts/claude-gemma4",), "http://10.0.0.5:9001"),
-    )
-    monkeypatch.setattr(t.subprocess, "run", fake_run)
-
-    assert t._default_runner("prompt", ("scripts/claude-gemma4",), 60) == "標題"
-    assert seen["env"]["PSC_CLAUDE_GEMMA4_UPSTREAM_URL"] == "http://10.0.0.5:9001"
 
 
 def test_generate_returns_neutral_marker_when_no_content():
