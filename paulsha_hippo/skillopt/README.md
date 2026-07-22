@@ -13,15 +13,15 @@
 
 ## Model roles
 
-- **rollout**: atomizer `LLMPromoter`（預設沿用 atomizer agent command）
-- **optimizer**: codex ACP（vendored adapter）
-- **judge**: 可由 `~/.agents/config/skillopt.yaml` 指定的 agent command
+- **rollout**: atomizer `LLMPromoter`，透過 canonical router 執行 `atomization` task class
+- **optimizer**: 透過 canonical router 執行 `skillopt` task class
+- **judge**: 透過 canonical router 執行 `skillopt` task class
 
 ## External CLI profiles
 
 - **共用設定源**：`external_agents.profiles` 宣告 tier、traits、task class、model、effort 與 tokenized argv。
 - **身份邊界**：SkillOpt rollout、`hippo atomize --promoter llm` 與 importer title 生成共用同一組外部 headless CLI router；OAuth/API key、endpoint 與 launcher lifecycle 不屬於 Hippo。
-- **judge**：仍可由 `skillopt.yaml` 指定一個外部 CLI command，但 prompt 只走 stdin，且不繼承 parent environment。
+- **judge / optimizer**：只選 `task_classes` 含 `skillopt` 的 canonical profiles；prompt 只走 stdin，且不繼承 parent environment。`skillopt.yaml` 的 legacy `judge_command` 已退休並會 fail closed。
 
 ### 替換 backend 步驟
 
@@ -39,10 +39,6 @@ python3 -m paulshaclaw.memory.cli memory skillopt run --budget 1
 可選設定檔：`~/.agents/config/skillopt.yaml`
 
 ```yaml
-judge_command:
-  - python3
-  - -m
-  - judge.demo
 alpha: 0.4
 val_ratio: 0.2
 min_project_sample: 2

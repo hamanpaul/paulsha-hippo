@@ -1,4 +1,4 @@
-"""Release-readiness matrix helpers; unknown gates remain pending by default."""
+"""Release-readiness helpers with an exact, versioned required-gate set."""
 
 from __future__ import annotations
 

@@ -212,14 +212,22 @@ def _status(args: argparse.Namespace) -> int:
     except Exception as exc:
         config_identity = {"status": "invalid", "error": str(exc)[:300]}
 
+    last = dream_ledger.last_run(memory_root)
+    stored_health = last.get("health") if isinstance(last, dict) else None
+    health = dict(stored_health) if isinstance(stored_health, dict) else None
+
     print(
         json.dumps(
             {
                 "build_identity": build_identity(),
                 "config_identity": config_identity,
-                "last_run": dream_ledger.last_run(memory_root),
+                "last_run": last,
                 "backlog_depth": dream_ledger.backlog_depth(memory_root),
-                "health": dream_ledger.backlog_census(memory_root),
+                # Integrity counters require parsing every knowledge note.  A
+                # dream run persists that exact census once; status reuses the
+                # append-only evidence instead of re-scanning the whole vault.
+                "health": health,
+                "health_source": "last-run-ledger" if health is not None else "unavailable",
             },
             sort_keys=True,
             indent=2,
