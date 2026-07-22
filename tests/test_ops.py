@@ -1138,25 +1138,28 @@ class FixBackendMigrationTests(unittest.TestCase):
                 yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
                 encoding="utf-8",
             )
-            script = Path(tmp) / "service-bin" / "codex"
-            script.parent.mkdir(parents=True)
-            script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-            script.chmod(0o755)
+            service_script = Path(tmp) / "service-bin" / "codex"
+            service_script.parent.mkdir(parents=True)
+            service_script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            service_script.chmod(0o755)
+            interactive_script = Path(tmp) / "interactive-bin" / "codex"
+            interactive_script.parent.mkdir(parents=True)
+            interactive_script.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            interactive_script.chmod(0o755)
             node = Path(tmp) / "interactive-bin" / "node"
-            node.parent.mkdir(parents=True)
             node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             node.chmod(0o755)
 
             def fake_which(cmd, path=None):
                 if cmd == "codex":
-                    return str(script)
+                    return str(service_script if path is not None else interactive_script)
                 if cmd == "node":
                     return None if path is not None else str(node)
                 return None
 
             with mock.patch.dict("os.environ", self._env(tmp)), \
                  mock.patch.object(ops, "_service_manager_environment",
-                                   return_value={"PATH": str(script.parent)}), \
+                                   return_value={"PATH": str(service_script.parent)}), \
                  mock.patch.object(ops.shutil, "which", side_effect=fake_which):
                 code, _ = ops._fix_backend_config()
 
@@ -1166,7 +1169,7 @@ class FixBackendMigrationTests(unittest.TestCase):
                 profile for profile in migrated["external_agents"]["profiles"]
                 if profile["id"] == "codex"
             )
-            self.assertEqual(codex["argv"][:2], [str(node), str(script)])
+            self.assertEqual(codex["argv"][:2], [str(node), str(interactive_script)])
             self.assertNotIn("sh", codex["argv"][:2])
 
     def test_fix_backend_validates_rewrite_before_replacing_config(self):

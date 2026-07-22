@@ -7,7 +7,7 @@ provider client，也不保存 API key、OAuth、provider URL 或 credential env
 | tier | profile | traits / task class | default model / effort | tokenized headless argv | 狀態 |
 |---|---|---|---|---|---|
 | 1 | `claude` | judge、reasoner / atomization、title | `sonnet` / `high` | `claude --model {MODEL} --effort {EFFORT} --safe-mode ... --tools '' ... --print` | 內建 tools/MCP/customizations 停用；仍須 service-effective live probe |
-| 1 | `codex` | judge、reasoner / atomization、title | `gpt-5` / `high` | `codex exec --model {MODEL} -c model_reasoning_effort=high ... --ignore-user-config --disable shell_tool -` | 固定 high 映射符合目前 CLI；其他 effort 必須在 argv 明確映射後再 probe |
+| 1 | `codex` | judge、reasoner / atomization、title | `gpt-5.6-sol` / `high` | `codex exec --model {MODEL} -c model_reasoning_effort=high ... --ignore-user-config --disable shell_tool -` | 預設 model 已以本機 external CLI real probe 驗證；model 仍由 profile 自訂，其他 effort 必須在 argv 明確映射後再 probe |
 | 2 | `agy` | fast、responsive / title | `default` / `medium` | `agy --model {MODEL} --effort {EFFORT} --mode plan --sandbox --print` | 原生 CLI 無可證明的 zero-tool flag，預設不進 Dream atomization eligible set |
 | 2 | `cg` | heavy-implementation、fast / atomization、title | `default` / `high` | `cg --model {MODEL} --effort {EFFORT} --headless --stdin` | 預設 disabled；alias-only 或 zero-tool 契約未證實時不得啟用 |
 | 3 | `co-gem` | low-cost、fallback / atomization、title | `local` / `low` | `co-gem --model {MODEL} --effort {EFFORT} --headless --stdin` | 預設 disabled；本機 launcher headless smoke 通過後才可啟用 |
