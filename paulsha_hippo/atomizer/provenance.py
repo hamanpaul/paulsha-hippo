@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .. import __version__
+from ..build_info import build_identity
 from ..agent_profiles import (
     AgentRunResult,
     RESPONSE_SCHEMA_VERSION,
@@ -77,6 +78,15 @@ def command_fingerprint(command: list[str] | tuple[str, ...]) -> str:
     return fingerprint_argv(command)
 
 
+def _runtime_build_commit() -> str:
+    """Resolve the same embedded/env build authority used by CLI and Dream."""
+    try:
+        value = str(build_identity().get("build_commit") or "").strip()
+    except Exception:  # pragma: no cover - provenance must remain persistable
+        return "unknown"
+    return value or "unknown"
+
+
 def provenance_from_result(
     result: AgentRunResult | None,
     *,
@@ -87,6 +97,7 @@ def provenance_from_result(
     fallback_reason: str | None = None,
     attempts: Sequence[AgentRunResult] | None = None,
 ) -> dict[str, Any]:
+    resolved_build = build if build is not None else _runtime_build_commit()
     if result is None:
         payload = {
             "profile_id": "unknown",
@@ -102,7 +113,7 @@ def provenance_from_result(
             "config_hash": config_hash,
             "skill_hash": skill_hash,
             "hippo_version": hippo_version,
-            "build_commit": build or "unknown",
+            "build_commit": resolved_build or "unknown",
             "fallback_reason": fallback_reason,
             "response_schema": RESPONSE_SCHEMA_VERSION,
         }
@@ -123,7 +134,7 @@ def provenance_from_result(
         "config_hash": config_hash,
         "skill_hash": skill_hash,
         "hippo_version": hippo_version,
-        "build_commit": build or "unknown",
+        "build_commit": resolved_build or "unknown",
         "fallback_reason": fallback_reason or result.fallback_reason,
         "response_schema": result.response_schema,
         "elapsed_seconds": round(float(result.elapsed_seconds), 6),

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from paulsha_hippo.agent_profiles import AgentRunResult
+from paulsha_hippo.atomizer import provenance as provenance_module
 from paulsha_hippo.atomizer import slice_frontmatter
 from paulsha_hippo.atomizer.provenance import provenance_from_result, safe_provenance
 from paulsha_hippo.moc import frontmatter_io
@@ -114,3 +115,27 @@ def test_safe_provenance_does_not_accept_unbounded_stderr():
     safe = safe_provenance({"profile_id": "x", "stderr": "token=secret\n" + "x" * 1000})
     assert len(safe["stderr"]) <= 500
     assert "secret" not in safe["stderr"]
+
+
+def test_provenance_defaults_to_runtime_build_identity(monkeypatch):
+    monkeypatch.setattr(
+        provenance_module,
+        "build_identity",
+        lambda: {"build_commit": "installed-candidate-commit"},
+    )
+
+    value = provenance_from_result(None)
+
+    assert value["build_commit"] == "installed-candidate-commit"
+
+
+def test_explicit_provenance_build_overrides_runtime_identity(monkeypatch):
+    monkeypatch.setattr(
+        provenance_module,
+        "build_identity",
+        lambda: {"build_commit": "installed-candidate-commit"},
+    )
+
+    value = provenance_from_result(None, build="explicit-commit")
+
+    assert value["build_commit"] == "explicit-commit"
