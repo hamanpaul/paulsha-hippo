@@ -45,6 +45,7 @@
 - `hippo doctor` 新增 runtime 健康報告：global dream lock（`runtime/locks/dream.lock`）持鎖狀態＋dream/supervise 進程清單（PID/start time/cmdline/cwd），標記非 canonical 實例（interpreter-mismatch／cwd-missing／cwd-temp-worktree）；只報告，不自動 kill（#19）
 
 ### Fixed
+- Recovery planning 可用 `--source-manifest` 沿用既有 manifest 的精確 frozen source set，再以目前 candidate 重建 pins/planned artifacts；避免 live archive 持續新增或更新中的 session 擴張既定 recovery scope 並永久觸發 target drift，authority manifest 變動則 fail closed。
 - Dream 的 run-level publication reconciliation 改只要求本輪 produced 且 retrieval-eligible 的 atoms 進入 metadata/FTS；`review` 等刻意 pool-excluded 產物另以 `produced_excluded` 計數，不再誤報遺失並把健康輪次降成 `partial`，獨立 index reconciliation 失敗仍會 fail-visible。
 - `install service` 生成的 systemd unit：`ExecStart` 綁定當前 interpreter（`sys.executable`），修正 pipx / venv 隔離安裝下寫死 `/usr/bin/env python3`（全域 python）import 不到 `paulsha_hippo`、導致 dream service 一觸發即 `exit 1`（ModuleNotFoundError）的問題。
 - `slugify()`/`target_name()` 檔名以 UTF-8 byte 上限（NAME_MAX 255）截斷且落在 code-point 邊界，`--<slice_id>.md` 尾段永不截斷——超長 LLM title 不再於 MOC reconcile rename 觸發 `ENAMETOOLONG` 中止整輪、導致 reindex 從未執行（#16 根因）。
