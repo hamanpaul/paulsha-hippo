@@ -100,6 +100,31 @@ def test_prompt_contract_hallucination_rejects_the_whole_response():
         promoter.promote([source], cfg)
 
 
+def test_source_owned_output_contract_is_not_rejected_as_prompt_leakage():
+    cfg, _ = atomizer_config.load_config(override_path=None)
+    source = _fragment(
+        "The canonical JSON response uses schema_version, disposition, reason, and a findings "
+        "array; Markdown wrappers are forbidden."
+    )
+    promoter = LLMPromoter(
+        FakeAgentClient(
+            _response(
+                _finding(
+                    "Canonical response contract",
+                    "The JSON contract contains schema_version, disposition, reason, and findings "
+                    "without a Markdown wrapper.",
+                )
+            )
+        ),
+        skill_text="GROUNDING-SKILL",
+        known_projects=["paulsha-hippo"],
+    )
+
+    slices = promoter.promote([source], cfg)
+
+    assert len(slices) == 1
+
+
 @pytest.mark.parametrize(
     ("source_body", "finding_title", "finding_body"),
     [
