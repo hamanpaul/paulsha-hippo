@@ -891,26 +891,33 @@ def _fix_backend_config(*, backup: bool = True) -> tuple[int, str]:
             and absolute_command.is_file()
             and os.access(argv0, os.X_OK)
         ) else shutil.which(argv0, path=service_path)
-        interactive_command = service_command or shutil.which(argv0)
-        if interactive_command is not None:
-            interpreter = _env_shebang_interpreter(Path(interactive_command))
-            if interpreter and shutil.which(interpreter, path=service_path) is None:
-                try:
-                    interpreter_path = resolve_backend_argv([interpreter])[0]
-                except BackendUnavailableError as exc:
-                    return 1, f"fix-backend: profile {profile_id}: {exc}"
-                command_path = os.path.abspath(interactive_command)
-                argv[:] = [interpreter_path, command_path, *argv[1:]]
-                changes.append((profile_id, argv0, f"{interpreter_path} {command_path}"))
-                continue
         if service_command is not None:
-            continue
-        try:
-            resolved = resolve_backend_argv([argv0])[0]
-        except BackendUnavailableError as exc:
-            return 1, f"fix-backend: profile {profile_id}: {exc}"
-        argv[0] = resolved
-        changes.append((profile_id, argv0, resolved))
+            service_interpreter = _env_shebang_interpreter(Path(service_command))
+            if not service_interpreter or shutil.which(
+                service_interpreter, path=service_path
+            ) is not None:
+                continue
+
+        # A service-PATH command can still be unusable because its env shebang
+        # runtime is absent. Prefer the operator's interactive command in that
+        # case: service PATH may contain an older system copy than the external
+        # agent authenticated and maintained by the operator.
+        command_path = shutil.which(argv0) or service_command
+        if command_path is None:
+            return 1, f"fix-backend: profile {profile_id}: backend executable 找不到：{argv0}"
+        command_path = os.path.abspath(command_path)
+        interpreter = _env_shebang_interpreter(Path(command_path))
+        if interpreter and shutil.which(interpreter, path=service_path) is None:
+            try:
+                interpreter_path = resolve_backend_argv([interpreter])[0]
+            except BackendUnavailableError as exc:
+                return 1, f"fix-backend: profile {profile_id}: {exc}"
+            argv[:] = [interpreter_path, command_path, *argv[1:]]
+            replacement = f"{interpreter_path} {command_path}"
+        else:
+            argv[0] = command_path
+            replacement = command_path
+        changes.append((profile_id, argv0, replacement))
     if not changes:
         return 0, "fix-backend: enabled profiles 已為 service-effective，無可遷移"
 

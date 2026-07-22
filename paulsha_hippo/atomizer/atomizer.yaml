@@ -48,8 +48,8 @@ external_agents:
       priority: 20
       traits: [judge, reasoner]
       task_classes: [atomization, title, skillopt]
-      model: gpt-5
-      supported_models: [gpt-5]
+      model: gpt-5.6-sol
+      supported_models: [gpt-5.6-sol]
       effort: high
       supported_efforts: [high]
       argv: [codex, exec, --model, "{MODEL}", -c, model_reasoning_effort=high, --sandbox, read-only, --skip-git-repo-check, --ephemeral, --ignore-user-config, --ignore-rules, --disable, shell_tool, -]
