@@ -1,85 +1,68 @@
 from __future__ import annotations
 
-import io
-import json
-import tempfile
 import unittest
-from pathlib import Path
-from unittest import mock
+import sys
 
+from paulsha_hippo.agent_profiles import AgentProfile, ExternalAgentRouter
 from paulsha_hippo.skillopt import optimizer_acp
 
 
-class _RecordingStdin:
-    def __init__(self) -> None:
-        self.parts: list[str] = []
+class OptimizerRouterTests(unittest.TestCase):
+    def test_optimizer_submits_frozen_prompt_to_shared_router(self) -> None:
+        seen: list[str] = []
 
-    def write(self, data: str) -> int:
-        self.parts.append(data)
-        return len(data)
+        def execute(profile, prompt, attempt_index):
+            del profile, attempt_index
+            seen.append(prompt)
+            return "---\nname: atomize\n---\nedited skill", "", 0
 
-    def flush(self) -> None:
-        return None
+        profile = AgentProfile.from_mapping(
+            {
+                "id": "test-router",
+                "tier": 1,
+                "priority": 1,
+                "traits": ["test"],
+                "task_classes": ["skillopt"],
+                "model": "test-model",
+                "effort": "high",
+                "supported_efforts": ["high"],
+                "argv": [sys.executable, "-V"],
+            }
+        )
+        router = ExternalAgentRouter(
+            (profile,),
+            task_class="skillopt",
+            executor=execute,
+        )
+        optimizer = optimizer_acp.make_router_optimizer(router)
 
-    def close(self) -> None:
-        return None
-
-    def lines(self) -> list[dict[str, object]]:
-        return [json.loads(line) for chunk in self.parts for line in chunk.splitlines() if line.strip()]
-
-
-class _FakeProcess:
-    def __init__(self, stdout_text: str) -> None:
-        self.stdin = _RecordingStdin()
-        self.stdout = io.StringIO(stdout_text)
-        self.stderr = io.StringIO()
-
-    def wait(self, timeout: float | None = None) -> int:
-        del timeout
-        return 0
-
-    def kill(self) -> None:
-        return None
-
-
-class OptimizerAcpRunnerTests(unittest.TestCase):
-    def test_default_runner_uses_isolated_temp_cwd_and_completes_prompt(self) -> None:
-        proc = _FakeProcess(
-            "\n".join(
-                [
-                    json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}),
-                    json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess_123"}}),
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "session/update",
-                            "params": {
-                                "sessionId": "sess_123",
-                                "update": {
-                                    "sessionUpdate": "agent_message_chunk",
-                                    "content": {"type": "text", "text": "edited skill"},
-                                },
-                            },
-                        }
-                    ),
-                    json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}),
-                    "",
-                ]
-            )
+        output = optimizer(
+            "---\nname: atomize\n---\ncurrent skill\n",
+            [{"input": "case", "gold": "expected", "output": "got", "score": 0.1}],
         )
 
-        with mock.patch("paulsha_hippo.skillopt.optimizer_acp.subprocess.Popen", return_value=proc):
-            output = optimizer_acp._default_runner("optimize this skill")
+        self.assertEqual(output, "---\nname: atomize\n---\nedited skill\n")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("current skill", seen[0])
+        self.assertIn("case", seen[0])
+        self.assertEqual(router.last_result.profile_id, "test-router")
+        self.assertFalse(hasattr(optimizer_acp, "subprocess"))
 
-        self.assertEqual(output, "edited skill")
-        sent = proc.stdin.lines()
-        self.assertEqual(sent[0]["method"], "initialize")
-        self.assertEqual(sent[1]["method"], "session/new")
-        isolated_cwd = Path(str(sent[1]["params"]["cwd"]))
-        repo_root = Path(__file__).resolve().parents[1]
-        self.assertNotEqual(isolated_cwd, repo_root)
-        self.assertTrue(str(isolated_cwd).startswith(tempfile.gettempdir()))
-        self.assertEqual(sent[2]["method"], "session/prompt")
+    def test_runner_is_an_explicit_injection_seam_only(self) -> None:
+        seen: list[str] = []
+        optimizer = optimizer_acp.make_router_optimizer(
+            runner=lambda prompt: seen.append(prompt) or "---\nname: atomize\n---\nkept"
+        )
+
+        self.assertEqual(
+            optimizer("---\nname: atomize\n---\ncurrent", []),
+            "---\nname: atomize\n---\nkept\n",
+        )
+        self.assertEqual(len(seen), 1)
+
+    def test_optimizer_requires_one_execution_boundary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            optimizer_acp.make_router_optimizer()
 
 
 if __name__ == "__main__":

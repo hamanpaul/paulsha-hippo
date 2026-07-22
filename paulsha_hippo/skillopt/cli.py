@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,12 +13,11 @@ from paulsha_hippo.atomizer import cli as atomizer_cli
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.agent_profiles import (
     FIXED_TIMEOUT_SECONDS,
-    AgentProfile,
     ExternalAgentRouter,
 )
 
 from .loop import SkillOptError, optimize_skill
-from .optimizer_acp import make_acp_optimizer
+from .optimizer_acp import make_router_optimizer
 from .rollout import make_atomize_rollout
 from .scorer import make_hybrid_score
 from .valset import build_valset
@@ -33,7 +31,6 @@ DEFAULT_JUDGE_TIMEOUT = 600
 
 @dataclass(frozen=True)
 class SkillOptConfig:
-    judge_command: tuple[str, ...]
     alpha: float = DEFAULT_ALPHA
     val_ratio: float = DEFAULT_VAL_RATIO
     min_project_sample: int = DEFAULT_MIN_PROJECT_SAMPLE
@@ -51,12 +48,8 @@ def _default_skillopt_config_path() -> Path:
 def _default_skillopt_config(
     atomizer_cfg: atomizer_config.AtomizerConfig | None,
 ) -> SkillOptConfig:
-    judge_command = (
-        tuple(atomizer_config.resolve_command_argv(atomizer_cfg.agent_exec_command))
-        if atomizer_cfg is not None
-        else ()
-    )
-    return SkillOptConfig(judge_command=judge_command)
+    del atomizer_cfg
+    return SkillOptConfig()
 
 
 def _read_optional_mapping(path: Path) -> dict[str, Any]:
@@ -80,23 +73,6 @@ def _read_optional_mapping(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SkillOptConfigError(f"{path} root must be a mapping")
     return dict(payload)
-
-
-def _parse_command(value: object, *, field_name: str) -> tuple[str, ...]:
-    if isinstance(value, str):
-        command = tuple(shlex.split(value))
-    elif isinstance(value, (list, tuple)):
-        command_list: list[str] = []
-        for index, item in enumerate(value):
-            if not isinstance(item, str) or not item:
-                raise SkillOptConfigError(f"{field_name}[{index}] must be a non-empty string")
-            command_list.append(item)
-        command = tuple(command_list)
-    else:
-        raise SkillOptConfigError(f"{field_name} must be a string or list")
-    if not command:
-        raise SkillOptConfigError(f"{field_name} must not be empty")
-    return command
 
 
 def _parse_ratio(value: object, *, field_name: str, default: float) -> float:
@@ -128,16 +104,11 @@ def load_skillopt_config(
         return defaults
 
     payload = _read_optional_mapping(resolved)
-    judge_command = payload.get("judge_command")
+    if "judge_command" in payload:
+        raise SkillOptConfigError(
+            "judge_command is retired; configure canonical external_agents.profiles instead"
+        )
     return SkillOptConfig(
-        judge_command=tuple(
-            atomizer_config.resolve_command_argv(
-                _parse_command(
-                    defaults.judge_command if judge_command is None else judge_command,
-                    field_name="judge_command",
-                )
-            )
-        ),
         alpha=_parse_ratio(payload.get("alpha"), field_name="alpha", default=defaults.alpha),
         val_ratio=_parse_ratio(
             payload.get("val_ratio"),
@@ -272,30 +243,6 @@ def _build_default_hooks(
     skillopt_config: SkillOptConfig,
 ) -> tuple[HookFactory, HookFactory, HookFactory]:
     known_projects = atomizer_cli._known_projects(config.known_projects_file)
-    judge_command = list(skillopt_config.judge_command)
-
-    # SkillOpt's judge is another external headless task.  Keep the normal
-    # configured profile set (and its tier fallback); only an explicit
-    # skillopt.yaml command becomes a constrained Tier-3 custom profile.  It
-    # still goes through the same stdin/minimal-env/safety contract.
-    if tuple(judge_command) == tuple(config.agent_exec_command):
-        judge_profiles = config.external_profiles
-    else:
-        judge_profiles = (
-            AgentProfile.from_mapping(
-                {
-                    "id": "skillopt-custom",
-                    "tier": 3,
-                    "priority": 0,
-                    "traits": ["custom-judge"],
-                    "task_classes": ["skillopt"],
-                    "model": config.agent_exec_model,
-                    "effort": "medium",
-                    "supported_efforts": ["medium"],
-                    "argv": judge_command,
-                }
-            ),
-        )
 
     def make_rollout():
         agent = ExternalAgentRouter(
@@ -309,7 +256,7 @@ def _build_default_hooks(
 
     def make_score():
         judge = ExternalAgentRouter(
-            judge_profiles,
+            config.external_profiles,
             task_class="skillopt",
             deadline_seconds=min(
                 max(int(skillopt_config.judge_timeout), 1),
@@ -319,7 +266,17 @@ def _build_default_hooks(
         return make_hybrid_score(judge, alpha=skillopt_config.alpha)
 
     def make_optimizer():
-        return make_acp_optimizer()
+        optimizer = ExternalAgentRouter(
+            config.external_profiles,
+            task_class="skillopt",
+            deadline_seconds=min(
+                max(int(skillopt_config.judge_timeout), 1),
+                FIXED_TIMEOUT_SECONDS,
+            ),
+            max_attempts=config.router_max_attempts,
+            max_agent_calls=config.router_max_agent_calls,
+        )
+        return make_router_optimizer(optimizer)
 
     return make_rollout, make_score, make_optimizer
 

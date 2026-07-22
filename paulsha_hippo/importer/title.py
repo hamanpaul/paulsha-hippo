@@ -8,10 +8,11 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from paulsha_hippo import paths
 from paulsha_hippo.agent_profiles import (
     AgentProfile,
     ExternalAgentRouter,
-    default_profiles,
+    ProfileConfigError,
     fingerprint_argv,
 )
 from paulsha_hippo.atomizer import config as atomizer_config
@@ -31,38 +32,9 @@ def _truncate(text: str, limit: int = _MAX) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())[:limit]
 
 
-def _backend_settings() -> tuple[tuple[str, ...], str]:
-    """Compatibility helper returning a command and model label, never an endpoint."""
-    return atomizer_config.resolve_agent_exec_settings()
-
-
-def _default_runner(text: str, command: tuple[str, ...] | None, timeout: int) -> str:
-    """Run title work via the same bounded tier router as atomization.
-
-    A supplied command is an explicit test/operator CLI override.  The normal
-    path uses configured profiles so title generation cannot bypass fallback,
-    stdin-only prompts, or the minimal child environment.
-    """
-    if command is None:
-        try:
-            config, _ = atomizer_config.load_config()
-            profiles = config.external_profiles
-            deadline = config.router_deadline_seconds
-            attempts = config.router_max_attempts
-            calls = config.router_max_agent_calls
-        except Exception:
-            profiles = default_profiles()
-            deadline = 300
-            attempts = 6
-            calls = 6
-        return ExternalAgentRouter(
-            profiles,
-            task_class="title",
-            deadline_seconds=min(int(timeout), deadline) if timeout > 0 else deadline,
-            max_attempts=attempts,
-            max_agent_calls=calls,
-        ).run(text)
-    custom_profile = AgentProfile.from_mapping(
+def _custom_profile(command: tuple[str, ...]) -> AgentProfile:
+    """Build the explicit test/operator profile without touching runtime config."""
+    return AgentProfile.from_mapping(
         {
             "id": "title-custom",
             "tier": 3,
@@ -75,6 +47,35 @@ def _default_runner(text: str, command: tuple[str, ...] | None, timeout: int) ->
             "argv": list(command),
         }
     )
+
+
+def _configured_router(config: atomizer_config.AtomizerConfig, *, timeout: int) -> ExternalAgentRouter:
+    deadline = config.router_deadline_seconds
+    if timeout > 0:
+        deadline = min(int(timeout), deadline)
+    return ExternalAgentRouter(
+        config.external_profiles,
+        task_class="title",
+        deadline_seconds=deadline,
+        max_attempts=config.router_max_attempts,
+        max_agent_calls=config.router_max_agent_calls,
+    )
+
+
+def _default_runner(text: str, command: tuple[str, ...] | None, timeout: int) -> str:
+    """Run title work via the same bounded tier router as atomization.
+
+    A supplied command is an explicit test/operator CLI override.  The normal
+    path uses configured profiles so title generation cannot bypass fallback,
+    stdin-only prompts, or the minimal child environment.
+    """
+    if command is None:
+        # The importer runtime has one authority: the managed canonical config.
+        # In particular, do not recover from a broken policy/config by silently
+        # reconstructing the legacy/default profile set.
+        config, _ = atomizer_config.load_config()
+        return _configured_router(config, timeout=timeout).run(text)
+    custom_profile = _custom_profile(tuple(command))
     return ExternalAgentRouter(
         (custom_profile,),
         task_class="title",
@@ -102,12 +103,12 @@ def generate_title(
         if runner is None:
             title = _truncate(_default_runner(text, command, timeout))
         else:
-            effective_command = command
-            if effective_command is None:
-                effective_command, _ = _backend_settings()
+            effective_command = tuple(command or ())
             title = _truncate(runner(text, effective_command, timeout))
         if title:
             return title, "external-agent"
+    except (atomizer_config.AtomizerConfigError, ProfileConfigError):
+        raise
     except Exception:
         pass
     return _truncate(first_prompt) or _truncate(summary) or "(無內容)", "fallback"
@@ -128,10 +129,10 @@ def generate_atom_title(
         if runner is None:
             title = _truncate(_default_runner(text, command, timeout))
         else:
-            effective_command = command
-            if effective_command is None:
-                effective_command, _ = _backend_settings()
+            effective_command = tuple(command or ())
             title = _truncate(runner(text, effective_command, timeout))
+    except (atomizer_config.AtomizerConfigError, ProfileConfigError):
+        raise
     except Exception:
         return None, "offline"
     return (title, "external-agent") if title else (None, "offline")
@@ -160,57 +161,43 @@ def _cache_path(memory_root: str | Path, session_id: str, input_hash: str, cache
     )
 
 
-def _cache_context(command: tuple[str, ...]) -> tuple[str, str, str]:
+def _cache_context(command: tuple[str, ...] | None) -> tuple[str, str, str]:
     """Return config, skill/prompt, and router identities for title cache keys."""
     skill_hash = hashlib.sha256(
         (_PROMPT + "\n" + _ATOM_PROMPT).encode("utf-8")
     ).hexdigest()
-    try:
-        config, config_hash = atomizer_config.load_config()
-        if tuple(command) == tuple(config.agent_exec_command) or any(
-            tuple(command) == profile.render_argv()
-            for profile in config.external_profiles
-        ):
-            router = ExternalAgentRouter(
-                config.external_profiles,
-                task_class="title",
-                deadline_seconds=config.router_deadline_seconds,
-                max_attempts=config.router_max_attempts,
-                max_agent_calls=config.router_max_agent_calls,
-            )
-        else:
-            profile = AgentProfile.from_mapping(
-                {
-                    "id": "title-custom",
-                    "tier": 3,
-                    "priority": 0,
-                    "traits": ["custom-title"],
-                    "task_classes": ["title"],
-                    "model": "custom",
-                    "effort": "medium",
-                    "supported_efforts": ["medium"],
-                    "argv": list(command),
-                }
-            )
-            router = ExternalAgentRouter(
-                (profile,), task_class="title", max_attempts=1, max_agent_calls=1
-            )
-        return config_hash, skill_hash, router.cache_namespace()
-    except Exception:
-        fallback_router = ExternalAgentRouter(
-            tuple(default_profiles()), task_class="title"
+    canonical_path = paths.atomizer_config_path()
+    if not canonical_path.is_file():
+        if command is None:
+            # Tests/operator-injected runners may exercise cache behavior before
+            # `hippo init`; this identity is deliberately not a profile fallback.
+            return "canonical-unavailable", skill_hash, "canonical-router-unavailable"
+        router = ExternalAgentRouter(
+            (_custom_profile(tuple(command)),),
+            task_class="title",
+            max_attempts=1,
+            max_agent_calls=1,
         )
-        return "unknown", skill_hash, fallback_router.cache_namespace()
+        return "canonical-unavailable", skill_hash, router.cache_namespace()
+
+    config, config_hash = atomizer_config.load_config()
+    if command is None or any(
+        tuple(command) == profile.render_argv() for profile in config.external_profiles
+    ):
+        router = _configured_router(config, timeout=config.router_deadline_seconds)
+    else:
+        router = ExternalAgentRouter(
+            (_custom_profile(tuple(command)),), task_class="title", max_attempts=1, max_agent_calls=1
+        )
+    return config_hash, skill_hash, router.cache_namespace()
 
 
 def apply(session: dict[str, Any], *, memory_root: str | Path, **kwargs: Any) -> dict[str, Any]:
     """Generate/reuse a title without mutating assistant semantic content."""
     input_hash = _title_input_hash(session)
-    command = kwargs.get("command")
-    if command is None:
-        command, _ = _backend_settings()
-    command = tuple(command)
-    command_identity = fingerprint_argv(command)
+    command_value = kwargs.get("command")
+    command = tuple(command_value) if command_value is not None else None
+    command_identity = fingerprint_argv(command) if command is not None else "canonical-router"
     config_hash, skill_hash, router_identity = _cache_context(command)
     cache_key = hashlib.sha256(
         json.dumps(

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from paulsha_hippo import cli as memory_cli
-from paulsha_hippo.atomizer.config import AtomizerConfig, AtomizerConfigError, resolve_command_argv
+from paulsha_hippo.atomizer.config import AtomizerConfig, AtomizerConfigError
 from paulsha_hippo.skillopt import cli as skillopt_cli
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -87,7 +87,6 @@ class SkilloptCliTests(unittest.TestCase):
             config_path=self.root / "missing-skillopt.yaml",
         )
 
-        self.assertEqual(config.judge_command, resolve_command_argv(_CFG.agent_exec_command))
         self.assertEqual(config.alpha, 0.4)
         self.assertEqual(config.val_ratio, 0.2)
         self.assertEqual(config.min_project_sample, 2)
@@ -98,10 +97,6 @@ class SkilloptCliTests(unittest.TestCase):
         config_path.write_text(
             "\n".join(
                 [
-                    "judge_command:",
-                    "  - python3",
-                    "  - -m",
-                    "  - judge.demo",
                     "alpha: 0.65",
                     "val_ratio: 0.35",
                     "min_project_sample: 5",
@@ -114,7 +109,6 @@ class SkilloptCliTests(unittest.TestCase):
 
         config = skillopt_cli.load_skillopt_config(atomizer_cfg=_CFG, config_path=config_path)
 
-        self.assertEqual(config.judge_command, ("python3", "-m", "judge.demo"))
         self.assertEqual(config.alpha, 0.65)
         self.assertEqual(config.val_ratio, 0.35)
         self.assertEqual(config.min_project_sample, 5)
@@ -127,7 +121,6 @@ class SkilloptCliTests(unittest.TestCase):
         config_path.write_text(
             "\n".join(
                 [
-                    "judge_command: python3 -m judge.demo",
                     "alpha: 0.75",
                     "",
                 ]
@@ -138,8 +131,14 @@ class SkilloptCliTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PSC_AGENTS_ROOT": str(agents_root)}, clear=False):
             config = skillopt_cli.load_skillopt_config(atomizer_cfg=_CFG)
 
-        self.assertEqual(config.judge_command, ("python3", "-m", "judge.demo"))
         self.assertEqual(config.alpha, 0.75)
+
+    def test_load_skillopt_config_rejects_legacy_judge_command(self) -> None:
+        config_path = self.root / "skillopt.yaml"
+        config_path.write_text("judge_command: python3 -m judge.demo\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(skillopt_cli.SkillOptConfigError, "judge_command is retired"):
+            skillopt_cli.load_skillopt_config(atomizer_cfg=_CFG, config_path=config_path)
 
     def test_run_optimize_dry_run_skips_optimizer_factory(self) -> None:
         skill_path = self.root / "skill.md"
@@ -229,7 +228,6 @@ class SkilloptCliTests(unittest.TestCase):
         skill_path.write_text(_VALID_SKILL, encoding="utf-8")
         seen: dict[str, object] = {}
         skillopt_config = skillopt_cli.SkillOptConfig(
-            judge_command=("python3", "-m", "judge.demo"),
             alpha=0.55,
             val_ratio=0.35,
             min_project_sample=4,
@@ -267,7 +265,6 @@ class SkilloptCliTests(unittest.TestCase):
 
     def test_build_default_hooks_threads_skillopt_judge_settings(self) -> None:
         skillopt_config = skillopt_cli.SkillOptConfig(
-            judge_command=("python3", "-m", "judge.demo"),
             alpha=0.55,
             val_ratio=0.25,
             min_project_sample=3,
@@ -283,8 +280,9 @@ class SkilloptCliTests(unittest.TestCase):
             seen["score_args"] = (judge, alpha)
             return "score"
 
-        def fake_optimizer():
+        def fake_optimizer(router):
             seen["optimizer_built"] = True
+            seen["optimizer_router"] = router
             return "optimizer"
 
         with (
@@ -297,7 +295,7 @@ class SkilloptCliTests(unittest.TestCase):
                 side_effect=fake_score,
             ),
             mock.patch(
-                "paulsha_hippo.skillopt.cli.make_acp_optimizer",
+                "paulsha_hippo.skillopt.cli.make_router_optimizer",
                 side_effect=fake_optimizer,
             ),
             mock.patch(
@@ -312,7 +310,9 @@ class SkilloptCliTests(unittest.TestCase):
             self.assertEqual(seen["rollout_args"][0].__class__.__name__, "ExternalAgentRouter")
             self.assertEqual(seen["score_args"][0].__class__.__name__, "ExternalAgentRouter")
             self.assertEqual(seen["score_args"][0].task_class, "skillopt")
-            self.assertEqual(seen["score_args"][0].profiles[0].id, "skillopt-custom")
+            self.assertEqual(seen["score_args"][0].profiles, _CFG.external_profiles)
+            self.assertEqual(seen["optimizer_router"].__class__.__name__, "ExternalAgentRouter")
+            self.assertEqual(seen["optimizer_router"].task_class, "skillopt")
             self.assertEqual(seen["score_args"][1], 0.55)
 
     def test_main_resolves_default_skill_path_outside_repo_root(self) -> None:
@@ -320,7 +320,6 @@ class SkilloptCliTests(unittest.TestCase):
         outside_cwd.mkdir(parents=True, exist_ok=True)
         seen: dict[str, object] = {}
         skillopt_config = skillopt_cli.SkillOptConfig(
-            judge_command=("python3", "-m", "judge.demo"),
             alpha=0.55,
             val_ratio=0.35,
             min_project_sample=4,
