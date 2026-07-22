@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-22
+
 ### Added
 - #39 最終架構取代本節較早期的 backend 描述：runtime 僅接受 canonical external CLI profiles；Hippo 不再提供 `openai-compatible`／HTTP provider client，不讀取或轉送 API-key/OAuth/provider URL/credential env。舊名詞只保留在 migration 拒絕與歷史說明中。
 - Issue #34/#39 release-candidate implementation：external headless profile router、canonical atom title/project/provenance、publication recovery、quarantine/health、ownership-manifest force install 與 hash-bound artifact upgrade runner。Live service/recovery/soak/publish/consumer evidence 仍待候選 wheel 綁定後執行。
