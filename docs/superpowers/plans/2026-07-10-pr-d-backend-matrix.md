@@ -2,7 +2,7 @@
 
 > **歷史文件／已取代：** 本計畫中的 `atomizer.override.yaml`、`agent_exec`、
 > `--agent-command`、`openai-compatible` 與 repo 內 provider/API-key 管理已由
-> `openspec/changes/issue-34-atomization-release/` 的 accepted 設計取代。
+> `openspec/changes/archive/2026-07-22-issue-34-atomization-release/` 的 accepted 設計取代。
 > 現行 runtime 只讀 Hippo canonical `config.yaml`，並透過宣告式 external CLI
 > agent profiles 路由；本文件僅保留歷史脈絡，不可作為操作或實作指引。
 

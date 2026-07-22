@@ -1,7 +1,7 @@
 # 全 open issue 清零：master spec（2026-07-10）
 
 > **歷史基線／已局部取代：** backend/provider 相關設計已由
-> `openspec/changes/issue-34-atomization-release/` 的 accepted #34/#39 契約取代。
+> `openspec/changes/archive/2026-07-22-issue-34-atomization-release/` 的 accepted #34/#39 契約取代。
 > 現行 Hippo 只呼叫 canonical external CLI profiles；本文中的
 > `openai-compatible`、provider credential 或 direct HTTP smoke 不可作為現行指引。
 

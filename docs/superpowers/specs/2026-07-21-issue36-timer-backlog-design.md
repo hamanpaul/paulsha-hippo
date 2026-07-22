@@ -38,7 +38,7 @@ or the processing ledger lost track of split sessions entirely.
 ## Decision: merge into issue-34-atomization-release
 
 #36's tasks are added as a new §8 section in the existing
-`openspec/changes/issue-34-atomization-release/tasks.md`, keeping #36's
+`openspec/changes/archive/2026-07-22-issue-34-atomization-release/tasks.md`, keeping #36's
 timer+backlog coherence in one block. All §8 tasks ship with v0.1.1.
 
 ## Design
