@@ -94,6 +94,7 @@
 - `paulsha_hippo.lib.session_readers`：`read_codex_rollout`/`read_copilot_history` 升格 lib API（hippo importer + paulshaclaw bro hook 兩使用者；adapters.base 保留 re-export）
 
 ### Fixed
+- Copilot CLI sessionEnd importer 現在會對 `events.jsonl` 尚未 flush 的實機時序做短且 bounded 的重讀，避免 prompt-mode 真 session 被過早判成 `empty-skip`。
 - #7 遞迴自捕捉：agent_exec 對蒸餾子程序注入 `HIPPO_SELF_SESSION=1`，5 個 capture hook（session_end×3／precompact×2）讀到即早退（layer 1）；importer 對 prompt 內容即 atomize skill 調用文本者 `self-skip`（layer 2）
 - #8 空 session 汙染：importer 對無 prompt/無 touched files/summary 空或佔位/turn≤1 的 session `empty-skip`，不寫 inbox、不入蒸餾佇列
 - wheel/pipx 情境 `hippo install hooks`：repo_root 無 pyproject 時 importer venv 改複製已解包套件（原 pip install -e 必失敗）；sample yaml 隨包（config-samples/）
