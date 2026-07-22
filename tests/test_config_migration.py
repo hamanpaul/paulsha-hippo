@@ -117,3 +117,21 @@ def test_migration_rollback_blocks_concurrent_canonical_edit(tmp_path):
     canonical.write_text(canonical.read_text() + "operator_value: keep\n")
     with pytest.raises(MigrationError, match="drift blocks rollback"):
         rollback_migration(result)
+
+
+def test_transaction_owned_migration_skips_persistent_side_backup(tmp_path):
+    canonical = tmp_path / "config.yaml"
+    _write(
+        canonical,
+        "memory_root: /safe/memory\n"
+        "distiller:\n  backend: openai-compatible\n",
+    )
+
+    result = apply_migration(plan_migration(canonical), backup=False)
+
+    assert result["status"] == "applied"
+    assert result["backup"] is None
+    assert result["external_snapshot_required"] is True
+    assert not (tmp_path / ".hippo-migration").exists()
+    with pytest.raises(MigrationError, match="external transaction snapshot required"):
+        rollback_migration(result)

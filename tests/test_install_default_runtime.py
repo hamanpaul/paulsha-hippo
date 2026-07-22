@@ -148,6 +148,11 @@ def test_package_runtime_reinstall_hooks_canonicalizes_without_side_backup(tmp_p
         "_record_config_after",
         lambda resolved: calls.append(("record", resolved["config"])),
     )
+    monkeypatch.setattr(
+        install_runtime,
+        "_migrate_canonical_config",
+        lambda resolved: calls.append(("migrate", resolved["config"])),
+    )
 
     result = install_runtime.package_runtime_executor(
         ["@hippo-default-runtime@", "reinstall_hooks"],
@@ -157,9 +162,10 @@ def test_package_runtime_reinstall_hooks_canonicalizes_without_side_backup(tmp_p
     )
 
     assert result["status"] == "passed"
-    assert calls[0] == ("fix", False)
-    assert calls[1][0] == "record"
-    assert calls[2][0] == "hooks"
+    assert calls[0][0] == "migrate"
+    assert calls[1] == ("fix", False)
+    assert calls[2][0] == "record"
+    assert calls[3][0] == "hooks"
 
 
 def test_package_runtime_snapshot_and_rollback_restore_existing_config(tmp_path: Path, monkeypatch):
@@ -232,6 +238,52 @@ def test_package_runtime_snapshot_rejects_config_directory(tmp_path: Path, monke
 
     with pytest.raises(deployment.DeploymentError, match="regular file or missing"):
         install_runtime._snapshot(install_runtime._runtime_paths(target, transaction))
+
+
+def test_package_runtime_migrates_installed_legacy_config_without_side_backup(tmp_path: Path, monkeypatch):
+    import yaml
+
+    target = tmp_path / "canonical"
+    transaction = tmp_path / "transaction"
+    config = target / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "memory_root: /operator/memory\n"
+        "distiller:\n  backend: openai-compatible\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(target))
+    monkeypatch.setenv("HIPPO_MEMORY_ROOT", str(tmp_path / "memory"))
+
+    install_runtime._migrate_canonical_config(
+        install_runtime._runtime_paths(target, transaction)
+    )
+
+    migrated = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert migrated["memory_root"] == "/operator/memory"
+    assert "distiller" not in migrated
+    assert migrated["external_agents"]["profiles"]
+    assert not (target / ".hippo-migration").exists()
+
+
+def test_package_runtime_migration_blocks_prohibited_provider_field_without_backup(tmp_path: Path, monkeypatch):
+    target = tmp_path / "canonical"
+    transaction = tmp_path / "transaction"
+    config = target / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "distiller:\n  base_url: https://provider.invalid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(target))
+    monkeypatch.setenv("HIPPO_MEMORY_ROOT", str(tmp_path / "memory"))
+
+    with pytest.raises(deployment.DeploymentError, match="operator-redaction-required: distiller.base_url"):
+        install_runtime._migrate_canonical_config(
+            install_runtime._runtime_paths(target, transaction)
+        )
+    assert "provider.invalid" in config.read_text(encoding="utf-8")
+    assert not (target / ".hippo-migration").exists()
 
 
 def test_package_runtime_gates_call_real_doctor_modes(tmp_path: Path, monkeypatch):

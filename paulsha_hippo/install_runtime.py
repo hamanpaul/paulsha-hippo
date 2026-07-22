@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import ops, paths
+from . import config_migration, ops, paths
 from .deployment import DeploymentError, InstallContext
 from .dream.lock import acquire_dream_lock
 
@@ -225,6 +225,19 @@ def _record_config_after(paths_map: Mapping[str, Path]) -> None:
     os.chmod(state_path, 0o600)
 
 
+def _migrate_canonical_config(paths_map: Mapping[str, Path]) -> None:
+    plan = config_migration.plan_migration(paths_map["config"])
+    if plan.status == "blocked":
+        fields = ", ".join(plan.prohibited_fields)
+        raise DeploymentError(f"operator-redaction-required: {fields}")
+    if plan.status != "ready":
+        raise DeploymentError(plan.reason or "canonical config migration is not ready")
+    try:
+        config_migration.apply_migration(plan, backup=False)
+    except config_migration.MigrationError as exc:
+        raise DeploymentError(str(exc)) from exc
+
+
 def _restore_units(paths_map: Mapping[str, Path], state: Mapping[str, Any]) -> None:
     units = paths_map["units"]
     units.mkdir(parents=True, exist_ok=True)
@@ -276,6 +289,7 @@ def package_runtime_executor(
             raise DeploymentError("dream writer lock is still held")
         _HELD_DREAM_LOCKS[str(transaction)] = handle
     elif phase == "reinstall_hooks":
+        _migrate_canonical_config(resolved)
         code, message = ops._fix_backend_config(backup=False)
         if code != 0:
             raise DeploymentError(message)

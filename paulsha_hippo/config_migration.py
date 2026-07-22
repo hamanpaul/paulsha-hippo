@@ -285,6 +285,7 @@ def apply_migration(
     *,
     resolution: Mapping[str, Any] | str | Path | None = None,
     dry_run: bool = False,
+    backup: bool = True,
 ) -> dict[str, Any]:
     """Apply only a reviewed, hash-stable plan; return a redacted report."""
     current = _load_plan(plan)
@@ -321,7 +322,7 @@ def apply_migration(
     except ImportError as exc:
         raise MigrationError("PyYAML is required for config migration") from exc
     rendered_bytes = rendered.encode("utf-8")
-    if canonical.is_file():
+    if canonical.is_file() and backup:
         existing_data, existing_hash = _read_document(canonical)
         if _semantic(existing_data) == _semantic(target_data):
             return {**report, "status": "no-op", "applied_hash": existing_hash, "backup": None}
@@ -345,8 +346,16 @@ def apply_migration(
         report["backup"] = str(backup_path)
         report["backup_hash"] = existing_hash
     else:
+        preexisting_without_backup = canonical.is_file()
+        if canonical.is_file():
+            existing_data, existing_hash = _read_document(canonical)
+            if _semantic(existing_data) == _semantic(target_data):
+                return {**report, "status": "no-op", "applied_hash": existing_hash, "backup": None}
         report["backup"] = None
-        report["backup_hash"] = _hash_bytes(b"")
+        report["backup_hash"] = (
+            _hash_bytes(canonical.read_bytes()) if canonical.is_file() else _hash_bytes(b"")
+        )
+        report["external_snapshot_required"] = preexisting_without_backup
     fd, tmp_name = tempfile.mkstemp(prefix=".hippo-config-", dir=str(canonical.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -392,6 +401,8 @@ def rollback_migration(report: Mapping[str, Any] | str | Path) -> dict[str, Any]
             except FileNotFoundError:
                 pass
         return {"status": "rolled-back", "restored_hash": value["backup_hash"]}
+    if value.get("external_snapshot_required") is True:
+        raise MigrationError("external transaction snapshot required for rollback")
     canonical.unlink()
     return {"status": "rolled-back", "restored_hash": None}
 
