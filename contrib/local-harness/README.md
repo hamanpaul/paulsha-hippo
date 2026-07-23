@@ -2,7 +2,7 @@
 
 > 設計與實測依據：[#55](https://github.com/hamanpaul/paulsha-hippo/issues/55)
 
-`co-gem` external-agent profile 的地端 direct-vLLM 引擎。**不屬於 hippo package**（不進 wheel、不被 `paulsha_hippo/**` 引用）；`contrib/` 僅作版控與部署來源。
+`local-vllm` external-agent profile（前名 `co-gem`——改名以消除「借 copilot 殼」的歷史誤導）的地端 direct-vLLM 引擎。**不屬於 hippo package**（不進 wheel、不被 `paulsha_hippo/**` 引用）；`contrib/` 僅作版控與部署來源。
 
 ## 邊界（#55 但書，2026-07-23 修訂）
 
@@ -13,7 +13,7 @@
 - 路由決策全在 `config.yaml` profiles：哪個 profile 做 atomization、fallback 順序、
   各 profile 的 launcher argv——launcher 只是 transport 執行者。
 - 對 hippo 的介面即 backend-matrix 的 tokenized argv 契約：
-  `co-gem --model {MODEL} --effort {EFFORT} --headless --stdin`（prompt 走 stdin、回應走 stdout、fail-closed exit）。
+  `local-vllm --model {MODEL} --effort {EFFORT} --headless --stdin`（prompt 走 stdin、回應走 stdout、fail-closed exit）。
 - zero-tool 為結構性事實：對 vLLM 的請求不含任何 tools 欄位。
 
 ## 檔案
@@ -24,7 +24,6 @@
 | `schema-v1.json` | 同上 | hippo canonical response schema v1（guided decoding 用） |
 | `atomize-skill-smallmodel.md` | 同上 | 小模型版 atomize skill（#55 方案 4；`config.yaml` `skill_path` 支援絕對路徑，窗口期切換） |
 | `local-vllm.env.tmpl` | `~/.config/paulsha-hippo/local-vllm.env`（填值、`chmod 600`） | 直連引擎專用 env：BASE_URL + MODEL（key 選填） |
-| `launchers/co-gem` | `~/.local/bin/co-gem` | 直連 harness 薄殼 |
 | `launchers/cg` | `~/.local/bin/cg` | copilot 鏈路薄殼（llm-share BYOK；secret env `~/.config/paulshaclaw/cg-llmshare.env`，結構同 copilot-local-vllm.env.tmpl 慣例） |
 | `launchers/hippo-copilot-headless-core` | `~/.local/bin/` | copilot 鏈路共用引擎：zero-tool（`--available-tools=__none__ --disable-builtin-mcps`）、拋棄式 HOME（斷 session 遞迴）、平衡 JSON 抽取、fail-closed |
 | `launchers/agy-headless` | `~/.local/bin/` | agy（Antigravity）契約橋接：stdin→argv、model sentinel 映射（operator override 註記見檔頭） |
@@ -34,10 +33,13 @@
 ```bash
 mkdir -p ~/.local/share/hippo-local-harness
 cp harness.py schema-v1.json atomize-skill-smallmodel.md ~/.local/share/hippo-local-harness/
-cp launchers/* ~/.local/bin/ && chmod +x ~/.local/bin/{co-gem,cg,hippo-copilot-headless-core,agy-headless}
+chmod +x ~/.local/share/hippo-local-harness/harness.py
+# 直連引擎不需要薄殼：harness.py 自帶 shebang，symlink 即為 launcher
+ln -sf ~/.local/share/hippo-local-harness/harness.py ~/.local/bin/local-vllm
+cp launchers/* ~/.local/bin/ && chmod +x ~/.local/bin/{cg,hippo-copilot-headless-core,agy-headless}
 cp local-vllm.env.tmpl ~/.config/paulsha-hippo/local-vllm.env  # 填入實際值後 chmod 600
 # 驗收
-echo '測試: 僅回 canonical no_findings JSON' | co-gem --model local --effort low --headless --stdin
+echo '測試: 僅回 canonical no_findings JSON' | local-vllm --model local --effort low --headless --stdin
 ```
 
 ## 實測（2026-07-23，gemma4-26b-a4b-nvfp4）
