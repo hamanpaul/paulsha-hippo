@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# hippo-copilot-headless-core — shared engine for the `cg` / `co-gem` hippo
+# external-agent launchers.
+#
+# Contract (docs/backend-matrix.md):
+#   <launcher> --model {MODEL} --effort {EFFORT} --headless --stdin
+#   - prompt arrives on stdin, response goes to stdout, exit 0 on success
+#   - zero-tool: no tool may run (provable: --available-tools=__none__ makes
+#     the allowlist empty so every tool is disabled; --disable-builtin-mcps
+#     kills built-in MCP servers; throwaway HOME drops user MCP config)
+#
+# Env contract: HIPPO_COPILOT_ENV_FILE points at a sourceable env file
+# providing COPILOT_PROVIDER_* / COPILOT_MODEL (BYOK; key never logged).
+#
+# The copilot run uses a throwaway HOME so that (a) the user's MCP servers and
+# custom config never load, and (b) no session state is persisted — hippo's
+# copilot-cli hooks would otherwise re-ingest every distiller call as a new
+# session (recursive noise, the same loop that built the 23k parked backlog).
+#
+set -euo pipefail
+
+env_file="${HIPPO_COPILOT_ENV_FILE:?HIPPO_COPILOT_ENV_FILE not set}"
+if [ ! -r "$env_file" ]; then
+  printf 'hippo-copilot-core: env file not readable: %s\n' "$env_file" >&2
+  exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+. "$env_file"
+set +a
+
+if [ -z "${COPILOT_PROVIDER_API_KEY:-}" ]; then
+  printf 'hippo-copilot-core: COPILOT_PROVIDER_API_KEY is not set in %s\n' "$env_file" >&2
+  exit 1
+fi
+
+# --- translate hippo contract flags -> copilot CLI ------------------------
+model=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model)  model="${2:-}"; shift 2 ;;
+    --model=*) model="${1#--model=}"; shift ;;
+    --effort|--effort=*)  # no copilot equivalent; absorbed
+      [ "$1" = "--effort" ] && shift 2 || shift ;;
+    --headless|--stdin)   # contract markers; absorbed
+      shift ;;
+    *)
+      printf 'hippo-copilot-core: unknown argument: %s\n' "$1" >&2
+      exit 2 ;;
+  esac
+done
+
+# "default"/"local" are profile sentinels -> keep COPILOT_MODEL from env file
+model_args=()
+if [ -n "$model" ] && [ "$model" != "default" ] && [ "$model" != "local" ]; then
+  model_args=(--model "$model")
+fi
+
+# service-effective env has a minimal PATH allowlist; the copilot CLI is a
+# node shim (#!/usr/bin/env node), so make sure the nvm node bin resolves.
+for d in "$HOME"/.nvm/versions/node/*/bin; do
+  [ -x "$d/node" ] && PATH="$d:$PATH"
+done
+export PATH
+
+# resolve the real copilot binary with the REAL home, before we swap HOME
+real_copilot=""
+for cand in "$HOME"/.nvm/versions/node/*/bin/copilot /usr/local/bin/copilot /usr/bin/copilot; do
+  [ -x "$cand" ] && { real_copilot="$cand"; break; }
+done
+if [ -z "$real_copilot" ]; then
+  printf 'hippo-copilot-core: copilot binary not found\n' >&2
+  exit 127
+fi
+
+prompt="$(cat)"
+if [ -z "$prompt" ]; then
+  printf 'hippo-copilot-core: empty prompt on stdin\n' >&2
+  exit 2
+fi
+
+# throwaway HOME (see header); cleaned up on every exit path
+tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/hippo-copilot-home.XXXXXX")"
+trap 'rm -rf "$tmp_home"' EXIT
+
+raw="$(HOME="$tmp_home" "$real_copilot" \
+  -p "$prompt" \
+  --available-tools=__none__ \
+  --disable-builtin-mcps \
+  --no-ask-user \
+  --no-custom-instructions \
+  --no-auto-update \
+  --no-color \
+  --log-level none \
+  "${model_args[@]}")"
+
+# Transport hygiene: hippo's parser requires ONE JSON value with no
+# surrounding noise, but copilot prints tool banners ("● Disabled tools: ...")
+# on stdout and models sometimes wrap the reply in ``` fences. Extract exactly
+# one balanced JSON document (verbatim slice — malformed model JSON stays
+# visible to hippo's strict parser). Fail closed when none exists.
+printf '%s' "$raw" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+dec = json.JSONDecoder()
+best = None
+starts = [k for k in (raw.find("{"), raw.find("[")) if k != -1]
+if starts:
+    i = min(starts)
+    try:
+        _, end = dec.raw_decode(raw[i:])
+        best = raw[i : i + end]
+    except ValueError:
+        # single attempt only: never hunt for valid sub-documents inside a
+        # malformed reply — forward the malformation for hippo to classify
+        pass
+if best is None:
+    sys.stderr.write("hippo-copilot-core: no parseable JSON document in agent output\n")
+    # forward the tail for hippo to classify (transparent invalid_output)
+    tail = raw.strip()
+    if tail:
+        sys.stdout.write(tail[-8192:])
+    sys.exit(3)
+sys.stdout.write(best)
+'

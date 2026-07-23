@@ -9,11 +9,12 @@ Contract (docs/backend-matrix.md, tier-3 co-gem):
     - prompt on stdin, response on stdout (ONE canonical JSON value), exit 0 ok
     - zero-tool is STRUCTURAL: the request contains no tools field at all
 
-Boundary (issue #55 但書):
-    - hippo never manages model / entry point / key; this harness reuses the
-      existing co-gem BYOK env file as the single source of truth:
-      ~/.config/paulshaclaw/copilot-local-vllm.env
-      (COPILOT_PROVIDER_BASE_URL / COPILOT_PROVIDER_API_KEY / COPILOT_MODEL)
+Boundary (issue #55 但書, revised 2026-07-23):
+    - hippo core never manages model / entry point / key; this harness reads a
+      dedicated minimal env file (harness-only, hippo core never reads it):
+      ~/.config/paulsha-hippo/local-vllm.env
+      (HIPPO_LOCAL_VLLM_BASE_URL / HIPPO_LOCAL_VLLM_MODEL,
+       optional HIPPO_LOCAL_VLLM_API_KEY when the server enforces one)
 
 Quality levers (方案 1/3 of issue #55):
     - guided decoding: response_format json_schema = hippo canonical schema v1
@@ -35,7 +36,7 @@ from pathlib import Path
 
 HARNESS_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = HARNESS_DIR / "schema-v1.json"
-DEFAULT_ENV_FILE = "~/.config/paulshaclaw/copilot-local-vllm.env"
+DEFAULT_ENV_FILE = "~/.config/paulsha-hippo/local-vllm.env"
 REQUEST_TIMEOUT_S = 270  # keep under hippo external_agents.deadline_seconds=300
 SEED = 20260723
 
@@ -162,13 +163,13 @@ def canonical_errors(data: object) -> list[str]:
 
 
 def chat(base_url: str, api_key: str, payload: dict) -> str:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
@@ -314,18 +315,16 @@ def main() -> None:
     model_arg, effort = parse_args(sys.argv[1:])
 
     env_path = Path(
-        os.environ.get("HIPPO_LOCAL_HARNESS_ENV_FILE")
-        or os.environ.get("PSC_COPILOT_LOCAL_VLLM_ENV_FILE")
-        or DEFAULT_ENV_FILE
+        os.environ.get("HIPPO_LOCAL_HARNESS_ENV_FILE") or DEFAULT_ENV_FILE
     ).expanduser()
     if not env_path.is_file():
         die(1, f"env file not readable: {env_path}")
     env = parse_env_file(env_path)
-    base_url = env.get("COPILOT_PROVIDER_BASE_URL", "")
-    api_key = env.get("COPILOT_PROVIDER_API_KEY", "")
-    env_model = env.get("COPILOT_MODEL", "")
-    if not base_url or not api_key:
-        die(1, "COPILOT_PROVIDER_BASE_URL / COPILOT_PROVIDER_API_KEY missing in env file")
+    base_url = env.get("HIPPO_LOCAL_VLLM_BASE_URL", "")
+    api_key = env.get("HIPPO_LOCAL_VLLM_API_KEY", "")  # optional: local servers often skip auth
+    env_model = env.get("HIPPO_LOCAL_VLLM_MODEL", "")
+    if not base_url:
+        die(1, "HIPPO_LOCAL_VLLM_BASE_URL missing in env file")
 
     # "local"/"default" are hippo profile sentinels -> use the env file model
     model = env_model if model_arg in ("", "local", "default") else model_arg
