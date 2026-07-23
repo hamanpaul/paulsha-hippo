@@ -10,8 +10,10 @@
 #     the allowlist empty so every tool is disabled; --disable-builtin-mcps
 #     kills built-in MCP servers; throwaway HOME drops user MCP config)
 #
-# Env contract: HIPPO_COPILOT_ENV_FILE points at a sourceable env file
+# Env contract: HIPPO_COPILOT_ENV_FILE points at a KEY=VALUE env file
 # providing COPILOT_PROVIDER_* / COPILOT_MODEL (BYOK; key never logged).
+# Loaded with a restricted parser (NOT `source`) so a tampered env file cannot
+# execute arbitrary shell — only a value of exactly $NAME/${NAME} is expanded.
 #
 # The copilot run uses a throwaway HOME so that (a) the user's MCP servers and
 # custom config never load, and (b) no session state is persisted — hippo's
@@ -25,10 +27,30 @@ if [ ! -r "$env_file" ]; then
   printf 'hippo-copilot-core: env file not readable: %s\n' "$env_file" >&2
   exit 1
 fi
-set -a
-# shellcheck source=/dev/null
-. "$env_file"
-set +a
+# Restricted KEY=VALUE loader (no `source` → no arbitrary shell execution).
+# Supports a value that is exactly $NAME or ${NAME}, expanded from already-set
+# vars / the environment (cg-llmshare.env references $LLMSHARE_API_KEY).
+while IFS= read -r _line || [ -n "$_line" ]; do
+  _line="${_line#"${_line%%[![:space:]]*}"}"          # ltrim
+  case "$_line" in ''|'#'*) continue ;; esac
+  case "$_line" in *=*) ;; *) continue ;; esac
+  _line="${_line#export }"
+  _key="${_line%%=*}"; _val="${_line#*=}"
+  _key="${_key//[[:space:]]/}"
+  case "$_key" in ''|*[!A-Za-z0-9_]*) continue ;; esac  # only sane identifiers
+  case "$_val" in                                       # strip one quote layer
+    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
+    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
+  esac
+  case "$_val" in                                       # controlled expansion only
+    '${'*'}') _ref="${_val#\$\{}"; _ref="${_ref%\}}"
+              case "$_ref" in *[!A-Za-z0-9_]*) : ;; *) _val="${!_ref-}" ;; esac ;;
+    '$'*)     _ref="${_val#\$}"
+              case "$_ref" in *[!A-Za-z0-9_]*) : ;; *) _val="${!_ref-}" ;; esac ;;
+  esac
+  export "$_key=$_val"
+done < "$env_file"
+unset _line _key _val _ref
 
 if [ -z "${COPILOT_PROVIDER_API_KEY:-}" ]; then
   printf 'hippo-copilot-core: COPILOT_PROVIDER_API_KEY is not set in %s\n' "$env_file" >&2

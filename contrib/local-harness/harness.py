@@ -99,6 +99,10 @@ def parse_args(argv: list[str]) -> tuple[str, str]:
             i += 1
         else:
             die(2, f"unknown argument: {arg}")
+    # Fail loud on an unrecognized effort rather than silently defaulting to
+    # low (which would mask a misconfigured profile's reasoning/token budget).
+    if effort not in MAX_TOKENS:
+        die(2, f"invalid --effort {effort!r}; expected one of {sorted(MAX_TOKENS)}")
     return model, effort
 
 
@@ -329,7 +333,7 @@ def main() -> None:
     # "local"/"default" are hippo profile sentinels -> use the env file model
     model = env_model if model_arg in ("", "local", "default") else model_arg
     if not model:
-        die(1, "no model resolved (COPILOT_MODEL missing and no --model given)")
+        die(1, "no model resolved (HIPPO_LOCAL_VLLM_MODEL missing and no --model given)")
 
     prompt = sys.stdin.read()
     if not prompt.strip():
