@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#
+# co-gem — hippo external-agent launcher: direct local vLLM harness
+# (gemma4-26b-a4b-nvfp4, BYOK). All logic lives in
+# ~/.local/share/hippo-local-harness/harness.py — see
+# https://github.com/hamanpaul/paulsha-hippo/issues/55
+#
+set -euo pipefail
+exec /usr/bin/python3 "$HOME/.local/share/hippo-local-harness/harness.py" "$@"
