@@ -200,6 +200,31 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(result.stage, "hook")
         self.assertEqual(result.hits[0].line_no, 2)
 
+    def test_openai_key_rule_does_not_redact_task_slug_substring(self):
+        # #57: `sk-` inside a wiki-link slug (e.g. ta`sk-`routing) must not
+        # trip the openai_key rule and destroy the whole line at recall time.
+        mod = load_policy(self)
+        policy = mod.load_policy(override_path=None)
+        text = (
+            "- [[custom-skills-task-routing-map--sl-abcdef0123456789|routing]]\n"
+            "- [[agents-md-task-routing--sl-fedcba9876543210|AGENTS.md routing]]\n"
+        )
+        result = mod.redact_lines(text, policy=policy, session_ref="s", boundary="external_to_raw")
+        self.assertEqual(result.hit_count, 0)
+        self.assertNotIn("[REDACTED LINE:", result.text)
+        self.assertIn("task-routing-map", result.text)
+
+    def test_openai_key_rule_still_redacts_a_real_key(self):
+        # A genuine key (boundary before `sk-` is `=`, not alphanumeric) must
+        # still be caught after the #57 lookbehind fix.
+        mod = load_policy(self)
+        policy = mod.load_policy(override_path=None)
+        text = "OPENAI_API_KEY=sk-proj-abcdef0123456789ABCDEF\n"
+        result = mod.redact_lines(text, policy=policy, session_ref="s", boundary="external_to_raw")
+        self.assertEqual(result.hit_count, 1)
+        self.assertNotIn("sk-proj-abcdef0123456789ABCDEF", result.text)
+        self.assertIn("[REDACTED LINE:", result.text)
+
     def test_regex_patterns_are_compiled_once_per_rule(self):
         mod = load_policy(self)
         policy = mod.load_policy(override_path=None)
