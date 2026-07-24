@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# cg — hippo external-agent launcher: Copilot CLI → llm-share glm-5.2 (BYOK).
+# Thin wrapper; all logic lives in hippo-copilot-headless-core.
+#
+set -euo pipefail
+export HIPPO_COPILOT_ENV_FILE="${CG_LLMSHARE_ENV_FILE:-$HOME/.config/paulshaclaw/cg-llmshare.env}"
+exec "$HOME/.local/bin/hippo-copilot-headless-core" "$@"

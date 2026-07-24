@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# agy-headless — hippo external-agent launcher bridging the hippo contract to
+# the agy CLI (Antigravity / gemini-3.6-flash).
+#
+# Contract (docs/backend-matrix.md):
+#   agy-headless --model {MODEL} --effort {EFFORT} --headless --stdin
+#   - prompt arrives on stdin; agy only accepts it as --print argv, so this
+#     wrapper bridges (hippo chunks are capped ~48KB, well under MAX_ARG_STRLEN)
+#
+# NOTE (operator override, 2026-07-23): backend-matrix keeps agy out of the
+# Dream atomization eligible set because it has no provable zero-tool flag.
+# Paul explicitly approved using it for the one-off real-content backlog
+# round 1 (agy first pass, cg re-distill for high-value sessions), with
+# --mode plan --sandbox as mitigation.
+#
+set -euo pipefail
+
+model=""
+effort=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model)  model="${2:-}"; shift 2 ;;
+    --model=*) model="${1#--model=}"; shift ;;
+    --effort) effort="${2:-}"; shift 2 ;;
+    --effort=*) effort="${1#--effort=}"; shift ;;
+    --headless|--stdin) shift ;;
+    *)
+      printf 'agy-headless: unknown argument: %s\n' "$1" >&2
+      exit 2 ;;
+  esac
+done
+
+# agy model names carry the effort tier as a suffix; map hippo sentinels and
+# compose bare model + effort when both are given.
+case "$model" in
+  ""|default|local) model="gemini-3.6-flash-high" ;;
+  gemini-3.6-flash|gemini-3.5-flash)
+    model="${model}-${effort:-high}" ;;
+esac
+
+prompt="$(cat)"
+if [ -z "$prompt" ]; then
+  printf 'agy-headless: empty prompt on stdin\n' >&2
+  exit 2
+fi
+
+exec "$HOME/.local/bin/agy" \
+  --model "$model" \
+  --mode plan \
+  --sandbox \
+  --print "$prompt"
