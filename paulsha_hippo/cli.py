@@ -390,6 +390,26 @@ def _build_parser() -> argparse.ArgumentParser:
     usage_p.add_argument("--json", action="store_true")
     usage_p.set_defaults(func=_memory_usage)
     usage_sub = usage_p.add_subparsers(dest="usage_command")
+    funnel_p = usage_sub.add_parser(
+        "funnel", help="session 層級 offered→read→applied 漏斗報表"
+    )
+    funnel_p.add_argument("--memory-root", required=True)
+    funnel_p.add_argument("--since", default=None)
+    funnel_p.add_argument("--json", action="store_true")
+    noise_mode = funnel_p.add_mutually_exclusive_group()
+    noise_mode.add_argument(
+        "--exclude-noise",
+        dest="exclude_noise",
+        action="store_true",
+        help="將 processing ledger 最終 state=no-findings 的 session 排除於主指標；仍輸出兩組數字",
+    )
+    noise_mode.add_argument(
+        "--include-noise",
+        dest="exclude_noise",
+        action="store_false",
+        help="以含 no-findings 噪音的 session 組作為主指標；仍輸出兩組數字",
+    )
+    funnel_p.set_defaults(func=_memory_usage_funnel, exclude_noise=True)
     mark_applied_p = usage_sub.add_parser(
         "mark-applied", help="記錄 applied 顯式訊號（agent structured acknowledgement，契約 8）"
     )
@@ -797,6 +817,60 @@ def _rekey(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_usage_jsonl(path: Path, since: str | None) -> list[dict]:
+    """Read one usage ledger without changing it, using the existing since rule."""
+    out = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if since and str(event.get("ts", "")) < since:
+                continue
+            out.append(event)
+    return out
+
+
+def _load_usage_rows(root: Path, since: str | None) -> tuple[list[dict], list[dict], list[dict]]:
+    """Load offered/read/applied rows with the same event filters as ``_memory_usage``."""
+    led = root / "runtime" / "ledger"
+    offered_rows = _read_usage_jsonl(led / "offered.jsonl", since)
+    usage_rows = _read_usage_jsonl(led / "memory_usage.jsonl", since)
+    used_rows = [event for event in usage_rows if event.get("source") == "read"]
+    applied_rows = [event for event in usage_rows if event.get("kind") == "applied"]
+    return offered_rows, used_rows, applied_rows
+
+
+def _offered_items(event: dict) -> list:
+    offered = event.get("offered")
+    return offered if isinstance(offered, list) else []
+
+
+def _offered_slice_ids(event: dict) -> list[str]:
+    """Normalize both legacy string and current object offered entries."""
+    slice_ids = []
+    for item in _offered_items(event):
+        slice_id = item.get("sl_id") if isinstance(item, dict) else item
+        if slice_id:
+            slice_ids.append(str(slice_id))
+    return slice_ids
+
+
+def _usage_tool_key(event: dict) -> str:
+    return str(event.get("tool") or "(unknown)")
+
+
+def _usage_session_key(event: dict) -> str:
+    value = event.get("session_id")
+    return str(value) if value not in (None, "") else ""
+
+
 def _memory_usage(args: argparse.Namespace) -> int:
     from collections import defaultdict
 
@@ -805,37 +879,14 @@ def _memory_usage(args: argparse.Namespace) -> int:
         return 2
 
     root = Path(args.memory_root)
-    led = root / "runtime" / "ledger"
-
-    def _read_jsonl(p):
-        out = []
-        if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if args.since and str(e.get("ts", "")) < args.since:
-                    continue
-                out.append(e)
-        return out
-
-    offered_rows = _read_jsonl(led / "offered.jsonl")
-    usage_rows = _read_jsonl(led / "memory_usage.jsonl")
-    used_rows = [e for e in usage_rows if e.get("source") == "read"]
-    applied_rows = [e for e in usage_rows if e.get("kind") == "applied"]
+    offered_rows, used_rows, applied_rows = _load_usage_rows(root, args.since)
 
     agg = defaultdict(lambda: {"offered_count": 0, "read_count": 0, "last_read": ""})
     sessions = set()
     for e in offered_rows:
         sessions.add(e.get("session_id"))
-        for o in e.get("offered", []):
-            sid = o.get("sl_id") if isinstance(o, dict) else o
-            if sid:
-                agg[sid]["offered_count"] += 1
+        for sid in _offered_slice_ids(e):
+            agg[sid]["offered_count"] += 1
     for e in used_rows:
         # Count the session even when the read was not from an offered/attributable
         # slice, so avg_reads_per_session is not skewed by offered-only session counting.
@@ -846,21 +897,18 @@ def _memory_usage(args: argparse.Namespace) -> int:
         if ts > agg[sid]["last_read"]:
             agg[sid]["last_read"] = ts
 
-    def _tool_key(e) -> str:
-        return str(e.get("tool") or "(unknown)")
-
     by_tool: dict[str, dict] = {}
     for e in offered_rows:
-        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
-        t["offered"] += len(e.get("offered", []))
+        t = by_tool.setdefault(_usage_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t["offered"] += len(_offered_items(e))
     for e in used_rows:
-        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t = by_tool.setdefault(_usage_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
         t["read"] += 1
     applied_tools: set[str] = set()
     for e in applied_rows:
-        t = by_tool.setdefault(_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
+        t = by_tool.setdefault(_usage_tool_key(e), {"offered": 0, "read": 0, "applied": 0})
         t["applied"] += 1
-        applied_tools.add(_tool_key(e))
+        applied_tools.add(_usage_tool_key(e))
     for name, t in by_tool.items():
         if name not in applied_tools:
             t["applied"] = None  # 該 tool 無任何 applied 訊號 → n/a（不以內容猜測補值）
@@ -892,6 +940,346 @@ def _memory_usage(args: argparse.Namespace) -> int:
         for s in slices[:30]:
             print(f"  {s['slice_id']}  offered={s['offered_count']} "
                   f"read={s['read_count']} last_read={s['last_read']}")
+    return 0
+
+
+_FUNNEL_TOOLS = ("claude-code", "codex", "copilot-cli")
+_FUNNEL_TOP_N = 30
+
+
+def _funnel_metrics(
+    offered_sessions: set[str],
+    read_sessions: set[str],
+    applied_sessions: set[str],
+) -> dict[str, float | int]:
+    offered = len(offered_sessions)
+    with_read = len(offered_sessions & read_sessions)
+    with_applied = len(offered_sessions & applied_sessions)
+
+    def _rate(count: int) -> float:
+        return round(count * 100 / offered, 2) if offered else 0.0
+
+    return {
+        "sessions_offered": offered,
+        "sessions_with_read": with_read,
+        "read_through_rate": _rate(with_read),
+        "sessions_with_applied": with_applied,
+        "applied_rate": _rate(with_applied),
+    }
+
+
+def _usage_logical_session_key(event: dict) -> str:
+    session_id = _usage_session_key(event)
+    if not session_id:
+        return ""
+    return f"{_usage_tool_key(event)}:{session_id}"
+
+
+def _funnel_offer_index(
+    offered_rows: list[dict],
+) -> tuple[set[str], dict[str, set[str]], dict[str, dict[str, list[str]]]]:
+    offered_sessions: set[str] = set()
+    offered_by_tool: dict[str, set[str]] = {}
+    offered_slices: dict[str, dict[str, list[str]]] = {}
+
+    for event in offered_rows:
+        session_key = _usage_logical_session_key(event)
+        if not session_key or not _offered_items(event):
+            continue
+        tool = _usage_tool_key(event)
+        offered_sessions.add(session_key)
+        offered_by_tool.setdefault(tool, set()).add(session_key)
+        session_slices = offered_slices.setdefault(session_key, {})
+        offered_ts = str(event.get("ts") or "")
+        for slice_id in _offered_slice_ids(event):
+            session_slices.setdefault(slice_id, []).append(offered_ts)
+
+    return offered_sessions, offered_by_tool, offered_slices
+
+
+def _funnel_read_attribution(
+    used_rows: list[dict],
+    offered_slices: dict[str, dict[str, list[str]]],
+) -> tuple[
+    list[tuple[dict, str, str]],
+    list[tuple[dict, str, str]],
+    set[str],
+    set[str],
+    dict[str, set[str]],
+    dict[str, dict[str, int | set[str]]],
+]:
+    """Separate reads of previously offered slices from direct reads.
+
+    A read is attributable only when the same logical session was offered the
+    same slice and the read timestamp is strictly later than an offer
+    timestamp.  Missing timestamps are conservatively treated as direct reads
+    because the ledger cannot prove the required ordering.
+    """
+    attributed_events: list[tuple[dict, str, str]] = []
+    direct_events: list[tuple[dict, str, str]] = []
+    attributed_sessions: set[str] = set()
+    direct_sessions: set[str] = set()
+    read_by_tool: dict[str, set[str]] = {}
+    by_tool: dict[str, dict[str, int | set[str]]] = {}
+
+    for event in used_rows:
+        session_key = _usage_logical_session_key(event)
+        slice_id = str(event.get("sl_id") or "")
+        read_ts = str(event.get("ts") or "")
+        offer_times = offered_slices.get(session_key, {}).get(slice_id, [])
+        attributed = bool(
+            read_ts
+            and any(offer_ts and read_ts > offer_ts for offer_ts in offer_times)
+        )
+        target = attributed_events if attributed else direct_events
+        target.append((event, session_key, slice_id))
+
+        tool = _usage_tool_key(event)
+        stats = by_tool.setdefault(
+            tool,
+            {
+                "offer_then_read_events": 0,
+                "offer_then_read_sessions": set(),
+                "direct_read_events": 0,
+                "direct_read_sessions": set(),
+            },
+        )
+        if attributed:
+            stats["offer_then_read_events"] += 1
+            if session_key:
+                attributed_sessions.add(session_key)
+                read_by_tool.setdefault(tool, set()).add(session_key)
+                stats["offer_then_read_sessions"].add(session_key)
+        else:
+            stats["direct_read_events"] += 1
+            if session_key:
+                direct_sessions.add(session_key)
+                stats["direct_read_sessions"].add(session_key)
+
+    attribution_by_tool = {}
+    for tool, stats in sorted(by_tool.items()):
+        attribution_by_tool[tool] = {
+            "offer_then_read_events": stats["offer_then_read_events"],
+            "offer_then_read_sessions": len(stats["offer_then_read_sessions"]),
+            "direct_read_events": stats["direct_read_events"],
+            "direct_read_sessions": len(stats["direct_read_sessions"]),
+        }
+
+    return (
+        attributed_events,
+        direct_events,
+        attributed_sessions,
+        direct_sessions,
+        read_by_tool,
+        attribution_by_tool,
+    )
+
+
+def _funnel_top_slices(
+    offered_rows: list[dict],
+    attributed_events: list[tuple[dict, str, str]],
+    included_sessions: set[str],
+) -> list[dict]:
+    from collections import defaultdict
+
+    slices = defaultdict(lambda: {"offered_count": 0, "read_count": 0})
+    for event in offered_rows:
+        session_key = _usage_logical_session_key(event)
+        if session_key not in included_sessions:
+            continue
+        for slice_id in _offered_slice_ids(event):
+            slices[slice_id]["offered_count"] += 1
+    for _event, session_key, slice_id in attributed_events:
+        if session_key not in included_sessions or not slice_id:
+            continue
+        slices[slice_id]["read_count"] += 1
+
+    top_slices = []
+    for slice_id, counts in slices.items():
+        if counts["read_count"] == 0:
+            continue
+        offered_count = counts["offered_count"]
+        top_slices.append(
+            {
+                "slice_id": slice_id,
+                "offered_count": offered_count,
+                "read_count": counts["read_count"],
+                "read_offer_ratio": (
+                    round(counts["read_count"] / offered_count, 6)
+                    if offered_count
+                    else None
+                ),
+            }
+        )
+    top_slices.sort(
+        key=lambda item: (-item["read_count"], -item["offered_count"], item["slice_id"])
+    )
+    return top_slices[:_FUNNEL_TOP_N]
+
+
+def _funnel_mode_report(
+    *,
+    offered_rows: list[dict],
+    offered_sessions: set[str],
+    offered_by_tool: dict[str, set[str]],
+    attributed_read_sessions: set[str],
+    read_by_tool: dict[str, set[str]],
+    applied_sessions: set[str],
+    applied_by_tool: dict[str, set[str]],
+    attributed_events: list[tuple[dict, str, str]],
+    excluded_sessions: set[str],
+) -> dict:
+    included_sessions = offered_sessions - excluded_sessions
+    by_tool = {}
+    tool_names = set(_FUNNEL_TOOLS)
+    tool_names.update(offered_by_tool)
+    for tool in sorted(tool_names):
+        by_tool[tool] = _funnel_metrics(
+            offered_by_tool.get(tool, set()) - excluded_sessions,
+            read_by_tool.get(tool, set()),
+            applied_by_tool.get(tool, set()),
+        )
+
+    return {
+        "summary": _funnel_metrics(
+            included_sessions,
+            attributed_read_sessions,
+            applied_sessions,
+        ),
+        "by_tool": by_tool,
+        "top_slices": _funnel_top_slices(
+            offered_rows, attributed_events, included_sessions
+        ),
+    }
+
+
+def _memory_usage_funnel(args: argparse.Namespace) -> int:
+    if not args.memory_root:
+        print("hippo usage funnel: error: --memory-root is required", file=sys.stderr)
+        return 2
+
+    root = Path(args.memory_root)
+    offered_rows, used_rows, applied_rows = _load_usage_rows(root, args.since)
+
+    offered_sessions, offered_by_tool, offered_slices = _funnel_offer_index(
+        offered_rows
+    )
+    (
+        attributed_events,
+        direct_events,
+        attributed_read_sessions,
+        direct_read_sessions,
+        read_by_tool,
+        attribution_by_tool,
+    ) = _funnel_read_attribution(used_rows, offered_slices)
+    applied_sessions: set[str] = set()
+    applied_by_tool: dict[str, set[str]] = {}
+
+    for event in applied_rows:
+        session_key = _usage_logical_session_key(event)
+        if not session_key:
+            continue
+        tool = _usage_tool_key(event)
+        applied_sessions.add(session_key)
+        applied_by_tool.setdefault(tool, set()).add(session_key)
+
+    from .ledger import processing
+
+    processing_states = processing.fold_states(root)
+    noise_sessions = {
+        session_key
+        for session_key in offered_sessions
+        if processing_states.get(session_key) == "no-findings"
+    }
+    with_noise = _funnel_mode_report(
+        offered_rows=offered_rows,
+        offered_sessions=offered_sessions,
+        offered_by_tool=offered_by_tool,
+        attributed_read_sessions=attributed_read_sessions,
+        read_by_tool=read_by_tool,
+        applied_sessions=applied_sessions,
+        applied_by_tool=applied_by_tool,
+        attributed_events=attributed_events,
+        excluded_sessions=set(),
+    )
+    without_noise = _funnel_mode_report(
+        offered_rows=offered_rows,
+        offered_sessions=offered_sessions,
+        offered_by_tool=offered_by_tool,
+        attributed_read_sessions=attributed_read_sessions,
+        read_by_tool=read_by_tool,
+        applied_sessions=applied_sessions,
+        applied_by_tool=applied_by_tool,
+        attributed_events=attributed_events,
+        excluded_sessions=noise_sessions,
+    )
+    modes = {"with_noise": with_noise, "without_noise": without_noise}
+    selected_mode = "without-noise" if args.exclude_noise else "with-noise"
+    selected = modes[selected_mode.replace("-", "_")]
+    read_attribution = {
+        "offer_then_read_events": len(attributed_events),
+        "offer_then_read_sessions": len(attributed_read_sessions),
+        "direct_read_events": len(direct_events),
+        "direct_read_sessions": len(direct_read_sessions),
+        "by_tool": attribution_by_tool,
+    }
+
+    report = {
+        "selected_mode": selected_mode,
+        "summary": selected["summary"],
+        "by_tool": selected["by_tool"],
+        "top_slices": selected["top_slices"],
+        "with_noise": with_noise,
+        "without_noise": without_noise,
+        "noise_filter": {
+            "state": "no-findings",
+            "excluded_sessions": len(noise_sessions),
+        },
+        "read_attribution": read_attribution,
+    }
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        print(f"selected_mode={selected_mode}")
+        print(
+            f"noise_filter=state:no-findings "
+            f"excluded_sessions={len(noise_sessions)}"
+        )
+        for mode_name in ("with_noise", "without_noise"):
+            mode = modes[mode_name]
+            summary = mode["summary"]
+            print(mode_name)
+            print(
+                f"sessions_offered={summary['sessions_offered']} "
+                f"sessions_with_read={summary['sessions_with_read']} "
+                f"read-through={summary['read_through_rate']:.2f}% "
+                f"sessions_with_applied={summary['sessions_with_applied']} "
+                f"applied-rate={summary['applied_rate']:.2f}%"
+            )
+            for tool, metrics in mode["by_tool"].items():
+                print(
+                    f"  tool={tool} sessions_offered={metrics['sessions_offered']} "
+                    f"sessions_with_read={metrics['sessions_with_read']} "
+                    f"read-through={metrics['read_through_rate']:.2f}% "
+                    f"sessions_with_applied={metrics['sessions_with_applied']} "
+                    f"applied-rate={metrics['applied_rate']:.2f}%"
+                )
+        print(
+            f"read_attribution offer-then-read-events={read_attribution['offer_then_read_events']} "
+            f"offer-then-read-sessions={read_attribution['offer_then_read_sessions']} "
+            f"direct-read-events={read_attribution['direct_read_events']} "
+            f"direct-read-sessions={read_attribution['direct_read_sessions']}"
+        )
+        print("top_slices")
+        for item in selected["top_slices"]:
+            ratio = item["read_offer_ratio"]
+            ratio_display = "n/a" if ratio is None else f"{ratio:.6f}"
+            print(
+                f"  {item['slice_id']} offered={item['offered_count']} "
+                f"read={item['read_count']} "
+                f"read/offer={ratio_display}"
+            )
     return 0
 
 
