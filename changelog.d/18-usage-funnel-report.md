@@ -6,3 +6,5 @@
 
 - 報表同時列出含噪音與排除噪音兩組數字；排除組依唯讀 fold 的 `processing.jsonl` 最終 `state=no-findings` 排除 session，預設以排除組作為主指標，並可用 `--include-noise` 切換。
 - `read-through` 只計同一 `tool:session_id` 曾被 offer 的相同 slice 且在 offer 後發生的 read；未經 offer 的直讀另列於 attribution 統計，不再灌入主指標。
+
+- 主指標 read-through 只計「同 session 先 offer、後 read」的事件；未經 offer 的直讀另列，不混入轉換率。
