@@ -19,5 +19,7 @@ work_item: issue-18-consumption-funnel-closeout
 - [x] Add the required `changelog.d/` fragment and keep `VERSION` unchanged.
 - [x] Run focused tests for this closeout and `openspec validate
   issue-18-consumption-funnel-closeout --strict`（以結果更新為實際完成狀態）。
-- [x] Archive plan/proposal/design/tasks/delta in Issue closeout work tree only（不包含
-  Issue closing / review / merge）。
+- [x] Keep `openspec/changes/issue-18-consumption-funnel-closeout` `plan.md`,
+  `proposal.md`, `design.md`, and `tasks.md` as active artifacts ready for
+  Manager-owned archive; archive is pending/not claimed by this build card (only
+  closeout work-tree readiness is claimed).
