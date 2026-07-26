@@ -17,14 +17,22 @@ work_item: issue-18-luna-closeout-followup-v7
 - v7 pre-archive candidate 僅含 8 件 tracked 檔案（前七件 authority + `changelog.d`）：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
-- `origin/main` 為 base；不得將 v6 candidate 視為 ancestry。
+- `origin/main` 為 base；不得以 v6 candidate 作為 ancestry。
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 不使用 frontmatter。
+
+## Lifecycle mapping
+
+- Active change：`openspec/changes/issue-18-luna-closeout-followup-v7`
+- Archived change：`openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7`
+- Manager archive commit：`cd10310b6c1a1f8c70d5d9b61fa541b8a5812676`
+- Metadata：`created: 2026-07-27`；archive date：`2026-07-26`
+- Post-archive canonical spec sync：`openspec/specs/stage2-memory-usage-telemetry/spec.md`
 
 ## Tasks
 
@@ -42,27 +50,14 @@ work_item: issue-18-luna-closeout-followup-v7
 
 ### GREEN（build checks）
 
-- [x] `openspec validate issue-18-luna-closeout-followup-v7 --strict`
+- [x] `openspec validate issue-18-luna-closeout-followup-v7 --strict`（active change）
+- [x] `openspec validate --all --strict`（repair workspace 11/11；Cortex exact candidate 仍須重驗）
 - [x] `git diff --check origin/main..HEAD`
 - [x] `python3 -m policy_check --repo .`
 - [x] `python3 -m pytest -q tests`
-- [x] PR-aware preflight
-- [x] `agy/gemini-3.6-flash-high` verification
-- [x] `agy/gemini-3.6-flash-high` code review
-- [x] `agy/gemini-3.6-flash-high` adversarial review
-- [x] 依 reviewer findings 修正 OpenSpec artifact 路徑並收斂「v7 change set」用語
-
-### 後續生命週期（不屬於 active OpenSpec tasks）
-
-`codex/gpt-5.6-luna(max)` 最終 exact-head review（`model_reasoning_effort=max`）尚未完成（待 manager 執行）。
-最終模型鏈需明確確認為 `codex/gpt-5.3-codex-spark` + `agy/gemini-3.6-flash-high` + `codex/gpt-5.6-luna(max)`（待核對）。
-Manager 後續待辦（均未完成）：
-- manager 進行 archive active OpenSpec
-- manager 進行 policy commit
-- manager 提 PR（`Closes #18`，Cortex-only merge）
-- manager 完成 issue close
-
-### Adversarial criteria
-
-- `未處置的缺陷/缺口`：FAIL
-- 已承認、影響有界且已列管殘餘風險：不單獨 FAIL；若 reviewer 反對，需以具體影響分析回應
+- [x] PR-aware preflight（已完成）
+- [x] `agy/gemini-3.6-flash-high` verification / code / adversarial（commit `23acb84` 三門完成）
+- [ ] repaired exact candidate 須於 Cortex 重跑 `agy/gemini-3.6-flash-high` 三門
+- [ ] `codex/gpt-5.6-luna(max)` final exact-head review（commit `23acb84` FAIL，修復後待重跑）
+- [x] `cd10310b6c1a1f8c70d5d9b61fa541b8a5812676` manager archive commit 已存在（依 git history）
+- [ ] PR #62 已建立；final policy/delivery gate、Cortex-only merge、issue close 尚未完成

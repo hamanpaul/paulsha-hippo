@@ -2,6 +2,15 @@
 
 ## Purpose
 TBD - created by archiving change stage2-memory-usage-telemetry. Update Purpose after archive.
+
+## Lifecycle mapping (post-archive canonical sync)
+
+- Active change：`openspec/changes/issue-18-luna-closeout-followup-v7`
+- Archived change：`openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7`
+- Manager archive commit：`cd10310b6c1a1f8c70d5d9b61fa541b8a5812676`
+- Metadata：`created: 2026-07-27`；archive 目錄 date：`2026-07-26`
+- 本規格為 archive 後 canonical sync；不回溯擴張 pre-archive 8-file card（僅補齊 post-archive 對齊）。
+
 ## Requirements
 ### Requirement: usage 訊號擷取純函式
 
@@ -97,11 +106,11 @@ Issue #18 Luna recovery follow-up is governed by `issue-18-luna-closeout-followu
 - v7 artifacts are (前七件 authority + changelog，共八件)：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 不使用 frontmatter。
 - `origin/main` 為 pre-archive base，v6 candidate 不得作為 ancestry。

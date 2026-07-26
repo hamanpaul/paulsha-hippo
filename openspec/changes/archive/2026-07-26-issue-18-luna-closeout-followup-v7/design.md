@@ -20,30 +20,37 @@ work_item: issue-18-luna-closeout-followup-v7
 - v7 pre-archive candidate scope 僅限七件 authority files + `changelog`（共八件）：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - `origin/main` 作為 base；不得以 `issue-18-luna-closeout-followup-v6` 作為 ancestry。
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 為治理/release note artifact，不使用 frontmatter。
 - 明確排除：runtime code、tests、CI、`VERSION`、`CHANGELOG`、`.cortex` 映射、以及所有未列入本案 scope 的項目。
 
-3. Immutable telemetry semantics
+3. Lifecycle mapping
+
+- Active pre-archive change：`openspec/changes/issue-18-luna-closeout-followup-v7`
+- Archived change：`openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7`
+- Manager archive commit：`cd10310b6c1a1f8c70d5d9b61fa541b8a5812676`（將 active change 搬到 archive）
+- Metadata：`created: 2026-07-27`；archive date：`2026-07-26`
+- Post-archive canonical spec sync：`openspec/specs/stage2-memory-usage-telemetry/spec.md`
+
+4. Immutable telemetry semantics
 
 - `session citation`
 - `unique-slice coverage`
 - `offered-to-read conversion`
 - `applied`（不做為 read/citation proxy）
 
-4. Model chain
+5. Model chain
 
 - build：`codex/gpt-5.3-codex-spark`
 - verification / code / adversarial：`agy/gemini-3.6-flash-high`
 - final exact-head：`codex/gpt-5.6-luna(max)`，`model_reasoning_effort=max`
 
-5. Handoff constraints
+6. Handoff constraints
 
-- v7 僅定義 planning authority；manager 後續執行 archive、policy commit、PR（`Closes #18`）、Cortex-only merge、close issue。
-- 這些不屬於 pre-archive v7 card 範圍。
+- v7 僅定義 planning authority；manager post-archive 可執行 archive、policy commit、PR（`Closes #18`）、merge、close issue，但這些在本 card 僅能紀錄 `cd10310...` commit 已存在，不可宣告完成或 final approval。

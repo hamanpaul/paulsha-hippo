@@ -4,3 +4,8 @@ schema: spec-driven
 created: 2026-07-27
 # v7 pre-archive scope = 8 tracked files（七件 authority + changelog.d fragment）
 # base: origin/main；不得以 issue-18-luna-closeout-followup-v6 為 ancestry；`.cortex` mapping 不列入 candidate
+# Lifecycle mapping（manager archive）
+# Active pre-archive change：openspec/changes/issue-18-luna-closeout-followup-v7
+# Archived change：openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7
+# Manager archive commit：cd10310b6c1a1f8c70d5d9b61fa541b8a5812676
+# created: 2026-07-27 為 change metadata；archive directory date 為 2026-07-26
