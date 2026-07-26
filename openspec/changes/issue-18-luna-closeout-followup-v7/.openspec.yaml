@@ -2,5 +2,5 @@ status: accepted
 work_item: issue-18-luna-closeout-followup-v7
 schema: spec-driven
 created: 2026-07-27
-# v7 pre-archive scope = 8 tracked files（前七件 authority + `changelog.d`）
+# v7 pre-archive scope = 8 tracked files（七件 authority + changelog.d fragment）
 # base: origin/main；不得以 issue-18-luna-closeout-followup-v6 為 ancestry；`.cortex` mapping 不列入 candidate
