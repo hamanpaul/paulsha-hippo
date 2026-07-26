@@ -47,21 +47,19 @@ work_item: issue-18-luna-closeout-followup-v7
 - [x] `python3 -m policy_check --repo .`
 - [x] `python3 -m pytest -q tests`
 - [x] PR-aware preflight
-- [ ] `agy/gemini-3.6-flash-high` verification
-- [ ] `agy/gemini-3.6-flash-high` code review
-- [ ] `agy/gemini-3.6-flash-high` adversarial review
+- [x] `agy/gemini-3.6-flash-high` verification
+- [x] `agy/gemini-3.6-flash-high` code review
+- [x] `agy/gemini-3.6-flash-high` adversarial review
 
-### BLUE（final review）
+### 後續生命週期（不屬於 active OpenSpec tasks）
 
-- [ ] `codex/gpt-5.6-luna(max)` final exact-head review (`model_reasoning_effort=max`)
-- [ ] `codex/gpt-5.6-luna(max)` final exact-head 模型鏈：確認 model chain 明載為 `codex/gpt-5.3-codex-spark` + `agy/gemini-3.6-flash-high` + `codex/gpt-5.6-luna(max)`。
-
-### LUNA / ship（後續）
-
-- [ ] manager 進行 archive active OpenSpec
-- [ ] manager 進行 policy commit
-- [ ] manager 提 PR（`Closes #18`，Cortex-only merge）
-- [ ] manager 完成 issue close
+`codex/gpt-5.6-luna(max)` 最終 exact-head review（`model_reasoning_effort=max`）尚未完成（待 manager 執行）。
+最終模型鏈需明確確認為 `codex/gpt-5.3-codex-spark` + `agy/gemini-3.6-flash-high` + `codex/gpt-5.6-luna(max)`（待核對）。
+Manager 後續待辦（均未完成）：
+- manager 進行 archive active OpenSpec
+- manager 進行 policy commit
+- manager 提 PR（`Closes #18`，Cortex-only merge）
+- manager 完成 issue close
 
 ### Adversarial criteria
 
