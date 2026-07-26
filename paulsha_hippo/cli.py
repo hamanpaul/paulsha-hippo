@@ -842,7 +842,11 @@ def _load_usage_rows(root: Path, since: str | None) -> tuple[list[dict], list[di
     led = root / "runtime" / "ledger"
     offered_rows = _read_usage_jsonl(led / "offered.jsonl", since)
     usage_rows = _read_usage_jsonl(led / "memory_usage.jsonl", since)
-    used_rows = [event for event in usage_rows if event.get("source") == "read"]
+    used_rows = [
+        event
+        for event in usage_rows
+        if event.get("source") == "read" and event.get("kind") != "applied"
+    ]
     applied_rows = [event for event in usage_rows if event.get("kind") == "applied"]
     return offered_rows, used_rows, applied_rows
 

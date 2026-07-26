@@ -89,4 +89,3 @@ requirements.
   production ledger
 - **THEN** the contract and capability matrix SHALL keep the metric definitions
   stable without requiring historical counts to remain constant
-

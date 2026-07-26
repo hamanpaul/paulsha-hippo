@@ -520,6 +520,98 @@ def test_usage_funnel_applied_without_read_does_not_increase_citation_or_convers
     assert report["read_attribution"]["offer_then_read_sessions"] == 0
 
 
+def test_usage_funnel_excludes_applied_events_from_read_metrics_and_coverage(
+    tmp_path, capsys
+):
+    _write_ledger(
+        tmp_path,
+        "offered.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:00:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "offered": ["sl-offered-a", "sl-offered-b"],
+            },
+        ],
+    )
+    _write_ledger(
+        tmp_path,
+        "memory_usage.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:01:00Z",
+                "tool": "claude-code",
+                "session_id": "s-offered",
+                "sl_id": "sl-offered-a",
+                "kind": "applied",
+                "source": "read",
+            },
+            {
+                "ts": "2026-07-01T00:01:10Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "sl_id": "sl-offered-b",
+                "source": "read",
+            },
+            {
+                "ts": "2026-07-01T00:01:20Z",
+                "tool": "claude-code",
+                "session_id": "s-offered",
+                "kind": "applied",
+                "slice_id": "sl-offered-a",
+            },
+        ],
+    )
+
+    assert (
+        cli.main(
+            ["usage", "funnel", "--memory-root", str(tmp_path), "--json"]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["summary"] == {
+        "sessions_offered": 1,
+        "sessions_with_read": 1,
+        "read_through_rate": 100.0,
+        "sessions_with_applied": 1,
+        "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 2, "read": 1, "read_rate": 50.0},
+    }
+    assert report["by_tool"]["claude-code"] == {
+        "sessions_offered": 1,
+        "sessions_with_read": 1,
+        "read_through_rate": 100.0,
+        "sessions_with_applied": 1,
+        "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 2, "read": 1, "read_rate": 50.0},
+    }
+    assert report["read_attribution"] == {
+        "offer_then_read_events": 1,
+        "offer_then_read_sessions": 1,
+        "direct_read_events": 0,
+        "direct_read_sessions": 0,
+        "by_tool": {
+            "claude-code": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 0,
+                "direct_read_sessions": 0,
+            }
+        },
+    }
+    assert report["top_slices"] == [
+        {
+            "slice_id": "sl-offered-b",
+            "offered_count": 1,
+            "read_count": 1,
+            "read_offer_ratio": 1.0,
+        }
+    ]
+
+
 def test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command(tmp_path, capsys):
     _write_ledger(
         tmp_path,

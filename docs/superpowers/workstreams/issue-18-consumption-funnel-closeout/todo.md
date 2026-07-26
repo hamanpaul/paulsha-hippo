@@ -15,4 +15,4 @@
 - [Issue #18](https://github.com/hamanpaul/paulsha-hippo/issues/18)
 - [PR #60](https://github.com/hamanpaul/paulsha-hippo/pull/60)
 - [既有 Plan：2026-07-26-issue-18-consumption-funnel-closeout](../../plans/2026-07-26-issue-18-consumption-funnel-closeout.md)
-- [OpenSpec：issue-18-consumption-funnel-closeout](../../../../openspec/changes/issue-18-consumption-funnel-closeout/tasks.md)
+- [OpenSpec：issue-18-consumption-funnel-closeout](../../../../openspec/changes/archive/2026-07-26-issue-18-consumption-funnel-closeout/tasks.md)
