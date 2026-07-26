@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from paulsha_hippo import cli
 
@@ -415,3 +416,105 @@ def test_usage_funnel_does_not_count_reads_without_a_prior_offer(tmp_path, capsy
         },
     }
     assert report["top_slices"] == []
+
+
+def test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command(tmp_path, capsys):
+    _write_ledger(
+        tmp_path,
+        "offered.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:00:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "offered": ["sl-offered-1", "sl-offered-2"],
+            },
+            {
+                "ts": "2026-07-01T00:00:01Z",
+                "session_id": "s-copilot",
+                "tool": "copilot-cli",
+                "offered": [{"sl_id": "sl-offered-3", "path": "/k/copilot.md"}],
+            },
+        ],
+    )
+    _write_ledger(
+        tmp_path,
+        "memory_usage.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:01:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "sl_id": "sl-offered-1",
+                "source": "read",
+                "offered": True,
+            },
+            {
+                "ts": "2026-07-01T00:01:10Z",
+                "session_id": "s-offered",
+                "kind": "applied",
+                "tool": "claude-code",
+                "slice_id": "sl-offered-1",
+            },
+            {
+                "ts": "2026-07-01T00:01:20Z",
+                "session_id": "s-copilot",
+                "tool": "copilot-cli",
+                "sl_id": "sl-offered-3",
+                "source": "read",
+                "offered": True,
+            },
+            {
+                "ts": "2026-07-01T00:01:30Z",
+                "session_id": "s-direct",
+                "tool": "claude-code",
+                "sl_id": "sl-direct",
+                "source": "read",
+            },
+        ],
+    )
+
+    # usage funnel must be installed and emit the expected contract dimensions:
+    # session citation, unique-slice coverage, offered-to-read conversion, and explicit applied.
+    assert (
+        cli.main(
+            ["usage", "funnel", "--memory-root", str(tmp_path), "--json"]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["summary"]["sessions_offered"] == 2
+    assert report["summary"]["sessions_with_read"] == 2
+    assert report["summary"]["read_through_rate"] == 100.0
+    assert report["summary"]["sessions_with_applied"] == 1
+    assert report["summary"]["applied_rate"] == 50.0
+    assert len(report["top_slices"]) == 2
+    assert any(item["slice_id"] == "sl-offered-1" for item in report["top_slices"])
+    assert any(item["slice_id"] == "sl-offered-3" for item in report["top_slices"])
+    assert report["read_attribution"] == {
+        "offer_then_read_events": 2,
+        "offer_then_read_sessions": 2,
+        "direct_read_events": 1,
+        "direct_read_sessions": 1,
+        "by_tool": {
+            "claude-code": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 1,
+                "direct_read_sessions": 1,
+            },
+            "copilot-cli": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 0,
+                "direct_read_sessions": 0,
+            },
+        },
+    }
+    assert report["by_tool"]["claude-code"]["sessions_with_applied"] == 1
+    assert report["by_tool"]["copilot-cli"]["sessions_with_read"] == 1
+    assert report["by_tool"]["copilot-cli"]["applied_rate"] == 0.0
+
+    matrix = Path("docs/cross-cli-capability-matrix.md").read_text(encoding="utf-8")
+    assert "Task 8 填" not in matrix
