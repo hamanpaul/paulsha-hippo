@@ -5,6 +5,15 @@
 > 判定規則：`supported` = 官方文件列出該事件 **且** 本機 probe FIRED；僅其一 = `inconclusive`（保守處理，等同不支援，不接線）。
 > `read attribution` 依 Task 1 Step 3 僅以官方文件判定（不強求 fire 實測）；copilot 另有 live 實測（見漏斗實證區）。
 
+## `hippo usage funnel` 作業面契約
+
+- 已安裝 surface：`hippo usage funnel --memory-root <path> --json`
+- session citation：session 是否在有 `offered` 後接到可歸因 `read`，可追蹤 session-level 漏斗命中率。
+- unique-slice coverage：在 offered 的 slice 中，最終有可歸因 read 的 distinct slice 數（session 無關總量）。
+- offered-to-read conversion：offer sessions 中，至少有 1 次可歸因 read 的比例。
+- applied：`hippo usage mark-applied` 寫入的 `kind:"applied"` 明確是 explicit acknowledgement，不可當作 read/citation proxy（not a read or citation proxy）；有沒有 read 不會改寫已定義的 citation 與 conversion。
+- `--json` 是契約化輸出；`offered/read/applied` 是 runtime state，live counts are runtime state，文檔不得以 live counts 固定（not fixed）為 source contract。
+
 | 能力 | claude-code | codex | copilot-cli |
 |---|---|---|---|
 | session-start 注入 | supported（SessionStart，既有佈署） | inconclusive（文件列 `SessionStart`；headless probe 對照組未 fire） | supported（文件列 `sessionStart`/`SessionStart`；probe FIRED） |
@@ -108,7 +117,7 @@ postToolUse        | {"sessionId":"d44d38f8-...","timestamp":...,"cwd":"<tmp>/wo
 - UserPromptSubmit / PostToolUse(Read) 由 `paulsha_hippo/hooks/install.sh` 佈署（Step 4 / matcher="Read"）。
 - 真實 adapter E2E 證據見下方「offered → read → applied 實證」（Task 8 產出時附）。
 
-## offered → read → applied 實證（Task 8 填；copilot 接線後同鏈復驗）
+## offered → read → applied 實證（Task 8 已完成，含 copilot 接線同鏈復驗）
 
 - 執行日期：`2026-07-11`（claude 初證＋copilot 接線後兩平台同腳本復驗）
 - hermetic 證據：`tests/test_cross_cli_funnel_integration.py`（claude＋copilot 兩條 adapter 鏈）已納入 `tests.yml`，常駐保護 hook wiring。

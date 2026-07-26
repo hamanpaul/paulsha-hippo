@@ -842,7 +842,11 @@ def _load_usage_rows(root: Path, since: str | None) -> tuple[list[dict], list[di
     led = root / "runtime" / "ledger"
     offered_rows = _read_usage_jsonl(led / "offered.jsonl", since)
     usage_rows = _read_usage_jsonl(led / "memory_usage.jsonl", since)
-    used_rows = [event for event in usage_rows if event.get("source") == "read"]
+    used_rows = [
+        event
+        for event in usage_rows
+        if event.get("source") == "read" and event.get("kind") != "applied"
+    ]
     applied_rows = [event for event in usage_rows if event.get("kind") == "applied"]
     return offered_rows, used_rows, applied_rows
 
@@ -966,6 +970,58 @@ def _funnel_metrics(
         "sessions_with_applied": with_applied,
         "applied_rate": _rate(with_applied),
     }
+
+
+def _funnel_unique_slice_coverage(
+    offered_rows: list[dict],
+    attributed_events: list[tuple[dict, str, str]],
+    included_sessions: set[str],
+) -> tuple[dict[str, int | float], dict[str, dict[str, int | float]]]:
+    offered_by_tool: dict[str, set[str]] = {}
+    read_by_tool: dict[str, set[str]] = {}
+    total_offered: set[str] = set()
+    total_read: set[str] = set()
+
+    for event in offered_rows:
+        session_key = _usage_logical_session_key(event)
+        if session_key not in included_sessions:
+            continue
+        tool = _usage_tool_key(event)
+        for slice_id in _offered_slice_ids(event):
+            if not slice_id:
+                continue
+            offered_by_tool.setdefault(tool, set()).add(slice_id)
+            total_offered.add(slice_id)
+
+    for event, session_key, slice_id in attributed_events:
+        if session_key not in included_sessions or not slice_id:
+            continue
+        tool = _usage_tool_key(event)
+        read_by_tool.setdefault(tool, set()).add(slice_id)
+        total_read.add(slice_id)
+
+    def _coverage(offered: set[str], read: set[str]) -> dict[str, int | float]:
+        offered_count = len(offered)
+        read_count = len(read)
+        return {
+            "offered": offered_count,
+            "read": read_count,
+            "read_rate": round(read_count * 100 / offered_count, 2)
+            if offered_count
+            else 0.0,
+        }
+
+    tool_coverage = {}
+    coverage_tools = set(_FUNNEL_TOOLS)
+    coverage_tools.update(offered_by_tool)
+    coverage_tools.update(read_by_tool)
+    for tool in sorted(coverage_tools):
+        tool_coverage[tool] = _coverage(
+            offered_by_tool.get(tool, set()),
+            read_by_tool.get(tool, set()),
+        )
+
+    return _coverage(total_offered, total_read), tool_coverage
 
 
 def _usage_logical_session_key(event: dict) -> str:
@@ -1130,22 +1186,36 @@ def _funnel_mode_report(
     excluded_sessions: set[str],
 ) -> dict:
     included_sessions = offered_sessions - excluded_sessions
+    unique_slice_coverage, unique_slice_coverage_by_tool = _funnel_unique_slice_coverage(
+        offered_rows=offered_rows,
+        attributed_events=attributed_events,
+        included_sessions=included_sessions,
+    )
     by_tool = {}
     tool_names = set(_FUNNEL_TOOLS)
     tool_names.update(offered_by_tool)
+    tool_names.update(unique_slice_coverage_by_tool)
     for tool in sorted(tool_names):
-        by_tool[tool] = _funnel_metrics(
+        metrics = _funnel_metrics(
             offered_by_tool.get(tool, set()) - excluded_sessions,
             read_by_tool.get(tool, set()),
             applied_by_tool.get(tool, set()),
         )
+        metrics["unique_slice_coverage"] = unique_slice_coverage_by_tool.get(
+            tool,
+            {"offered": 0, "read": 0, "read_rate": 0.0},
+        )
+        by_tool[tool] = metrics
+
+    summary = _funnel_metrics(
+        included_sessions,
+        attributed_read_sessions,
+        applied_sessions,
+    )
+    summary["unique_slice_coverage"] = unique_slice_coverage
 
     return {
-        "summary": _funnel_metrics(
-            included_sessions,
-            attributed_read_sessions,
-            applied_sessions,
-        ),
+        "summary": summary,
         "by_tool": by_tool,
         "top_slices": _funnel_top_slices(
             offered_rows, attributed_events, included_sessions
@@ -1255,7 +1325,10 @@ def _memory_usage_funnel(args: argparse.Namespace) -> int:
                 f"sessions_with_read={summary['sessions_with_read']} "
                 f"read-through={summary['read_through_rate']:.2f}% "
                 f"sessions_with_applied={summary['sessions_with_applied']} "
-                f"applied-rate={summary['applied_rate']:.2f}%"
+                f"applied-rate={summary['applied_rate']:.2f}% "
+                f"unique-slice-offered={summary['unique_slice_coverage']['offered']} "
+                f"unique-slice-read={summary['unique_slice_coverage']['read']} "
+                f"unique-slice-read-rate={summary['unique_slice_coverage']['read_rate']:.2f}%"
             )
             for tool, metrics in mode["by_tool"].items():
                 print(
@@ -1263,7 +1336,10 @@ def _memory_usage_funnel(args: argparse.Namespace) -> int:
                     f"sessions_with_read={metrics['sessions_with_read']} "
                     f"read-through={metrics['read_through_rate']:.2f}% "
                     f"sessions_with_applied={metrics['sessions_with_applied']} "
-                    f"applied-rate={metrics['applied_rate']:.2f}%"
+                    f"applied-rate={metrics['applied_rate']:.2f}% "
+                    f"unique-slice-offered={metrics['unique_slice_coverage']['offered']} "
+                    f"unique-slice-read={metrics['unique_slice_coverage']['read']} "
+                    f"unique-slice-read-rate={metrics['unique_slice_coverage']['read_rate']:.2f}%"
                 )
         print(
             f"read_attribution offer-then-read-events={read_attribution['offer_then_read_events']} "

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 from paulsha_hippo import cli
 
@@ -11,6 +13,26 @@ def _write_ledger(root, name: str, rows: list[dict]) -> None:
     (ledger / name).write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
+
+
+def _assert_matrix_contract(matrix: str) -> None:
+    assert re.search(
+        r"hippo usage funnel --memory-root <path>[^\n]*--json",
+        matrix,
+    )
+    lowered = matrix.lower()
+    assert "session citation" in lowered
+    assert "unique-slice coverage" in lowered
+    assert "offered-to-read conversion" in lowered
+    assert "applied" in lowered
+    assert "explicit acknowledgement" in lowered
+    assert "not a read" in lowered or "不是 read" in matrix
+    assert (
+        "not a read/citation proxy" in lowered
+        or "not a read or citation proxy" in lowered
+    )
+    assert "live counts are runtime state" in lowered
+    assert "not fixed" in lowered or "不固定" in matrix
 
 
 def test_usage_funnel_accepts_legacy_and_object_offers_and_counts_sessions(
@@ -88,6 +110,7 @@ def test_usage_funnel_accepts_legacy_and_object_offers_and_counts_sessions(
         "read_through_rate": 66.67,
         "sessions_with_applied": 1,
         "applied_rate": 33.33,
+        "unique_slice_coverage": {"offered": 3, "read": 2, "read_rate": 66.67},
     }
     assert report["by_tool"]["claude-code"] == {
         "sessions_offered": 1,
@@ -95,6 +118,7 @@ def test_usage_funnel_accepts_legacy_and_object_offers_and_counts_sessions(
         "read_through_rate": 100.0,
         "sessions_with_applied": 1,
         "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 1, "read": 1, "read_rate": 100.0},
     }
     assert report["by_tool"]["codex"] == {
         "sessions_offered": 1,
@@ -102,10 +126,16 @@ def test_usage_funnel_accepts_legacy_and_object_offers_and_counts_sessions(
         "read_through_rate": 100.0,
         "sessions_with_applied": 0,
         "applied_rate": 0.0,
+        "unique_slice_coverage": {"offered": 1, "read": 1, "read_rate": 100.0},
     }
     assert report["by_tool"]["copilot-cli"]["sessions_offered"] == 1
     assert report["by_tool"]["copilot-cli"]["sessions_with_read"] == 0
     assert report["by_tool"]["copilot-cli"]["sessions_with_applied"] == 0
+    assert report["by_tool"]["copilot-cli"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 0,
+        "read_rate": 0.0,
+    }
 
     slices = {item["slice_id"]: item for item in report["top_slices"]}
     assert slices["sl-legacy"] == {
@@ -133,6 +163,7 @@ def test_usage_funnel_empty_data_has_zero_rates(tmp_path, capsys):
         "read_through_rate": 0.0,
         "sessions_with_applied": 0,
         "applied_rate": 0.0,
+        "unique_slice_coverage": {"offered": 0, "read": 0, "read_rate": 0.0},
     }
     assert report["top_slices"] == []
     assert all(
@@ -238,6 +269,11 @@ def test_usage_funnel_since_filters_all_event_streams(tmp_path, capsys):
     assert report["summary"]["sessions_offered"] == 1
     assert report["summary"]["sessions_with_read"] == 1
     assert report["summary"]["read_through_rate"] == 100.0
+    assert report["summary"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 1,
+        "read_rate": 100.0,
+    }
     assert [item["slice_id"] for item in report["top_slices"]] == ["sl-after"]
 
 
@@ -332,6 +368,11 @@ def test_usage_funnel_reports_noise_in_both_modes(tmp_path, capsys):
     assert report["with_noise"]["summary"]["sessions_with_read"] == 2
     assert report["without_noise"]["summary"]["sessions_offered"] == 1
     assert report["without_noise"]["summary"]["sessions_with_read"] == 1
+    assert report["without_noise"]["summary"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 1,
+        "read_rate": 100.0,
+    }
     assert report["without_noise"]["by_tool"]["claude-code"]["sessions_offered"] == 0
     assert report["without_noise"]["by_tool"]["copilot-cli"]["sessions_offered"] == 1
     assert report["summary"] == report["without_noise"]["summary"]
@@ -400,6 +441,11 @@ def test_usage_funnel_does_not_count_reads_without_a_prior_offer(tmp_path, capsy
     assert report["summary"]["sessions_offered"] == 1
     assert report["summary"]["sessions_with_read"] == 0
     assert report["summary"]["read_through_rate"] == 0.0
+    assert report["summary"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 0,
+        "read_rate": 0.0,
+    }
     assert report["read_attribution"] == {
         "offer_then_read_events": 0,
         "offer_then_read_sessions": 0,
@@ -415,3 +461,280 @@ def test_usage_funnel_does_not_count_reads_without_a_prior_offer(tmp_path, capsy
         },
     }
     assert report["top_slices"] == []
+
+
+def test_usage_funnel_applied_without_read_does_not_increase_citation_or_conversion(
+    tmp_path, capsys
+):
+    _write_ledger(
+        tmp_path,
+        "offered.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:00:00Z",
+                "session_id": "s-only-applied",
+                "tool": "claude-code",
+                "offered": ["sl-applied-only"],
+            },
+        ],
+    )
+    _write_ledger(
+        tmp_path,
+        "memory_usage.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:01:00Z",
+                "tool": "claude-code",
+                "session_id": "s-only-applied",
+                "kind": "applied",
+                "slice_id": "sl-applied-only",
+            }
+        ],
+    )
+
+    assert (
+        cli.main(
+            ["usage", "funnel", "--memory-root", str(tmp_path), "--json"]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["summary"] == {
+        "sessions_offered": 1,
+        "sessions_with_read": 0,
+        "read_through_rate": 0.0,
+        "sessions_with_applied": 1,
+        "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 1, "read": 0, "read_rate": 0.0},
+    }
+    assert report["by_tool"]["claude-code"]["sessions_offered"] == 1
+    assert report["by_tool"]["claude-code"]["sessions_with_read"] == 0
+    assert report["by_tool"]["claude-code"]["sessions_with_applied"] == 1
+    assert report["by_tool"]["claude-code"]["applied_rate"] == 100.0
+    assert report["by_tool"]["claude-code"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 0,
+        "read_rate": 0.0,
+    }
+    assert report["read_attribution"]["offer_then_read_sessions"] == 0
+
+
+def test_usage_funnel_excludes_applied_events_from_read_metrics_and_coverage(
+    tmp_path, capsys
+):
+    _write_ledger(
+        tmp_path,
+        "offered.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:00:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "offered": ["sl-offered-a", "sl-offered-b"],
+            },
+        ],
+    )
+    _write_ledger(
+        tmp_path,
+        "memory_usage.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:01:00Z",
+                "tool": "claude-code",
+                "session_id": "s-offered",
+                "sl_id": "sl-offered-a",
+                "kind": "applied",
+                "source": "read",
+            },
+            {
+                "ts": "2026-07-01T00:01:10Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "sl_id": "sl-offered-b",
+                "source": "read",
+            },
+            {
+                "ts": "2026-07-01T00:01:20Z",
+                "tool": "claude-code",
+                "session_id": "s-offered",
+                "kind": "applied",
+                "slice_id": "sl-offered-a",
+            },
+        ],
+    )
+
+    assert (
+        cli.main(
+            ["usage", "funnel", "--memory-root", str(tmp_path), "--json"]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["summary"] == {
+        "sessions_offered": 1,
+        "sessions_with_read": 1,
+        "read_through_rate": 100.0,
+        "sessions_with_applied": 1,
+        "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 2, "read": 1, "read_rate": 50.0},
+    }
+    assert report["by_tool"]["claude-code"] == {
+        "sessions_offered": 1,
+        "sessions_with_read": 1,
+        "read_through_rate": 100.0,
+        "sessions_with_applied": 1,
+        "applied_rate": 100.0,
+        "unique_slice_coverage": {"offered": 2, "read": 1, "read_rate": 50.0},
+    }
+    assert report["read_attribution"] == {
+        "offer_then_read_events": 1,
+        "offer_then_read_sessions": 1,
+        "direct_read_events": 0,
+        "direct_read_sessions": 0,
+        "by_tool": {
+            "claude-code": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 0,
+                "direct_read_sessions": 0,
+            }
+        },
+    }
+    assert report["top_slices"] == [
+        {
+            "slice_id": "sl-offered-b",
+            "offered_count": 1,
+            "read_count": 1,
+            "read_offer_ratio": 1.0,
+        }
+    ]
+
+
+def test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command(tmp_path, capsys):
+    _write_ledger(
+        tmp_path,
+        "offered.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:00:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "offered": ["sl-offered-1", "sl-offered-2"],
+            },
+            {
+                "ts": "2026-07-01T00:00:01Z",
+                "session_id": "s-copilot",
+                "tool": "copilot-cli",
+                "offered": [{"sl_id": "sl-offered-3", "path": "/k/copilot.md"}],
+            },
+        ],
+    )
+    _write_ledger(
+        tmp_path,
+        "memory_usage.jsonl",
+        [
+            {
+                "ts": "2026-07-01T00:01:00Z",
+                "session_id": "s-offered",
+                "tool": "claude-code",
+                "sl_id": "sl-offered-1",
+                "source": "read",
+                "offered": True,
+            },
+            {
+                "ts": "2026-07-01T00:01:10Z",
+                "session_id": "s-offered",
+                "kind": "applied",
+                "tool": "claude-code",
+                "slice_id": "sl-offered-1",
+            },
+            {
+                "ts": "2026-07-01T00:01:20Z",
+                "session_id": "s-copilot",
+                "tool": "copilot-cli",
+                "sl_id": "sl-offered-3",
+                "source": "read",
+                "offered": True,
+            },
+            {
+                "ts": "2026-07-01T00:01:30Z",
+                "session_id": "s-direct",
+                "tool": "claude-code",
+                "sl_id": "sl-direct",
+                "source": "read",
+            },
+        ],
+    )
+
+    # usage funnel must be installed and emit the expected contract dimensions:
+    # session citation, unique-slice coverage, offered-to-read conversion, and explicit applied.
+    assert (
+        cli.main(
+            ["usage", "funnel", "--memory-root", str(tmp_path), "--json"]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["summary"]["sessions_offered"] == 2
+    assert report["summary"]["sessions_with_read"] == 2
+    assert report["summary"]["read_through_rate"] == 100.0
+    assert report["summary"]["sessions_with_applied"] == 1
+    assert report["summary"]["applied_rate"] == 50.0
+    assert report["summary"]["unique_slice_coverage"] == {
+        "offered": 3,
+        "read": 2,
+        "read_rate": 66.67,
+    }
+    assert len(report["top_slices"]) == 2
+    assert any(item["slice_id"] == "sl-offered-1" for item in report["top_slices"])
+    assert any(item["slice_id"] == "sl-offered-3" for item in report["top_slices"])
+    assert report["read_attribution"] == {
+        "offer_then_read_events": 2,
+        "offer_then_read_sessions": 2,
+        "direct_read_events": 1,
+        "direct_read_sessions": 1,
+        "by_tool": {
+            "claude-code": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 1,
+                "direct_read_sessions": 1,
+            },
+            "copilot-cli": {
+                "offer_then_read_events": 1,
+                "offer_then_read_sessions": 1,
+                "direct_read_events": 0,
+                "direct_read_sessions": 0,
+            },
+        },
+    }
+    assert report["by_tool"]["claude-code"]["sessions_with_applied"] == 1
+    assert report["by_tool"]["copilot-cli"]["sessions_with_read"] == 1
+    assert report["by_tool"]["copilot-cli"]["applied_rate"] == 0.0
+    assert report["by_tool"]["claude-code"]["unique_slice_coverage"] == {
+        "offered": 2,
+        "read": 1,
+        "read_rate": 50.0,
+    }
+    assert report["by_tool"]["copilot-cli"]["unique_slice_coverage"] == {
+        "offered": 1,
+        "read": 1,
+        "read_rate": 100.0,
+    }
+    assert report["by_tool"]["codex"]["unique_slice_coverage"] == {
+        "offered": 0,
+        "read": 0,
+        "read_rate": 0.0,
+    }
+
+    matrix = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "cross-cli-capability-matrix.md"
+    ).read_text(encoding="utf-8")
+    assert "Task 8 已完成" in matrix or "Task 8已完成" in matrix
+    assert "Task 8 填" not in matrix
+    _assert_matrix_contract(matrix)
