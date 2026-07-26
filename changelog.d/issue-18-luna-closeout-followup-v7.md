@@ -1,0 +1,1 @@
+- Issue #18：補建 `issue-18-luna-closeout-followup-v7` planning authority，因 `workflow-456550b33c4dc592b496` 標示 v6 候選 `aa634960eff6d8cd1f97d42732556a8983ab8129` 為 `superseded`（PR-aware R-09 缺漏），補齊 `changelog.d` 交付前置文件並保留 `session citation`、`unique-slice coverage`、`offered-to-read conversion`、`applied` 四項語意。
