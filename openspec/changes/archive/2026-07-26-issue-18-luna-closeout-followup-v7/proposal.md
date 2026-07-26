@@ -25,11 +25,11 @@ work_item: issue-18-luna-closeout-followup-v7
 - v7 pre-archive candidate 只追蹤以下八件（前七件 authority + changelog）：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - `origin/main` 為 base；v7 不承接 v6 candidate 作為 ancestry。
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 為治理/release note artifact，不使用 frontmatter，不是 runtime changelog consumption behavior。

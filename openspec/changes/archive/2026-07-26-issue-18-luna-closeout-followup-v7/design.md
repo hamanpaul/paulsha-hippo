@@ -20,11 +20,11 @@ work_item: issue-18-luna-closeout-followup-v7
 - v7 pre-archive candidate scope 僅限七件 authority files + `changelog`（共八件）：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - `origin/main` 作為 base；不得以 `issue-18-luna-closeout-followup-v6` 作為 ancestry。
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 為治理/release note artifact，不使用 frontmatter。

@@ -17,11 +17,11 @@ work_item: issue-18-luna-closeout-followup-v7
 - v7 pre-archive candidate 僅含 8 件 tracked 檔案（前七件 authority + `changelog.d`）：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - `origin/main` 為 base；不得將 v6 candidate 視為 ancestry。
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 不使用 frontmatter。
@@ -50,6 +50,7 @@ work_item: issue-18-luna-closeout-followup-v7
 - [x] `agy/gemini-3.6-flash-high` verification
 - [x] `agy/gemini-3.6-flash-high` code review
 - [x] `agy/gemini-3.6-flash-high` adversarial review
+- [x] 依 reviewer findings 修正 OpenSpec artifact 路徑並收斂「v7 change set」用語
 
 ### 後續生命週期（不屬於 active OpenSpec tasks）
 

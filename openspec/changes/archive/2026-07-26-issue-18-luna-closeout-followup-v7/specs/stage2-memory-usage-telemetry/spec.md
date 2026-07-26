@@ -12,20 +12,20 @@ Issue #18 Luna recovery follow-up is governed by `issue-18-luna-closeout-followu
 - v7 artifacts are (前七件 authority + changelog，共八件)：
   - `docs/superpowers/plans/2026-07-27-issue-18-luna-closeout-followup-v7.md`
   - `docs/superpowers/workstreams/issue-18-luna-closeout-followup-v7/todo.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/.openspec.yaml`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/proposal.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/design.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/tasks.md`
-  - `openspec/changes/issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/.openspec.yaml`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/proposal.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/design.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/tasks.md`
+  - `openspec/changes/archive/2026-07-26-issue-18-luna-closeout-followup-v7/specs/stage2-memory-usage-telemetry/spec.md`
   - `changelog.d/issue-18-luna-closeout-followup-v7.md`
 - 前七件 authority 檔保留 `status: accepted`、`work_item: issue-18-luna-closeout-followup-v7`；`changelog.d/issue-18-luna-closeout-followup-v7.md` 不使用 frontmatter。
 - `origin/main` 為 pre-archive base，v6 candidate 不得作為 ancestry。
 
 #### Scenario: authority-only planning
 
-- **WHEN** v7 change set is assembled
-- **THEN** only files listed above are modified in this change set.
-- **AND** no runtime code, tests, CI workflow, `VERSION`, or changelog behavior is modified in this change set.
+- **WHEN** v7 pre-archive candidate is assembled
+- **THEN** only the files listed above are modified in the v7 pre-archive candidate.
+- **AND** no runtime code, tests, CI workflow, `VERSION`, or changelog behavior is modified in the v7 pre-archive candidate.
 
 ### Requirement: v7 supersession trace
 
