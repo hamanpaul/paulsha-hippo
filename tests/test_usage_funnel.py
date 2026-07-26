@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from paulsha_hippo import cli
@@ -12,6 +13,26 @@ def _write_ledger(root, name: str, rows: list[dict]) -> None:
     (ledger / name).write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
+
+
+def _assert_matrix_contract(matrix: str) -> None:
+    assert re.search(
+        r"hippo usage funnel --memory-root <path>[^\n]*--json",
+        matrix,
+    )
+    lowered = matrix.lower()
+    assert "session citation" in lowered
+    assert "unique-slice coverage" in lowered
+    assert "offered-to-read conversion" in lowered
+    assert "applied" in lowered
+    assert "explicit acknowledgement" in lowered
+    assert "not a read" in lowered or "不是 read" in matrix
+    assert (
+        "not a read/citation proxy" in lowered
+        or "not a read or citation proxy" in lowered
+    )
+    assert "live counts are runtime state" in lowered
+    assert "not fixed" in lowered or "不固定" in matrix
 
 
 def test_usage_funnel_accepts_legacy_and_object_offers_and_counts_sessions(
@@ -518,3 +539,4 @@ def test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command(t
 
     matrix = Path("docs/cross-cli-capability-matrix.md").read_text(encoding="utf-8")
     assert "Task 8 填" not in matrix
+    _assert_matrix_contract(matrix)
