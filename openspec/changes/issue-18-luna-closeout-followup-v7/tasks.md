@@ -42,10 +42,10 @@ work_item: issue-18-luna-closeout-followup-v7
 
 ### GREEN（build checks）
 
-- [ ] `openspec validate issue-18-luna-closeout-followup-v7 --strict`
-- [ ] `git diff --check origin/main..HEAD`
-- [ ] `python3 -m policy_check --repo .`
-- [ ] `python3 -m pytest -q tests`
+- [x] `openspec validate issue-18-luna-closeout-followup-v7 --strict`
+- [x] `git diff --check origin/main..HEAD`
+- [x] `python3 -m policy_check --repo .`
+- [x] `python3 -m pytest -q tests`
 - [ ] PR-aware preflight
 - [ ] `agy/gemini-3.6-flash-high` verification
 - [ ] `agy/gemini-3.6-flash-high` code review
