@@ -108,7 +108,7 @@ postToolUse        | {"sessionId":"d44d38f8-...","timestamp":...,"cwd":"<tmp>/wo
 - UserPromptSubmit / PostToolUse(Read) 由 `paulsha_hippo/hooks/install.sh` 佈署（Step 4 / matcher="Read"）。
 - 真實 adapter E2E 證據見下方「offered → read → applied 實證」（Task 8 產出時附）。
 
-## offered → read → applied 實證（Task 8 填；copilot 接線後同鏈復驗）
+## offered → read → applied 實證（Task 8 已完成；copilot 接線後同鏈復驗）
 
 - 執行日期：`2026-07-11`（claude 初證＋copilot 接線後兩平台同腳本復驗）
 - hermetic 證據：`tests/test_cross_cli_funnel_integration.py`（claude＋copilot 兩條 adapter 鏈）已納入 `tests.yml`，常駐保護 hook wiring。

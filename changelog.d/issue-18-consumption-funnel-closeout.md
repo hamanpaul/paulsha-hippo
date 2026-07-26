@@ -1,0 +1,1 @@
+- Issue #18：完成 consumption funnel closeout 第 1 步的實作紀錄（去除 `Task 8 填` 佔位，文件與 `hippo usage funnel` 測試契約對齊）。
