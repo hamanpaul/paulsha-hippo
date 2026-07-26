@@ -46,7 +46,7 @@ work_item: issue-18-luna-closeout-followup-v7
 - [x] `git diff --check origin/main..HEAD`
 - [x] `python3 -m policy_check --repo .`
 - [x] `python3 -m pytest -q tests`
-- [ ] PR-aware preflight
+- [x] PR-aware preflight
 - [ ] `agy/gemini-3.6-flash-high` verification
 - [ ] `agy/gemini-3.6-flash-high` code review
 - [ ] `agy/gemini-3.6-flash-high` adversarial review
