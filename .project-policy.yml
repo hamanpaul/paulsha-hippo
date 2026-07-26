@@ -1,0 +1,33 @@
+policy_profile: flat
+policy_version: 1.0.14
+tier: shareable
+secret_scan:
+  allow:
+    - "tests/test_stage2_memory_policy.py"
+    - "tests/test_stage2_memory_policy_cli.py"
+code_paths:
+  - ".project-policy.yml"
+  - "VERSION"
+  - "pyproject.toml"
+  - "paulsha_hippo/**"
+  - "scripts/**"
+  - "tests/**"
+  - "**/*.md"
+  - "**/*.yml"
+  - "**/*.yaml"
+  - ".github/**"
+agent_files:
+  mode: symlink
+conventions_engine:
+  repo: hamanpaul/paulsha-conventions
+preflight:
+  steps:
+    - name: openspec
+      kind: validation
+      argv: ["openspec", "validate", "--all", "--strict"]
+      when_path_exists: "openspec"
+      timeout_seconds: 300
+    - name: tests
+      kind: tests
+      argv: ["python3", "-m", "pytest", "tests/", "-q"]
+      timeout_seconds: 1800
