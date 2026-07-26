@@ -37,10 +37,10 @@ work_item: issue-18-luna-closeout-followup-v7
 ### GREEN（build checks）
 
 - [ ] `openspec validate issue-18-luna-closeout-followup-v7 --strict`（未完成）
-- [ ] `git diff --check origin/main..HEAD`（未完成）
-- [ ] `python3 -m policy_check --repo .`（未完成）
-- [ ] `python3 -m pytest -q tests`（未完成）
-- [ ] PR-aware preflight（未完成）
+- [x] `git diff --check origin/main..HEAD`（已完成：待修正尾端空白行）
+- [x] `python3 -m policy_check --repo .`（已完成）
+- [x] `python3 -m pytest -q tests`（已完成）
+- [x] PR-aware preflight（已完成：`policy_check --repo . --pr-base-ref origin/main --pr-head-ref HEAD`）
 - [ ] `agy/gemini-3.6-flash-high` verification / code / adversarial（未完成）
 - [ ] `codex/gpt-5.6-luna(max)` final exact-head（`model_reasoning_effort=max`）（未完成）
 

@@ -143,4 +143,3 @@ The follow-up SHALL preserve the accepted stage2 telemetry meanings from `issue-
 - **WHEN** v7 artifacts are built into candidate
 - **THEN** the four telemetry meanings above stay identical in wording and scope.
 - **AND** no change to applied semantics.
-
