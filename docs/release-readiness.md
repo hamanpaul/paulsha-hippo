@@ -1,4 +1,44 @@
-# 0.1.1 release candidate readiness
+# Release candidate readiness
+
+The authoritative machine-readable gate list is
+[`reports/verify/release-readiness-matrix.json`](../reports/verify/release-readiness-matrix.json).
+A fresh candidate always starts with every gate `pending`, with no candidate
+commit or wheel hash, until the main agent runs the artifact-bound and live
+checks. See below for the currently bound candidate; the 0.1.1 section further
+down is kept as historical record of that release's readiness process.
+
+## 0.1.2 release candidate readiness
+
+The matrix is currently rebound to the 0.1.2 candidate at commit
+`c147218353bdc1e06f6a2f1cbc59a3a61130ceb6` (main HEAD). `wheel_sha256` is
+`null` because the 0.1.2 wheel has not been built yet.
+
+Of the 16 gates, only **AR-01** (full test suite) carries a real `passed`
+verdict, attested from two independent clean environments: the candidate
+commit's own GitHub Actions `Tests` run (conclusion `success`), and a local
+non-nested sibling worktree where `python3 -m pytest -q` reported `1636
+passed, 4 skipped, 154 subtests passed, 0 failed`.
+
+Note on measurement environment: running the suite from a worktree nested
+*under* the repo directory (`.claude/worktrees/*`) produces 2 failures in
+`tests/test_project_resolver.py::ResolveAutoDetectTests`, because
+`resolve_project()` detects the outer repo's git toplevel instead of a clean
+non-repo folder. That is a false signal from the measurement environment, not
+a candidate defect — attestation must therefore always be taken from a
+non-nested checkout. All other 15 gates (AR-02–AR-14, IC-01, IC-02) are
+honestly `pending`: no live external CLI, build, publication, upgrade,
+recovery, timer-soak, or consumer-hook evidence has been captured for this
+candidate in this environment. Each gate's `evidence` field states what
+0.1.2-specific evidence is still needed, and `rerun` records the exact
+command to (re)produce it.
+
+This rebind exists specifically to avoid repeating the AR-11 mistake from
+0.1.1: that gate's evidence once read "three consecutive systemd timer runs
+... were ok," but the dream ledger later showed all three runs were actually
+`partial`. No gate in this matrix may be marked `passed` without an agent
+having actually executed the check and read its output in this run of events.
+
+## 0.1.1 release candidate readiness
 
 This repository contains the implementation side of Issue #34/#39. The
 authoritative machine-readable gate list is

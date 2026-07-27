@@ -7,15 +7,35 @@
 
 ## [Unreleased]
 
+### Added
+- `moc.search` 新增可注入 UTC `usage_now`／`usage_window_days` 的 usage-boost index metadata；預設窗口 30 天，`usage_boost = min(0.04, 0.01*log2(1+read_count))`，`base_score` 間距 > `0.04` 不被反轉。
+- janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`；future read 不得延長 TTL，`superseded`／`source_invalid` 優先序與 read 不 reactivation 維持不變。CLI usage/funnel 以 one-shot raw iterators 折疊 compact per-session/per-slice state，不再保留 ledger-wide raw row lists。
+- `hippo usage funnel`：新增 session 層級漏斗報表，以收到非空記憶 brief 的 session 為分母，統計 offered → read → applied 的轉換率，並提供 per-tool 與被讀取 slice 的 top-N 特徵；支援 `--since`、`--json` 及既有／新版 offered ledger 格式（#18）。
+- Issue #18 closeout：`docs/cross-cli-capability-matrix.md` 補齊 `hippo usage funnel --memory-root <path> --json` 契約文字，定義 `session citation`、`unique-slice coverage`、`offered-to-read conversion` 與 `applied`（非 read/citation proxy）四項語意；JSON 契約補上 `unique_slice_coverage`（`offered` / `read` / `read_rate`），並新增 installed CLI 黑箱覆核驗證四指標與新 coverage 欄位。
+- `contrib/local-harness/`：地端 vLLM 專用 harness（#55）——`local-vllm` profile 的 direct API 引擎（guided decoding schema v1、`enable_thinking:false`、map-reduce 原子化、retry-with-repair、任務嗅探），含小模型版 atomize skill 與部署說明；不進 wheel、不被 package 引用，僅作版控與部署來源。全套 launcher 入版控（`contrib/local-harness/launchers/`）：`cg`＋`hippo-copilot-headless-core`（copilot 鏈路 zero-tool 防禦）、`agy-headless`（契約橋接）、`local-vllm`；直連引擎改讀專用最小 env `local-vllm.env`（`BASE_URL`＋`MODEL`，key 選填），附 `.tmpl`。直連 profile 改名 `co-gem` → `local-vllm`（消除「借 copilot 殼」歷史誤導）；薄殼移除——`harness.py` shebang 直執行，launcher 即 symlink。
+- parked evidence（`runtime/queue/_failed/*.json`）新增 `attempts_detail`：逐一 external agent fallback 嘗試的 `profile_id`／`exit_code`／`duration_seconds`／`stderr_tail`（既有 secret-redaction 淨化＋≤2000 字元截斷）／`stdout_bytes`／`failure_kind`（`timeout`／`nonzero_exit`／`empty_output`／`invalid_output`／`decode_error`），讓 timeout、CLI 靜默失敗、rate limit、進程被殺不再無法區分；既有欄位皆不變。
+
+### Changed
+- `hippo usage funnel` 報表同時列出含噪音與排除噪音兩組數字；排除組依唯讀 fold 的 `processing.jsonl` 最終 `state=no-findings` 排除 session，預設以排除組作為主指標，可用 `--include-noise` 切換。主指標 read-through 只計「同一 `tool:session_id` 曾被 offer 的相同 slice 且在 offer 後發生的 read」；未經 offer 的直讀另列於 attribution 統計，不混入轉換率（#18）。
+- Issue #18 closeout：同步並封存 `openspec/changes/archive/2026-07-26-issue-18-consumption-funnel-closeout` 的接受版 artifacts（`.openspec.yaml` / proposal / design / `stage2-memory-usage-telemetry/spec.md`）作為證據鏈一部；`test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command` 加強為直接驗證 matrix 契約文本（含命令與四項指標）與現有指標數據，不僅驗證指標存在；因 workflow 版本判定（PR-aware R-09 缺漏）令 v6 候選遭誤標 `superseded`，補建對應 changelog.d 前置文件（`issue-18-luna-closeout-followup-v7`），確保 `session citation`／`unique-slice coverage`／`offered-to-read conversion`／`applied` 四項語意的交付紀錄完整。
+- policy manifest 遷移為 `.project-policy.yml`，pin `paulsha-conventions` v1.0.14，並明列記憶政策的假 secret 測試 fixture（#48）。
+- 完成 `v0.1.1` readiness evidence、三輪自然排程 soak、published-wheel smoke 與 Issue #34/#39 OpenSpec archive closeout。
+- `reports/verify/release-readiness-matrix.json` 由 v0.1.1 candidate 重綁至 0.1.2 candidate（main HEAD `c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`），`wheel_sha256` 待建置故設為 `null`。16 個 gate 中僅 AR-01（全套測試）以候選 commit 的 CI 與本機乾淨環境實跑 attest 為 `passed`，其餘 15 個誠實改列 `pending` 並註明待補證據與重跑指令；`docs/release-readiness.md` 新增對應 0.1.2 小節，保留 0.1.1 歷史記載。
+
 ### Fixed
 - Janitor 不再把合法的 remote-form rich project ID 誤判為 `raw-remote-key`，避免已採 hashed directory key 的 atom 讓 Dream 永久降為 `partial`。
 - `moc.search.search()` 有 boost 時使用 `(adjusted_score, base_score, slice_id)` 穩定鍵，無有效 boost（含舊 schema fallback）則維持 legacy base-score one-key stable ordering。
 - usage ledger（`offered.jsonl`／`memory_usage.jsonl`）改為 binary per-line UTF-8 streaming；metadata/open/read、decode 與單行 parse 錯誤 fail-soft 且不改寫 ledger，壞行不再吞掉周邊合法行。offered/read 的未來、窗口外時間與 `(unknown)` tool/session/slice identity 一律排除並記固定鍵 bounded diagnostics。
 - 未經 offer 的「直讀」不再被 `collect_usage_reads()` 丟棄：直讀照常更新 janitor retention 的 `last_read_at`（避免實際被讀過的 slice 誤 decay），但不計入 `read_count`，故 search usage boost 與 `hippo usage funnel` read-through 主指標語意不變。`read_without_offered` 一併移出 `DIAG_KEYS`，改以獨立 bounded 的 `STAT_KEYS`（`direct_read`）計數——直讀是正常 agent 行為，不應觸發 janitor warning 而讓 `hippo dream run` 永久停在 `partial`。
+- `contrib/local-harness`（#56 review）：harness.py「no model」錯誤訊息更正為 `HIPPO_LOCAL_VLLM_MODEL`（env 遷移殘留）；`--effort` 非法值改 fail-loud（不再默默 fallback 到 low 隱藏設定錯誤）；copilot-chain launcher 以受限 KEY=VALUE parser 取代 `source`（消除 tampered env file 的任意 shell 執行風險，僅保留 `$NAME`/`${NAME}` 受控展開）。
+- redaction：`openai_key` / `anthropic_key` 規則 pattern 加前置 negative lookbehind `(?<![A-Za-z0-9])`，避免 `sk-` 出現在字串內部（最常見為 wiki-link slug 的 `ta`sk-`routing`）時整行被誤判 `[REDACTED LINE: openai_key]`，靜默劣化 task-* 記憶的 recall 品質（#57）。真憑證（前接空白/引號/`=`/行首）仍照抓。
+- ledger 撕裂行（嵌入 NUL 位元組的 JSONL 行）不再讓 janitor 每輪回報壞行、使 `hippo dream run` 永久停在 `partial`。新增 `hippo doctor` 的 ledger 完整性檢查與 `hippo ledger repair`（預設 dry-run，`--apply` 才寫入）：可救回的行原地救回（先備份、同目錄 temp + fsync + 原子替換、只移除 NUL、其餘位元組逐一不變、冪等），不可救回的行原樣保留並記入 `runtime/ledger/<name>.jsonl.quarantine`，janitor 的壞行計數排除已隔離行（清單不可解析時 fail-closed）。
+- dream health 的 `invalid_frontmatter` 不再把生成的 MOC 索引檔當成缺欄位的 slice。改以 frontmatter `memory_layer: moc` 判別而非檔名慣例；該指標先前恆等於 MOC 檔數而無法歸零。
+- `hippo doctor --probe-profiles`／`--fix-backend` 的 smoke probe 改為要求單一 JSON 回覆，驗證條件比照 atomize 既有的嚴格解析（`llm_output.parse_single_json_value`）——不再只驗「exit 0 + 非空」，修正與真實 atomize 結果反相關的誤判（守 JSON 契約但 prompt 未觸發 JSON 的 backend 誤判 FAIL；能回話但不守契約的 backend 誤判 ✓）。
+- dream 執行期間、其他 agent 對同一 memory root 的併發 ledger 寫入不再被 janitor 誤判為 `future_event`、令整輪降為 `partial`。`dream/orchestrator.py` 以單一 `now` 釘住整輪並先跑 atomize（已知的 rglob 效能問題可讓單輪耗時 10+ 分鐘），janitor 隨後沿用同一個 run-start 的 `now` 判斷 usage ledger 事件是否「來自未來」；任何在 run 起點之後、janitor 實際讀檔之前寫入的 offered/read 事件（例如 prompt-time hook 每次送出提示都會寫一筆 offered）因此被誤記為時鐘偏移。實測一輪 `now=07:03:27Z`、atomize 跑 13 分鐘的 run 中，`offered.jsonl` 於 07:05–07:16 間新增 4 筆同期 session 事件，其中 2 筆落入 janitor 讀檔前即造成 `usage ledger diagnostics: {'future_event': 2}` warning，使該輪整體降為 `partial`。`janitor.scanner.run_scan` 新增 keyword-only 參數 `usage_now: str | None = None`：usage ledger（offered/read）診斷改以此為時間基準，預設為 janitor 實際執行當下的牆鐘時間（而非 run 起點的 `now`）；`now` 既有的 TTL/decay/reactivation 判定與 lifecycle 事件 ts 記錄完全不受影響，dream CLI／`hippo janitor scan` 呼叫端不需改動即得到修復。此為「良性狀態被當錯誤訊號釘死 dream」反模式的第三個實例（前兩例：#64 ledger 撕裂行、#67 `read_without_offered` 直讀）。
 
-### Added
-- `moc.search` 新增可注入 UTC `usage_now`／`usage_window_days` 的 usage-boost index metadata；預設窗口 30 天，`usage_boost = min(0.04, 0.01*log2(1+read_count))`，`base_score` 間距 > `0.04` 不被反轉。
-- janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`；future read 不得延長 TTL，`superseded`／`source_invalid` 優先序與 read 不 reactivation 維持不變。CLI usage/funnel 以 one-shot raw iterators 折疊 compact per-session/per-slice state，不再保留 ledger-wide raw row lists。
+### Security
+- `agent_profiles.sanitize_stderr` 補上 redaction-先於-截斷（Codex 複驗 BLOCKING）：先前「先截斷（500 字元）才交給下游 `processing.sanitize_error_text` 做 secret redaction」的順序，會在 secret（如 GitHub PAT）跨越截斷邊界時把 token 腰斬成低於 redaction 規則最小長度的殘片，令比對失配、殘片明文落入 `runtime/queue/_failed/*.json`；現在 `sanitize_stderr` 在自身截斷之前就先套用同一份 baseline secret redaction，同時修好共用此函式的 `distiller.attempts` frontmatter 路徑同型風險。
 
 ## [0.1.1] - 2026-07-22
 
