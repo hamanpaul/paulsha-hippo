@@ -8,8 +8,9 @@ import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from ..agent_profiles import AgentRunResult
 from ..ledger import processing, relations
 from ..noise import DocCorpus, classify_noise
 from . import slice_frontmatter, splitter
@@ -20,6 +21,15 @@ from .splitter import Fragment
 
 LOGGER = logging.getLogger(__name__)
 _ATOMIZER_INBOX_FILE_MAX_BYTES = 64 * 1024 * 1024
+# park evidence 的 attempts_detail.stderr_tail 上限（issue #69 子項 A）。router
+# 已在建構 AgentRunResult 時以 sanitize_stderr 套用 500 字元上限；這裡再用既有的
+# secret-redaction 錯誤文字淨化（sanitize_error_text）覆蓋一次並以本上限截斷。
+# 兩層都遵循「redaction 先於截斷」的契約：sanitize_stderr 本身已在其 500 字元
+# 截斷之前先套用 baseline secret redaction（Codex 複驗 BLOCKING 修復——先前
+# 「先截斷才 redact」會把跨邊界的 secret 腰斬成殘片致比對失配），本函式在此
+# 之上再覆蓋一次、以本上限截斷，是 park evidence 落盤前的第二層 choke point，
+# 但不再是唯一防線；即使上游意外沒截夠短，這裡的 redact-先於-截斷仍會擋下。
+_ATTEMPTS_DETAIL_STDERR_LIMIT = 2000
 
 
 def _parse_frontmatter(text: str) -> tuple[Mapping[str, Any] | None, str]:
@@ -194,9 +204,63 @@ def _read_attempts(counter: Path) -> int:
         return 0
 
 
+def _attempt_failure_kind(category: str | None, exit_code: int | None) -> str:
+    """Map one router attempt's bounded diagnostics to a park-evidence failure_kind.
+
+    ``timeout``／``empty_output``／``invalid_output``／``ineligible``／``budget``
+    already carry an unambiguous router category and are passed through
+    unchanged. ``ineligible`` (profile enabled but not currently runnable, e.g.
+    missing executable) and ``budget`` (session deadline／call budget
+    exhausted) are router-internal classifications that never spawn a
+    subprocess——``exit_code`` is always ``None`` for them——so fallback-mapping
+    them would mislabel a routing decision as a subprocess decode failure. A
+    nonzero exit code that fell through those (e.g. a bare ``process``
+    category) is a genuine ``nonzero_exit``. Anything left——no exit code and
+    no specific category (missing executable races, subprocess-level decode
+    failures)——has no exit-code signal at all and is reported as
+    ``decode_error`` so it stays distinguishable from a clean nonzero exit.
+    """
+    if category in {"timeout", "empty_output", "invalid_output", "ineligible", "budget"}:
+        return category
+    if exit_code is not None and exit_code != 0:
+        return "nonzero_exit"
+    return "decode_error"
+
+
+def _attempts_detail_from_attempts(
+    attempts: Sequence[AgentRunResult],
+) -> list[dict[str, Any]]:
+    """Project bounded per-attempt subprocess evidence for a parked session.
+
+    Reuses the same per-attempt data the external agent runner layer already
+    captures for ``distiller.attempts`` (issue #69 子項 A：這批資料本來就存在，
+    只是 park 路徑先前沒有讀取）。Successful attempts (``failure_category is
+    None``) are skipped: they never reach a parked session on their own.
+    """
+    detail: list[dict[str, Any]] = []
+    for attempt in attempts:
+        category = getattr(attempt, "failure_category", None)
+        if category is None:
+            continue
+        detail.append(
+            {
+                "profile_id": attempt.profile_id,
+                "exit_code": attempt.exit_code,
+                "duration_seconds": round(float(attempt.elapsed_seconds), 6),
+                "stderr_tail": processing.sanitize_error_text(
+                    attempt.stderr, limit=_ATTEMPTS_DETAIL_STDERR_LIMIT
+                ),
+                "stdout_bytes": int(getattr(attempt, "output_bytes", 0) or 0),
+                "failure_kind": _attempt_failure_kind(category, attempt.exit_code),
+            }
+        )
+    return detail
+
+
 def _park_session(memory_root: Path, *, session_key: str, category: str, attempts: int,
                   cache_key: str, error_text: str, now: str, config_hash: str,
-                  last_output_excerpt: str = "") -> None:
+                  last_output_excerpt: str = "",
+                  attempts_detail: Sequence[Mapping[str, Any]] | None = None) -> None:
     """parked 終態：證據落盤 → 淘汰毒快取＋sidecar（保留 split fragments）→ 記 ledger。
 
     ledger append 放最後當 commit point：中途 crash 只會多一次 bounded 重試（fail-open），
@@ -223,6 +287,7 @@ def _park_session(memory_root: Path, *, session_key: str, category: str, attempt
         "ts": now,
         "last_output_bytes": len(output_bytes),
         "last_output_sha256": hashlib.sha256(output_bytes).hexdigest(),
+        "attempts_detail": [dict(item) for item in (attempts_detail or ())],
     }
     _atomic_write(
         _failed_evidence_path(memory_root, session_key),
@@ -341,6 +406,7 @@ def _handle_promote_failure(
     if counter is None:
         return "", False
     attempts = int(getattr(exc, "attempts", 0))
+    attempts_detail = _attempts_detail_from_attempts(promoter.router_attempts())
     promoter.clear_last_chunk_caches()
     promoter.clear_cache_for_fragments(fragments)
     _park_session(
@@ -353,6 +419,7 @@ def _handle_promote_failure(
         now=now,
         config_hash=config_hash,
         last_output_excerpt=str(getattr(promoter, "last_raw_output", "")),
+        attempts_detail=attempts_detail,
     )
     return f" (parked: {category} after {attempts} bounded chunk attempt(s))", True
 

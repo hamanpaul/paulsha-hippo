@@ -142,6 +142,24 @@ def test_failure_classification_is_bounded(stderr, category):
     assert classify_failure(stderr) == category
 
 
+def test_sanitize_stderr_redacts_secret_that_spans_the_truncation_boundary():
+    # Codex 複驗 BLOCKING：sanitize_stderr 舊行為「先截斷（limit=500）才交給
+    # 下游 processing.sanitize_error_text 做 secret redaction」——若 secret 跨越
+    # 第 500 字元邊界，截斷會把 token 腰斬成低於 policy/secrets.yaml github_pat
+    # 規則最小長度（ghp_ 後 20+ chars）的殘片，令 regex 比對不到，殘片明文
+    # 落入 runtime/queue/_failed/*.json。redaction 必須先於截斷（比照
+    # ledger.processing.sanitize_error_text 既有契約），本測試釘住這個順序。
+    from paulsha_hippo.agent_profiles import sanitize_stderr
+
+    token = "ghp_" + "A1b2C3d4" * 5  # 44 字元的 GitHub PAT 形狀
+    raw = "x" * 490 + " " + token + " trailing"
+
+    sanitized = sanitize_stderr(raw)
+
+    assert "ghp_" not in sanitized
+    assert "A1b2C3d4" not in sanitized
+
+
 def test_router_falls_back_by_tier_and_marks_degraded_success():
     profiles = (_profile("first", tier=1), _profile("second", tier=2))
     calls: list[str] = []

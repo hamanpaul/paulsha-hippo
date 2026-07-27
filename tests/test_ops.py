@@ -462,8 +462,8 @@ class DoctorBackendProbeTests(unittest.TestCase):
     def test_probe_passes_with_absolute_executable(self):
         with TemporaryDirectory() as tmp:
             exe = Path(tmp) / "claude"
-            # fail-closed 判定下 PASS 需 exit 0＋非空回應（不只 exec 得起來）
-            exe.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+            # fail-closed 判定下 PASS 需 exit 0＋單一 JSON 回應（不只 exec 得起來）
+            exe.write_text('#!/bin/sh\nprintf \'{"ok":true}\'\n', encoding="utf-8")
             exe.chmod(0o755)
             cfg = self._fake_cfg(agent_exec_command=(str(exe), "-p"))
             with mock.patch.dict("os.environ", self._ENV), \
@@ -536,11 +536,100 @@ class DoctorBackendProbeTests(unittest.TestCase):
             self._doctor_with_command(("/bin/sh", "-c", r'printf "\377\376\200\201" >&2')),
             1,
         )
+        # 非阻擋修正 2：這是 exec 層故障（decode 於 subprocess.run() 內部拋出，
+        # 根本沒走到 JSON 解析），kind 必須回報 "exec_error"、不得誤標
+        # "invalid_json"（釘住這個選擇，避免與真正「回應不是單一 JSON」混淆）。
+        ok, detail, kind = ops._exec_probe_service_effective(
+            ["/bin/sh", "-c", r'printf "\377\376\200\201"'], {"PATH": "/usr/bin:/bin"})
+        self.assertFalse(ok)
+        self.assertEqual(kind, "exec_error")
+        self.assertTrue(detail)
+
+    def test_probe_smoke_prompt_requests_single_json(self):
+        # #69 子項 B：smoke prompt 必須要求單一 JSON，而非只求「有回應」——
+        # 否則「能回話但不守 JSON 契約」的 backend 會被誤判為健康。
+        self.assertIn("json", ops._PROBE_SMOKE_PROMPT.lower())
+
+    def test_probe_passes_on_single_json_reply(self):
+        # #69：回單一 JSON 且 exit 0 → PASS，kind="ok"
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text(
+                '#!/bin/sh\ncat >/dev/null\nprintf \'{"ok":true}\'\n',
+                encoding="utf-8",
+            )
+            exe.chmod(0o755)
+            ok, detail, kind = ops._exec_probe_service_effective(
+                [str(exe)], {"PATH": "/usr/bin:/bin"})
+            self.assertTrue(ok)
+            self.assertEqual(kind, "ok")
+            self.assertTrue(detail)
+
+    def test_probe_fails_invalid_json_kind_on_prose_reply(self):
+        # #69 回歸：cg 的失敗形狀——exit 0、非空，但輸出是散文而非單一 JSON。
+        # 舊版「exit 0 + 非空即 PASS」的判定與真實 atomize 契約反相關；
+        # 新契約必須把這種情況判 FAIL，並回報 kind="invalid_json"。
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text(
+                '#!/bin/sh\ncat >/dev/null\n'
+                'printf \'Sure, here is your answer: everything looks ok.\'\n',
+                encoding="utf-8",
+            )
+            exe.chmod(0o755)
+            ok, detail, kind = ops._exec_probe_service_effective(
+                [str(exe)], {"PATH": "/usr/bin:/bin"})
+            self.assertFalse(ok)
+            self.assertEqual(kind, "invalid_json")
+            self.assertTrue(detail)
+
+    def test_probe_fails_empty_kind_on_empty_output(self):
+        # #69：claude 的實戰失敗形狀——exit 0 但 0 bytes 輸出；kind 必須可與
+        # invalid_json／nonzero／timeout 區分，才能對應 issue 的四類成因。
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text("#!/bin/sh\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+            exe.chmod(0o755)
+            ok, detail, kind = ops._exec_probe_service_effective(
+                [str(exe)], {"PATH": "/usr/bin:/bin"})
+            self.assertFalse(ok)
+            self.assertEqual(kind, "empty")
+            self.assertTrue(detail)
+
+    def test_probe_fails_nonzero_kind_on_nonzero_exit(self):
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text(
+                '#!/bin/sh\ncat >/dev/null\necho boom >&2\nexit 3\n',
+                encoding="utf-8",
+            )
+            exe.chmod(0o755)
+            ok, detail, kind = ops._exec_probe_service_effective(
+                [str(exe)], {"PATH": "/usr/bin:/bin"})
+            self.assertFalse(ok)
+            self.assertEqual(kind, "nonzero")
+            self.assertTrue(detail)
+
+    def test_probe_fails_timeout_kind_on_hang(self):
+        with mock.patch.object(ops, "_PROBE_TIMEOUT_SECS", 0.2):
+            ok, detail, kind = ops._exec_probe_service_effective(
+                ["/bin/sleep", "5"], {"PATH": "/usr/bin:/bin"})
+        self.assertFalse(ok)
+        self.assertEqual(kind, "timeout")
+        self.assertTrue(detail)
 
     def test_probe_passes_when_smoke_prompt_answered(self):
-        # cat 把 stdin 的 smoke prompt 原樣回吐：exit 0＋非空輸出 → PASS，
-        # 同時驗證 prompt 確實經 stdin 餵入（比照 AgentExecClient.run）
-        self.assertEqual(self._doctor_with_command(("/bin/cat",)), 0)
+        # 假 backend 讀完 stdin 的 smoke prompt 後回覆單一 JSON：
+        # exit 0＋單一 JSON → PASS，同時驗證 prompt 確實經 stdin 餵入
+        # （比照 AgentExecClient.run；讀不完 stdin 就結束會讓 pipe 提早關閉）。
+        with TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text(
+                '#!/bin/sh\ncat >/dev/null\nprintf \'{"ok":true}\'\n',
+                encoding="utf-8",
+            )
+            exe.chmod(0o755)
+            self.assertEqual(self._doctor_with_command((str(exe),)), 0)
 
     def test_probe_env_carries_self_session_marker(self):
         # #7 回歸：probe 實跑 backend argv，需比照 agent_exec.AgentExecClient.run
@@ -550,11 +639,12 @@ class DoctorBackendProbeTests(unittest.TestCase):
             out = Path(tmp) / "env.txt"
             fake_backend = Path(tmp) / "claude"
             fake_backend.write_text(
-                f'#!/bin/sh\nprintf "%s" "${{HIPPO_SELF_SESSION:-MISSING}}" > "{out}"\necho ok\n',
+                f'#!/bin/sh\nprintf "%s" "${{HIPPO_SELF_SESSION:-MISSING}}" > "{out}"\n'
+                'printf \'{"ok":true}\'\n',
                 encoding="utf-8",
             )
             fake_backend.chmod(0o755)
-            ok, _ = ops._exec_probe_service_effective(
+            ok, _detail, _kind = ops._exec_probe_service_effective(
                 [str(fake_backend), "-p"], {"PATH": "/usr/bin:/bin"})
             self.assertTrue(ok)
             self.assertEqual(out.read_text(encoding="utf-8"), "1")
@@ -1071,8 +1161,8 @@ class FixBackendMigrationTests(unittest.TestCase):
     def _real_exe(self, tmp: str) -> Path:
         exe = Path(tmp) / "bin" / "claude"
         exe.parent.mkdir(parents=True, exist_ok=True)
-        # migration 後 doctor 會對 exe 做 smoke probe：需 exit 0＋非空回應
-        exe.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        # migration 後 doctor 會對 exe 做 smoke probe：需 exit 0＋單一 JSON 回應
+        exe.write_text('#!/bin/sh\ncat >/dev/null\nprintf \'{"ok":true}\'\n', encoding="utf-8")
         exe.chmod(0o755)
         return exe
 

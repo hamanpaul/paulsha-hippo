@@ -23,11 +23,20 @@ from ..agent_profiles import (
 class AgentExecError(Exception):
     """Raised when an agent subprocess cannot produce usable output."""
 
-    def __init__(self, message: str, *, category: str = "process", stderr: str = "", exit_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "process",
+        stderr: str = "",
+        exit_code: int | None = None,
+        output_bytes: int = 0,
+    ) -> None:
         super().__init__(message)
         self.category = category
         self.stderr = stderr
         self.exit_code = exit_code
+        self.output_bytes = output_bytes
 
 
 class AgentUnavailableError(AgentExecError):
@@ -95,12 +104,15 @@ class AgentExecClient(AgentClient):
                 f"agent command not executable: {self._command[0]}"
             ) from exc
         except subprocess.TimeoutExpired as exc:
+            partial_stdout = str(getattr(exc, "stdout", "") or "")
             raise AgentTransientError(
                 f"agent timed out after {self._timeout}s",
                 category="timeout",
                 stderr=sanitize_stderr(getattr(exc, "stderr", "")),
+                output_bytes=len(partial_stdout.encode("utf-8", errors="replace")),
             ) from exc
         stderr = sanitize_stderr(completed.stderr)
+        stdout_bytes = len(completed.stdout.encode("utf-8", errors="replace"))
         if completed.returncode != 0:
             raise AgentTransientError(
                 f"agent exited with code {completed.returncode}",
@@ -109,6 +121,7 @@ class AgentExecClient(AgentClient):
                 ),
                 stderr=stderr,
                 exit_code=completed.returncode,
+                output_bytes=stdout_bytes,
             )
         if not completed.stdout.strip():
             raise AgentTransientError(
@@ -116,6 +129,7 @@ class AgentExecClient(AgentClient):
                 category="empty_output",
                 stderr=stderr,
                 exit_code=completed.returncode,
+                output_bytes=stdout_bytes,
             )
         self.last_result = {
             "stderr": stderr,

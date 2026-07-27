@@ -73,19 +73,34 @@ class AgentRunError(RuntimeError):
         profile_id: str | None = None,
         exit_code: int | None = None,
         stderr: str = "",
+        output_bytes: int = 0,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.profile_id = profile_id
         self.exit_code = exit_code
         self.stderr = stderr
+        self.output_bytes = output_bytes
 
 
 ResponseValidator = Callable[[str], object]
 
 
 def sanitize_stderr(value: object, *, limit: int = 500) -> str:
-    """只留下 bounded、可持久化的 stderr evidence。"""
+    """只留下 bounded、可持久化的 stderr evidence。
+
+    Codex 複驗 BLOCKING：redaction 必須先於截斷。這是兩層 sanitize 的第一層
+    （下游 pipeline 的 attempts_detail 會再用
+    ``ledger.processing.sanitize_error_text`` 覆蓋一次），但它只看得到已經
+    被本函式截斷過的文字——若 secret（如 GitHub PAT）跨越 ``limit`` 邊界，
+    「先截斷」會把 token 腰斬成低於 ``policy/secrets.yaml`` 規則最小長度的
+    殘片，令 regex 比對不到，殘片明文就會落入
+    ``runtime/queue/_failed/*.json``。因此這裡在最終截斷之前先套用 baseline
+    secret redaction（``ledger.processing.redact_secret_text``，fail-closed、
+    不可被 override 弱化），對齊 ``processing.sanitize_error_text`` 已明文的
+    既有契約。既有行為順序（ANSI 剝除／控制字元過濾／具名前綴遮蔽／home
+    替換）維持不變，只在「截斷之前」插入這一層。
+    """
     text = str(value or "")
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = "".join(char for char in text if char in "\n\t" or ord(char) >= 32)
@@ -93,7 +108,11 @@ def sanitize_stderr(value: object, *, limit: int = 500) -> str:
     home = str(Path.home())
     if home and home != "/":
         text = text.replace(home, "~")
-    return " ".join(text.split())[:limit]
+    text = " ".join(text.split())
+    from .ledger.processing import redact_secret_text
+
+    text = redact_secret_text(text)
+    return text[:limit]
 
 
 def _tuple_strings(
@@ -435,6 +454,7 @@ class AgentRunResult:
     fallback_reason: str | None = None
     priority: int = 0
     response_schema: str = RESPONSE_SCHEMA_VERSION
+    output_bytes: int = 0
 
 
 def classify_failure(stderr: object, *, exit_code: int | None = None) -> str:
@@ -583,6 +603,7 @@ class ExternalAgentRouter:
                 category="invalid_output",
                 profile_id=profile.id,
                 stderr=sanitize_stderr(exc),
+                output_bytes=len(raw.encode("utf-8", errors="replace")),
             ) from exc
 
     @staticmethod
@@ -726,6 +747,7 @@ class ExternalAgentRouter:
                             profile_id=profile.id,
                             stderr=stderr,
                             exit_code=exit_code,
+                            output_bytes=len(raw.encode("utf-8", errors="replace")),
                         )
                     self._validate_response(profile, raw, response_validator)
                     outputs.append(raw)
@@ -746,6 +768,9 @@ class ExternalAgentRouter:
                     None if not attempts else "degraded-success",
                     profile.priority,
                     RESPONSE_SCHEMA_VERSION,
+                    output_bytes=sum(
+                        len(output.encode("utf-8", errors="replace")) for output in outputs
+                    ),
                 )
                 attempts.append(result)
                 self.last_result = result
@@ -759,6 +784,7 @@ class ExternalAgentRouter:
                         profile_id=profile.id,
                         exit_code=getattr(caught, "exit_code", None),
                         stderr=getattr(caught, "stderr", ""),
+                        output_bytes=int(getattr(caught, "output_bytes", 0) or 0),
                     )
                 category = self._transition_category(profile, caught)
                 self._last_error = caught
@@ -779,6 +805,7 @@ class ExternalAgentRouter:
                     None,
                     profile.priority,
                     RESPONSE_SCHEMA_VERSION,
+                    output_bytes=int(getattr(caught, "output_bytes", 0) or 0),
                 )
                 attempts.append(result)
                 self._circuit_open_until[profile.id] = time.monotonic() + 60.0

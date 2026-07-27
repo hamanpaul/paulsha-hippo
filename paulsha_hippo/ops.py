@@ -629,8 +629,13 @@ def _probe_environment() -> tuple[dict[str, str], bool]:
 
 
 _PROBE_TIMEOUT_SECS = 60
+# #69 子項 B：舊 prompt 只求「有回應」（reply with the single word ok），與真實
+# atomize 的輸出契約（單一 JSON、無夾帶散文）無關——會把「能回話但不守 JSON
+# 契約」的 backend（如 cg：launcher 強制輸出 JSON，模型卻回散文 → exit 3）
+# 誤判為 FAIL 以外的另一種反相關；也會把「回話但不是 JSON」誤判為健康。改成
+# 要求單一 JSON，驗證條件比照 atomize 的嚴格解析（parse_single_json_value）。
 _PROBE_SMOKE_PROMPT = (
-    "hippo doctor smoke probe: reply with the single word ok and nothing else."
+    'Reply with exactly this JSON and nothing else: {"ok":true}'
 )
 _PROBE_MAX_TOKENS = 32
 
@@ -686,24 +691,34 @@ def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
                 failed = True
                 continue
             command[0] = resolved
-        ok, detail = _exec_probe_service_effective(command, probe_env)
+        ok, detail, _kind = _exec_probe_service_effective(command, probe_env)
         lines.append(f"{label} {'✓' if ok else 'FAIL'} {detail}")
         failed = failed or not ok
     return lines, failed
 
 
 def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
-                                  *, runner=subprocess.run) -> tuple[bool, str]:
+                                  *, runner=subprocess.run) -> tuple[bool, str, str]:
     """以 probe_env（見 `_probe_environment`）對 backend argv 送 bounded smoke prompt。
 
     doctor 是恢復序列的前置 gate（spec §4.1「實際喚起 backend 一次」）。早前
     判定把 timeout 與 126/127 以外的任何 exit code 都視為 PASS——backend hang
     （上游卡住）與認證／model／quota／config 錯誤（一律非零 exit）全被誤判為
-    健康，gate 綠燈後 requeue 立即再度失敗或 parked。改為 fail-closed：經 stdin
-    送 bounded smoke prompt（比照 AgentExecClient.run 的餵入方式），timeout 內
-    exit 0 且 stdout 非空（可解析回應）才 PASS；timeout、任何非零 exit（含
-    126/127）、空輸出、exec 失敗（ENOENT／EACCES、shebang interpreter 斷鏈、
-    輸出非 UTF-8 位元組令 text=True decode 失敗）一律 FAIL。
+    健康，gate 綠燈後 requeue 立即再度失敗或 parked。#69 子項 B 再往前一步：
+    舊版「exit 0 且 stdout 非空」與真實 atomize 的輸出契約無關——會把「能回話
+    但不守 JSON 契約」判成 ✓（如 claude 對真實 payload 吐 0 bytes 以外的散文）、
+    也會把「守 JSON 契約但這個 prompt 沒觸發 JSON」判成 FAIL（如 cg：launcher
+    強制輸出 JSON，模型回散文 → exit 3）。改為 fail-closed 且與 atomize 同契約：
+    經 stdin 送 bounded smoke prompt（比照 AgentExecClient.run 的餵入方式），
+    timeout 內 exit 0 且 stdout 可解析為「恰好一個 JSON value」（重用 atomize
+    既有的嚴格解析 `llm_output.parse_single_json_value`）才 PASS；timeout、
+    任何非零 exit（含 126/127）、空輸出、無法解析為單一 JSON、exec 失敗
+    （ENOENT／EACCES、shebang interpreter 斷鏈、輸出非 UTF-8 位元組令
+    text=True decode 失敗）一律 FAIL。
+
+    回傳 (ok, detail, kind)；``kind`` ∈ {"ok", "timeout", "nonzero", "empty",
+    "invalid_json", "exec_error"}，供呼叫端／測試機器可讀地區分 FAIL 成因，
+    不必反解 detail 的人讀文字。
 
     Codex 複驗 B1：環境由呼叫端以 `_probe_environment()` 顯式構造（僅用來
     決定 service-effective PATH），但真正傳給外部 CLI 的環境仍收斂到
@@ -717,6 +732,7 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
     真實 session 寫回 queue，重新引入遞迴自捕捉／queue 污染。
     """
     from .agent_profiles import child_environment
+    from .atomizer.llm_output import LlmOutputError, parse_single_json_value
 
     env = child_environment({"PATH": probe_env.get("PATH", _FALLBACK_SERVICE_PATH)})
     try:
@@ -730,27 +746,32 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
         )
     except subprocess.TimeoutExpired:
         return False, (f"smoke prompt {_PROBE_TIMEOUT_SECS}s 內未完成"
-                       "（backend hang／上游卡住；fail-closed）")
+                       "（backend hang／上游卡住；fail-closed）"), "timeout"
     except FileNotFoundError:
-        return False, "exec 失敗：檔案或 shebang interpreter 不存在"
+        return False, "exec 失敗：檔案或 shebang interpreter 不存在", "exec_error"
     except PermissionError:
-        return False, "exec 失敗：無執行權限"
+        return False, "exec 失敗：無執行權限", "exec_error"
     except OSError as exc:
-        return False, f"exec 失敗：{exc}"
+        return False, f"exec 失敗：{exc}", "exec_error"
     except UnicodeDecodeError as exc:
         # text=True 以 locale 編碼解 stdout/stderr，backend 吐非 UTF-8 位元組
         # （跑錯 binary／crash dump／locale 錯亂的錯誤文字）時 decode 於 run()
         # 內拋 UnicodeDecodeError（ValueError 子類，非 OSError）。此正是本 probe
         # 要偵測的故障類；比照恢復 gate fail-closed 語意判 FAIL，不得逸出崩潰 CLI。
         return False, (f"exec 失敗：backend 輸出非 UTF-8 位元組"
-                       f"（跑錯 binary／crash dump／locale 錯亂；fail-closed）：{exc}")
+                       f"（跑錯 binary／crash dump／locale 錯亂；fail-closed）：{exc}"), "exec_error"
     if completed.returncode != 0:
         stderr_tail = " ".join(str(completed.stderr or "").split())[:200]
         return False, (f"exit {completed.returncode}（smoke prompt 失敗；"
-                       f"認證／model／quota／config 錯誤同屬此類）：{stderr_tail}")
-    if not str(completed.stdout or "").strip():
-        return False, "exit 0 但回應為空（無可解析輸出）"
-    return True, "smoke prompt exit 0、回應非空"
+                       f"認證／model／quota／config 錯誤同屬此類）：{stderr_tail}"), "nonzero"
+    stdout = str(completed.stdout or "")
+    if not stdout.strip():
+        return False, "exit 0 但回應為空（無可解析輸出）", "empty"
+    try:
+        parse_single_json_value(stdout)
+    except LlmOutputError as exc:
+        return False, f"exit 0 但回應不是單一 JSON（{exc}；atomize 同契約下同樣會判 invalid_output）", "invalid_json"
+    return True, "smoke prompt exit 0、回應為單一 JSON", "ok"
 
 
 def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
@@ -814,7 +835,7 @@ def _probe_backend_service_effective(*, live: bool = False) -> tuple[str, bool]:
             "（hippo doctor --fix-backend 可嘗試自動遷移）",
             True,
         )
-    ok, detail = _exec_probe_service_effective(command, probe_env)
+    ok, detail, _kind = _exec_probe_service_effective(command, probe_env)
     if ok:
         return (
             f"- distiller backend：✓ {command[0]}（{env_label} smoke probe；{detail}）",

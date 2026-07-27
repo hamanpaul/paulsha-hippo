@@ -283,15 +283,28 @@ def _parse_proposals(data: Any, known_projects: list[str]) -> list[SliceProposal
     return proposals
 
 
-def parse_response(raw: str, known_projects: list[str]) -> ParsedResponse:
-    """Parse the strict v1 wrapper or one-version non-empty legacy array."""
+def parse_single_json_value(raw: str) -> Any:
+    """Parse ``raw`` as exactly one JSON value with no surrounding noise.
+
+    Shared strict-parsing primitive: the atomize response parser
+    (`parse_response`) and the `hippo doctor` smoke-probe validation
+    (issue #69 子項 B) both need "this output must be one parseable JSON
+    value, nothing else" — this is the single implementation, not a parallel
+    one, so the contract and its error message stay identical everywhere it
+    is enforced.
+    """
     stripped = raw.strip()
     if not stripped:
         raise LlmOutputError("agent output is empty")
     try:
-        data = json.loads(stripped)
+        return json.loads(stripped)
     except json.JSONDecodeError as exc:
         raise LlmOutputError("agent output must be one JSON value without surrounding noise") from exc
+
+
+def parse_response(raw: str, known_projects: list[str]) -> ParsedResponse:
+    """Parse the strict v1 wrapper or one-version non-empty legacy array."""
+    data = parse_single_json_value(raw)
 
     if isinstance(data, list):
         if not data:
