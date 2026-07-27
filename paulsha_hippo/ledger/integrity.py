@@ -156,3 +156,64 @@ def append_quarantine(ledger_path: Path, findings: list[LineFinding], *, now: st
         handle.flush()
         os.fsync(handle.fileno())
     return len(rows)
+
+
+def _backup_name(path: Path, now: str) -> str:
+    stamp = now.replace(":", "").replace("-", "")
+    return f"{path.name}.bak-repair-{stamp}"
+
+
+def repair_file(path: Path, *, apply: bool, now: str) -> dict:
+    findings = scan_file(path)
+    recoverable = [f for f in findings if f.classification == "recoverable"]
+    unrecoverable = [f for f in findings if f.classification == "unrecoverable"]
+    result: dict = {
+        "file": str(path),
+        "recoverable": len(recoverable),
+        "unrecoverable": len(unrecoverable),
+        "quarantined": 0,
+        "backup": None,
+        "applied": False,
+    }
+    if not apply:
+        return result
+
+    if unrecoverable:
+        result["quarantined"] = append_quarantine(path, unrecoverable, now=now)
+
+    if not recoverable:
+        # 冪等：沒有可救回行就不寫檔、不備份。
+        return result
+
+    targets = {f.line_no for f in recoverable}
+    lines = _read_lines(path)
+    rebuilt = [
+        line.replace(NUL, "") if index in targets else line
+        for index, line in enumerate(lines, start=1)
+    ]
+
+    backup = path.with_name(_backup_name(path, now))
+    backup.write_bytes(path.read_bytes())
+
+    tmp = path.with_name(f".{path.name}.repair.tmp")
+    with tmp.open("w", encoding="utf-8", errors="surrogateescape") as handle:
+        handle.write("\n".join(rebuilt) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+    result["backup"] = str(backup)
+    result["applied"] = True
+    return result
+
+
+def repair_ledger_dir(memory_root: Path, *, apply: bool, now: str) -> list[dict]:
+    directory = ledger_dir(memory_root)
+    if not directory.is_dir():
+        return []
+    results = []
+    for path in sorted(directory.glob("*.jsonl")):
+        outcome = repair_file(path, apply=apply, now=now)
+        if outcome["recoverable"] or outcome["unrecoverable"]:
+            results.append(outcome)
+    return results
