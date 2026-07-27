@@ -277,7 +277,7 @@ def _build_index_locked(
         # v5 requirement #2/#9: read_count/last_read_at per slice, fed from the
         # same identity+window-matched aggregation janitor retention uses
         # (ledger.usage.collect_usage_reads); fail-soft/bounded, read-only.
-        usage_reads, _usage_diag = usage_ledger.collect_usage_reads(
+        usage_reads, _usage_diag, _usage_stats = usage_ledger.collect_usage_reads(
             memory_root, usage_now, window_days=usage_window_days
         )
 

@@ -148,9 +148,14 @@ class CollectUsageReadsTests(unittest.TestCase):
                 "\n".join(json.dumps(e) for e in usage) + "\n", encoding="utf-8"
             )
 
-            result, diag = usage_ledger.collect_usage_reads(root, now)
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
 
-            self.assertEqual(result, {"sl-a": (1, "2026-07-21T00:00:00Z")})
+            # sl-z was read but never offered: issue #67 direct read -> count 0,
+            # last_read_at present so janitor retention still sees it.
+            self.assertEqual(result, {
+                "sl-a": (1, "2026-07-21T00:00:00Z"),
+                "sl-z": (0, "2026-07-21T00:00:00Z"),
+            })
             expected_diag = usage_ledger.new_diagnostics()
             expected_diag.update({
                 "missing_tool": 2,
@@ -159,9 +164,9 @@ class CollectUsageReadsTests(unittest.TestCase):
                 "invalid_ts": 1,
                 "future_event": 1,
                 "window_older": 1,
-                "read_without_offered": 1,
             })
             self.assertEqual(diag, expected_diag)
+            self.assertEqual(stats, {"direct_read": 1})
 
     def test_unknown_is_rejected_for_every_identity_component(self):
         cases = (
@@ -220,12 +225,19 @@ class CollectUsageReadsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result, diag = usage_ledger.collect_usage_reads(root, now)
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
 
-            self.assertEqual(result, {})
+            # The out-of-window / future offers must not attribute either read:
+            # read_count stays 0 on both. Issue #67: the reads themselves are
+            # valid and in-window, so they land as direct reads rather than
+            # vanishing.
+            self.assertEqual(result, {
+                "sl-old": (0, "2026-07-21T00:00:00Z"),
+                "sl-future": (0, "2026-07-21T00:00:00Z"),
+            })
             self.assertEqual(diag["window_older"], 1)
             self.assertEqual(diag["future_event"], 1)
-            self.assertEqual(diag["read_without_offered"], 2)
+            self.assertEqual(stats["direct_read"], 2)
 
     def test_repeated_offers_for_one_identity_use_bounded_memory(self):
         def peak_for(offer_count: int) -> int:
@@ -302,10 +314,112 @@ class CollectUsageReadsTests(unittest.TestCase):
             (led / "memory_usage.jsonl").write_text(
                 "\n".join(json.dumps(e) for e in reads) + "\n", encoding="utf-8"
             )
-            result, _diag = usage_ledger.collect_usage_reads(
+            result, _diag, _stats = usage_ledger.collect_usage_reads(
                 root, datetime(2026, 7, 27, tzinfo=timezone.utc)
             )
             self.assertEqual(result["sl-a"], (3, "2026-07-05T00:00:00Z"))
+
+
+class DirectReadAttributionTests(unittest.TestCase):
+    """Issue #67: an un-offered ("direct") read is a normal category, not a diagnostic.
+
+    It must feed the janitor retention base (``last_read_at``) — a read is
+    evidence the slice is alive — while leaving the search usage boost
+    (``read_count``) to offer-attributed reads only, so the funnel's
+    conversion-rate semantics stay intact.
+    """
+
+    @staticmethod
+    def _write(root: Path, offers: list[dict], reads: list[dict]) -> None:
+        led = root / "runtime" / "ledger"
+        led.mkdir(parents=True, exist_ok=True)
+        (led / "offered.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in offers), encoding="utf-8"
+        )
+        (led / "memory_usage.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in reads), encoding="utf-8"
+        )
+
+    def test_read_without_offered_is_not_a_diagnostic_key(self):
+        self.assertNotIn("read_without_offered", usage_ledger.DIAG_KEYS)
+        self.assertNotIn("read_without_offered", usage_ledger.new_diagnostics())
+
+    def test_direct_read_yields_last_read_with_zero_read_count(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            self._write(root, [], [
+                {"tool": "claude-code", "session_id": "s1", "sl_id": "sl-direct",
+                 "source": "read", "ts": "2026-07-21T00:00:00Z"},
+            ])
+
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            # read_count 0 -> zero boost; last_read_at present -> retention sees it.
+            self.assertEqual(result, {"sl-direct": (0, "2026-07-21T00:00:00Z")})
+            self.assertEqual(usage_ledger.usage_boost(result["sl-direct"][0]), 0.0)
+            self.assertEqual(diag, usage_ledger.new_diagnostics())
+            self.assertEqual(stats["direct_read"], 1)
+
+    def test_direct_reads_never_inflate_the_offer_attributed_read_count(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            self._write(
+                root,
+                [{"tool": "claude-code", "session_id": "s1", "ts": "2026-07-20T00:00:00Z",
+                  "offered": [{"sl_id": "sl-a"}]}],
+                [
+                    {"tool": "claude-code", "session_id": "s1", "sl_id": "sl-a",
+                     "source": "read", "ts": "2026-07-21T00:00:00Z"},
+                    # same slice, different session, never offered there -> direct
+                    {"tool": "claude-code", "session_id": "s2", "sl_id": "sl-a",
+                     "source": "read", "ts": "2026-07-22T00:00:00Z"},
+                ],
+            )
+
+            result, _diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            # count stays 1 (offer-attributed only) but last_read advances to the
+            # later direct read, so retention uses the freshest evidence.
+            self.assertEqual(result, {"sl-a": (1, "2026-07-22T00:00:00Z")})
+            self.assertEqual(stats["direct_read"], 1)
+
+    def test_offer_not_strictly_before_read_counts_as_direct(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            self._write(
+                root,
+                [{"tool": "codex", "session_id": "s1", "ts": "2026-07-21T00:00:00Z",
+                  "offered": [{"sl_id": "sl-a"}]}],
+                [{"tool": "codex", "session_id": "s1", "sl_id": "sl-a", "source": "read",
+                  "ts": "2026-07-21T00:00:00Z"}],
+            )
+
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            self.assertEqual(result, {"sl-a": (0, "2026-07-21T00:00:00Z")})
+            self.assertEqual(diag, usage_ledger.new_diagnostics())
+            self.assertEqual(stats["direct_read"], 1)
+
+    def test_malformed_and_out_of_window_reads_are_still_diagnostics_not_direct(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            self._write(root, [], [
+                {"tool": "claude-code", "session_id": "s1", "sl_id": "sl-a",
+                 "source": "read", "ts": "2026-01-01T00:00:00Z"},   # window_older
+                {"tool": "(unknown)", "session_id": "s1", "sl_id": "sl-a",
+                 "source": "read", "ts": "2026-07-21T00:00:00Z"},   # missing_tool
+            ])
+
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            self.assertEqual(result, {})
+            self.assertEqual(diag["window_older"], 1)
+            self.assertEqual(diag["missing_tool"], 1)
+            self.assertEqual(stats["direct_read"], 0)
 
 
 class UsageBoostFormulaTests(unittest.TestCase):

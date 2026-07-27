@@ -179,7 +179,9 @@ def run_scan(
     # ledger; a nonzero diagnostic is surfaced as a single warning (v5
     # requirement: no zero-value warning noise).
     now_dt = usage_ledger.parse_ts(now) or datetime.now(timezone.utc)
-    last_read_map_raw, usage_diag = usage_ledger.collect_usage_reads(memory_root, now_dt)
+    last_read_map_raw, usage_diag, _usage_stats = usage_ledger.collect_usage_reads(
+        memory_root, now_dt
+    )
     last_read_map = {sid: last_read for sid, (_count, last_read) in last_read_map_raw.items()}
     nonzero_usage_diag = {key: count for key, count in usage_diag.items() if count > 0}
     if nonzero_usage_diag:

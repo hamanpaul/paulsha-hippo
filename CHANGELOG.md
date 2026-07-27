@@ -11,6 +11,7 @@
 - Janitor 不再把合法的 remote-form rich project ID 誤判為 `raw-remote-key`，避免已採 hashed directory key 的 atom 讓 Dream 永久降為 `partial`。
 - `moc.search.search()` 有 boost 時使用 `(adjusted_score, base_score, slice_id)` 穩定鍵，無有效 boost（含舊 schema fallback）則維持 legacy base-score one-key stable ordering。
 - usage ledger（`offered.jsonl`／`memory_usage.jsonl`）改為 binary per-line UTF-8 streaming；metadata/open/read、decode 與單行 parse 錯誤 fail-soft 且不改寫 ledger，壞行不再吞掉周邊合法行。offered/read 的未來、窗口外時間與 `(unknown)` tool/session/slice identity 一律排除並記固定鍵 bounded diagnostics。
+- 未經 offer 的「直讀」不再被 `collect_usage_reads()` 丟棄：直讀照常更新 janitor retention 的 `last_read_at`（避免實際被讀過的 slice 誤 decay），但不計入 `read_count`，故 search usage boost 與 `hippo usage funnel` read-through 主指標語意不變。`read_without_offered` 一併移出 `DIAG_KEYS`，改以獨立 bounded 的 `STAT_KEYS`（`direct_read`）計數——直讀是正常 agent 行為，不應觸發 janitor warning 而讓 `hippo dream run` 永久停在 `partial`。
 
 ### Added
 - `moc.search` 新增可注入 UTC `usage_now`／`usage_window_days` 的 usage-boost index metadata；預設窗口 30 天，`usage_boost = min(0.04, 0.01*log2(1+read_count))`，`base_score` 間距 > `0.04` 不被反轉。

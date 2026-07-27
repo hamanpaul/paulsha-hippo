@@ -31,7 +31,15 @@ DIAG_KEYS = (
     "invalid_ts",
     "future_event",
     "window_older",
-    "read_without_offered",
+)
+
+# Fixed, bounded statistic key set (issue #67) — normal outcomes that are
+# neither defects nor offer-attributed matches. Kept apart from DIAG_KEYS
+# because janitor surfaces every non-zero *diagnostic* as a warning, which
+# downgrades the whole dream run to ``partial``; a direct read is ordinary
+# agent behaviour and must never do that.
+STAT_KEYS = (
+    "direct_read",
 )
 
 # Usage-boost read_count/last_read_at aggregation only considers reads within
@@ -46,6 +54,11 @@ USAGE_BOOST_COEFFICIENT = 0.01
 def new_diagnostics() -> dict[str, int]:
     """A fresh all-zero counter dict over the fixed :data:`DIAG_KEYS` set."""
     return {key: 0 for key in DIAG_KEYS}
+
+
+def new_stats() -> dict[str, int]:
+    """A fresh all-zero counter dict over the fixed :data:`STAT_KEYS` set."""
+    return {key: 0 for key in STAT_KEYS}
 
 
 def iter_ledger_events(path: Path, diagnostics: dict[str, int]) -> "Iterator[dict]":
@@ -141,21 +154,32 @@ def _classify_missing_identity(diagnostics: dict[str, int], tool: object,
 
 def collect_usage_reads(
     memory_root: Path, now: datetime, window_days: int = USAGE_BOOST_WINDOW_DAYS,
-) -> "tuple[dict[str, tuple[int, str]], dict[str, int]]":
+) -> "tuple[dict[str, tuple[int, str]], dict[str, int], dict[str, int]]":
     """Aggregate per-slice ``(read_count, last_read_at)`` for ranking/retention.
 
-    v5 requirement #2: a read only counts when the same
-    ``(tool, session_id, slice_id)`` triple has a prior ``offered`` event, the
-    usage event has ``source == "read"`` and ``kind != "applied"``, and the
-    read timestamp is both later than the offer and within
-    ``[now - window_days, now]``. Missing/``(unknown)`` identity, unparsable
-    timestamps, future timestamps, out-of-window timestamps and reads with no
-    matching prior offer are excluded and tallied into the bounded
-    :data:`DIAG_KEYS` counters instead of raising or silently vanishing.
+    v5 requirement #2: ``read_count`` only counts a read when the same
+    ``(tool, session_id, slice_id)`` triple has a *strictly prior* ``offered``
+    event, the usage event has ``source == "read"`` and ``kind != "applied"``,
+    and the read timestamp is within ``[now - window_days, now]``. That keeps
+    the search usage boost aligned with the funnel's read-through
+    conversion-rate semantics.
+
+    Issue #67: a valid in-window read with no such prior offer — the agent read
+    a knowledge file that was never shortlisted to it — is a *direct* read. It
+    is normal behaviour, not a defect, so it is counted in the :data:`STAT_KEYS`
+    statistics and still updates ``last_read_at`` (a read is evidence the slice
+    is alive, which janitor retention must see), but it never contributes to
+    ``read_count``. A slice with direct reads only therefore surfaces as
+    ``(0, <ts>)``: zero boost, live retention.
+
+    Missing/``(unknown)`` identity, unparsable timestamps, future timestamps and
+    out-of-window timestamps remain genuine defects and are tallied into the
+    bounded :data:`DIAG_KEYS` counters instead of raising or silently vanishing.
     Read-only against the ledger; never writes to it.
     """
     led = memory_root / "runtime" / "ledger"
     diagnostics = new_diagnostics()
+    stats = new_stats()
     window_start = now - timedelta(days=window_days)
 
     offered_index: dict[tuple[str, str, str], datetime] = {}
@@ -208,16 +232,18 @@ def collect_usage_reads(
             continue
         key = (str(tool), str(session_id), str(slice_id))
         offer_ts = offered_index.get(key)
-        if offer_ts is None or offer_ts >= read_ts:
-            diagnostics["read_without_offered"] += 1
-            continue
         sid = str(slice_id)
-        counts[sid] = counts.get(sid, 0) + 1
+        if offer_ts is None or offer_ts >= read_ts:
+            stats["direct_read"] += 1
+        else:
+            counts[sid] = counts.get(sid, 0) + 1
         if sid not in last_read or read_ts > last_read[sid]:
             last_read[sid] = read_ts
 
+    # Keyed off last_read, not counts: a direct-read-only slice has no
+    # offer-attributed count but must still expose its last_read_at.
     result = {
-        sid: (count, last_read[sid].isoformat().replace("+00:00", "Z"))
-        for sid, count in counts.items()
+        sid: (counts.get(sid, 0), read_ts.isoformat().replace("+00:00", "Z"))
+        for sid, read_ts in last_read.items()
     }
-    return result, diagnostics
+    return result, diagnostics, stats
