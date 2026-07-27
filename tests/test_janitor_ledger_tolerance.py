@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -110,6 +111,14 @@ class JanitorDirectReadWarningTests(unittest.TestCase):
                 "".join(json.dumps(e) + "\n" for e in reads), encoding="utf-8"
             )
             cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            # #70: usage diagnostics are windowed off the *janitor's own read
+            # time* (usage_now), not the run's frozen `now`. These tests assert
+            # fixed event timestamps against a fixed clock, so usage_now is
+            # pinned explicitly here — otherwise, once the scanner's usage
+            # clock default becomes real wall-clock time, these hard-coded
+            # 2026-07-26 event timestamps would silently drift out of the
+            # 30-day window (become `window_older`) as real time passes,
+            # turning this into a time bomb rather than a deterministic test.
             return scanner.run_scan(
                 root,
                 now="2026-07-27T00:00:00Z",
@@ -117,6 +126,7 @@ class JanitorDirectReadWarningTests(unittest.TestCase):
                 config=cfg,
                 config_hash=cfg_hash,
                 source_path_exists=lambda record: True,
+                usage_now="2026-07-27T00:00:00Z",
             )
 
     def test_direct_reads_emit_no_usage_diagnostics_warning(self):
@@ -139,6 +149,102 @@ class JanitorDirectReadWarningTests(unittest.TestCase):
             any("usage ledger diagnostics" in w and "invalid_ts" in w
                 for w in result["warnings"]),
             result["warnings"],
+        )
+
+
+class JanitorUsageNowConcurrencyTests(unittest.TestCase):
+    """Issue #70: a dream run freezes a single `now` at run-start and hands it
+    to both the (slow) atomize pass and the janitor pass that runs after it.
+    Any ledger event written concurrently — e.g. by another agent's prompt-time
+    hook — while atomize is still running lands *after* that frozen `now`, but
+    strictly *before* the janitor pass actually reads the ledger. Judging it
+    against the frozen `now` misclassifies ordinary concurrent activity as
+    `future_event`, which janitor escalates to a warning and which pins the
+    whole dream run at `partial` (same anti-pattern as #64 / #67).
+
+    `usage_now` decouples the usage-ledger clock from the run's frozen `now`:
+    it defaults to the janitor's actual wall-clock read time, so concurrent
+    writes are judged against *when they were actually read*, not against a
+    timestamp fixed possibly 10+ minutes earlier at run-start.
+    """
+
+    def _scan(
+        self, reads: list[dict], *, now: str, usage_now: str | None,
+        pass_usage_now: bool = True,
+    ) -> dict:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            knowledge_root = root / "knowledge"
+            knowledge_root.mkdir(parents=True)
+            _write_record(knowledge_root / "sl-a.md", "sl-a", "sess-a")
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True, exist_ok=True)
+            (led / "offered.jsonl").write_text("", encoding="utf-8")
+            (led / "memory_usage.jsonl").write_text(
+                "".join(json.dumps(e) + "\n" for e in reads), encoding="utf-8"
+            )
+            cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            kwargs: dict = dict(
+                knowledge_root=knowledge_root,
+                config=cfg,
+                config_hash=cfg_hash,
+                now=now,
+                source_path_exists=lambda record: True,
+            )
+            if pass_usage_now:
+                kwargs["usage_now"] = usage_now
+            return scanner.run_scan(root, **kwargs)
+
+    def test_concurrent_write_after_frozen_now_but_before_usage_now_is_not_future_event(self):
+        # Mirrors the real run: run_id frozen at 07:03:27Z; atomize takes ~13
+        # minutes; janitor actually reads the ledger (usage_now) at 07:16:51Z.
+        # An offered/read event written at 07:10:23Z — after the frozen `now`
+        # but before janitor's actual read — must not be flagged.
+        result = self._scan(
+            [{"tool": "claude-code", "session_id": "9105547d", "sl_id": "sl-a",
+              "source": "read", "ts": "2026-07-27T07:10:23Z"}],
+            now="2026-07-27T07:03:27Z",
+            usage_now="2026-07-27T07:16:51Z",
+        )
+
+        self.assertEqual(
+            [w for w in result["warnings"] if "usage ledger diagnostics" in w], []
+        )
+
+    def test_genuine_clock_skew_beyond_usage_now_still_warns(self):
+        # A real clock-skew event (postdates even the janitor's own read time)
+        # must still be caught — the fix narrows the *false positive* window,
+        # it must not blind the diagnostic altogether.
+        result = self._scan(
+            [{"tool": "claude-code", "session_id": "9105547d", "sl_id": "sl-a",
+              "source": "read", "ts": "2026-07-27T08:00:00Z"}],
+            now="2026-07-27T07:03:27Z",
+            usage_now="2026-07-27T07:16:51Z",
+        )
+
+        self.assertTrue(
+            any("usage ledger diagnostics" in w and "future_event" in w
+                for w in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_default_usage_now_uses_call_time_not_frozen_run_now(self):
+        # Regression guard on the default itself: with no usage_now override
+        # (how the real dream/janitor CLIs call run_scan), a concurrent write
+        # timestamped at "real now" must not be future_event even though the
+        # run's frozen `now` is far earlier — proving the usage clock default
+        # is NOT simply `now`.
+        near_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = self._scan(
+            [{"tool": "claude-code", "session_id": "9105547d", "sl_id": "sl-a",
+              "source": "read", "ts": near_now}],
+            now="2026-07-27T07:03:27Z",
+            usage_now=None,
+            pass_usage_now=False,
+        )
+
+        self.assertEqual(
+            [w for w in result["warnings"] if "usage ledger diagnostics" in w], []
         )
 
 

@@ -133,20 +133,38 @@ def run_scan(
     config_hash: str,
     now: str,
     dry_run: bool = False,
-    source_path_exists: Callable[[record_source.KnowledgeRecord], bool | None] | None = None
+    source_path_exists: Callable[[record_source.KnowledgeRecord], bool | None] | None = None,
+    *,
+    usage_now: str | None = None,
 ) -> dict[str, Any]:
     """
     Run janitor scan: evaluate records and persist lifecycle events.
-    
+
     Args:
         memory_root: Memory root directory
         knowledge_root: Knowledge layer root directory
         config: Janitor configuration
         config_hash: Hash of janitor config
-        now: Current timestamp (ISO format)
+        now: Current timestamp (ISO format). Drives TTL/decay/reactivation
+            judgments and the ts recorded on persisted lifecycle events.
         dry_run: If True, compute plan but don't persist events
         source_path_exists: Optional callable to check source path existence
-    
+        usage_now: Optional ISO timestamp used as the clock basis for usage
+            ledger (offered/read) diagnostics only — everything else keeps
+            using `now`. Defaults to real wall-clock time (the janitor's own
+            read time), not `now`. #70: a dream run freezes a single `now` at
+            run-start and hands it unchanged to a janitor pass that may run
+            many minutes later (atomize can take 10+ minutes due to a known
+            rglob perf issue); any offered/read event written by another
+            concurrent agent in that gap has a ts *after* the frozen `now`
+            but *before* the janitor pass actually reads the ledger. Judging
+            such events against `now` misclassifies them as `future_event` —
+            a real diagnostic reserved for genuine clock skew — which
+            escalates to a warning and pins the whole dream run at `partial`.
+            Defaulting the usage clock to the actual read time fixes that
+            false positive while leaving genuine clock skew (ts beyond the
+            real read time) diagnosed exactly as before.
+
     Returns:
         Dict with keys:
             - summary: Dict with scanned/decayed/reactivated/unchanged/skipped counts
@@ -178,9 +196,17 @@ def run_scan(
     # an already-decayed one. Fail-soft/bounded and read-only against the
     # ledger; a nonzero diagnostic is surfaced as a single warning (v5
     # requirement: no zero-value warning noise).
-    now_dt = usage_ledger.parse_ts(now) or datetime.now(timezone.utc)
+    #
+    # #70: the usage-ledger clock basis is intentionally decoupled from `now`
+    # here — it defaults to real wall-clock time (when this scan is actually
+    # reading the ledger), not the run's frozen `now`. See run_scan's
+    # docstring for the concurrent-write false-positive this avoids.
+    if usage_now is not None:
+        usage_now_dt = usage_ledger.parse_ts(usage_now) or datetime.now(timezone.utc)
+    else:
+        usage_now_dt = datetime.now(timezone.utc)
     last_read_map_raw, usage_diag, _usage_stats = usage_ledger.collect_usage_reads(
-        memory_root, now_dt
+        memory_root, usage_now_dt
     )
     last_read_map = {sid: last_read for sid, (_count, last_read) in last_read_map_raw.items()}
     nonzero_usage_diag = {key: count for key, count in usage_diag.items() if count > 0}
