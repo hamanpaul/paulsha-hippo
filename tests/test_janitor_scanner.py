@@ -149,8 +149,15 @@ class UsageDiagnosticsWarningTests(unittest.TestCase):
                 encoding="utf-8",
             )
             cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            # #70: usage diagnostics window off usage_now (defaults to real
+            # wall-clock time), not the run's `now`. Pin usage_now explicitly
+            # here so this fixed 2026-05 event timestamp doesn't drift out of
+            # the 30-day window as real time passes (would otherwise become a
+            # time bomb: spuriously fails once run more than ~30 days after
+            # the fixture dates were authored).
             result = scanner.run_scan(root, knowledge_root=kroot, config=cfg, config_hash=cfg_hash,
-                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True)
+                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True,
+                                      usage_now="2026-05-31T00:00:00Z")
             self.assertFalse(
                 [w for w in result["warnings"] if w.startswith("usage ledger diagnostics")]
             )
@@ -168,7 +175,8 @@ class UsageDiagnosticsWarningTests(unittest.TestCase):
             )
             cfg, cfg_hash = janitor_config.load_config(override_path=None)
             result = scanner.run_scan(root, knowledge_root=kroot, config=cfg, config_hash=cfg_hash,
-                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True)
+                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True,
+                                      usage_now="2026-05-31T00:00:00Z")
             usage_warnings = [w for w in result["warnings"] if w.startswith("usage ledger diagnostics")]
             self.assertEqual(len(usage_warnings), 1)
             self.assertIn("json_decode_error", usage_warnings[0])
