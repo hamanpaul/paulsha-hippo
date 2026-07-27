@@ -319,3 +319,34 @@ def test_genuinely_broken_slice_is_still_counted(tmp_path):
     health = dream_ledger.backlog_census(tmp_path, now="2026-07-27T00:00:00Z")
 
     assert health["invalid_frontmatter"] == 1
+
+# ── Task 7：hippo ledger repair 子命令 ────────────────────────────────────────
+from paulsha_hippo import cli
+
+
+def test_cli_ledger_repair_dry_run_leaves_file_untouched(tmp_path, capsys):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    path = _write_ledger(tmp_path, "import.jsonl", [good[:3] + "\x00" + good[3:]])
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    code = cli.main(["ledger", "repair", "--memory-root", str(tmp_path)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload[0]["recoverable"] == 1
+    assert payload[0]["applied"] is False
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_cli_ledger_repair_apply_fixes_line(tmp_path, capsys):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    path = _write_ledger(tmp_path, "import.jsonl", [good[:3] + "\x00" + good[3:]])
+
+    code = cli.main([
+        "ledger", "repair", "--memory-root", str(tmp_path),
+        "--apply", "--now", "2026-07-27T00:00:00Z",
+    ])
+
+    capsys.readouterr()
+    assert code == 0
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0]) == {"n": 1}

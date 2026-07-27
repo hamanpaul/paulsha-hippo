@@ -1301,6 +1301,23 @@ def _print_runtime_health(memory_root: Path, *,
                           proc_root: str | Path = "/proc") -> None:
     """doctor 的 runtime 健康報告段落（#19）：只報告，不自動 kill、不影響 exit code。"""
     print(f"- dream lock（runtime/locks/dream.lock）：{dream_lock_status(memory_root)}")
+
+    from .ledger import integrity
+
+    ledger_findings = integrity.scan_ledger_dir(memory_root)
+    if not ledger_findings:
+        print("- ledger 完整性：✓ 無撕裂行")
+    else:
+        for name, findings in ledger_findings.items():
+            recoverable = [f for f in findings if f.classification == "recoverable"]
+            unrecoverable = [f for f in findings if f.classification == "unrecoverable"]
+            lines = ", ".join(str(f.line_no) for f in findings[:10])
+            suffix = " …" if len(findings) > 10 else ""
+            print(
+                f"- ledger 完整性：✗ {name} 可救回 {len(recoverable)}／"
+                f"不可救回 {len(unrecoverable)}（行 {lines}{suffix}）"
+                "——`hippo ledger repair --memory-root <root> --apply`"
+            )
     reports = dream_process_report(proc_root=proc_root)
     if not reports:
         print("- dream/supervise 進程：無")

@@ -429,6 +429,18 @@ def _build_parser() -> argparse.ArgumentParser:
     locks_cleanup.add_argument("--apply", action="store_true")
     locks_cleanup.set_defaults(func=_locks_cleanup_legacy)
 
+    ledger_p = memory_subparsers.add_parser("ledger", help="append-only ledger 維運")
+    ledger_sub = ledger_p.add_subparsers(dest="ledger_command", required=True)
+    ledger_repair = ledger_sub.add_parser(
+        "repair",
+        help="修復 ledger 撕裂行（僅維護窗口；預設 dry-run）",
+    )
+    ledger_repair.add_argument("--memory-root", required=True)
+    ledger_repair.add_argument("--apply", action="store_true")
+    ledger_repair.add_argument("--now", default=None,
+                               help="ISO8601 時間戳；未給時取當下 UTC")
+    ledger_repair.set_defaults(func=_ledger_repair)
+
     requeue_p = memory_subparsers.add_parser(
         "requeue", help="把 parked session 送回 split 重走 promote（#15 恢復路徑）"
     )
@@ -1891,6 +1903,19 @@ def _locks_cleanup_legacy(args: argparse.Namespace) -> int:
     if (result.get("blocked") or result.get("busy")
             or result.get("unknown") or result.get("unsafe_locks_dir")):
         return 1
+    return 0
+
+
+def _ledger_repair(args: argparse.Namespace) -> int:
+    from datetime import datetime, timezone
+
+    from paulsha_hippo.ledger import integrity
+
+    now = args.now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    results = integrity.repair_ledger_dir(
+        Path(args.memory_root), apply=args.apply, now=now
+    )
+    print(json.dumps(results, ensure_ascii=False, sort_keys=True))
     return 0
 
 
