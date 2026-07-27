@@ -277,3 +277,45 @@ def test_corrupt_quarantine_list_fails_closed(tmp_path):
     _records, bad = import_log.read_import_records_tolerant(path)
 
     assert bad == 1
+
+# ── Task 6：health 掃描排除生成的 MOC 索引檔 ──────────────────────────────────
+from paulsha_hippo.ledger import dream as dream_ledger
+
+
+def _write_slice(root, name, body="內容", **fm):
+    fields = {
+        "slice_id": "sl-1",
+        "project": "p",
+        "checksum": "deadbeef",
+        "memory_layer": "knowledge",
+    }
+    fields.update(fm)
+    lines = ["---"] + [f"{k}: {v}" for k, v in fields.items()] + ["---", body]
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def test_generated_moc_is_not_counted_as_invalid_frontmatter(tmp_path):
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir(parents=True)
+    (knowledge / "wiki-moc.md").write_text(
+        "---\nmemory_layer: moc\nmoc_kind: wiki\n---\n# Wiki MOC\n", encoding="utf-8"
+    )
+
+    health = dream_ledger.backlog_census(tmp_path, now="2026-07-27T00:00:00Z")
+
+    assert health["invalid_frontmatter"] == 0
+
+
+def test_genuinely_broken_slice_is_still_counted(tmp_path):
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir(parents=True)
+    (knowledge / "broken.md").write_text(
+        "---\nmemory_layer: knowledge\n---\n內容\n", encoding="utf-8"
+    )
+
+    health = dream_ledger.backlog_census(tmp_path, now="2026-07-27T00:00:00Z")
+
+    assert health["invalid_frontmatter"] == 1
