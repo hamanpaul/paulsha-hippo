@@ -14,12 +14,18 @@ The matrix is currently rebound to the 0.1.2 candidate at commit
 `null` because the 0.1.2 wheel has not been built yet.
 
 Of the 16 gates, only **AR-01** (full test suite) carries a real `passed`
-verdict, attested in this worktree: `python3 -m pytest -q` reported `1634
-passed, 4 skipped, 154 subtests passed, 2 failed`. The 2 failures are a known
-environment false signal (`tests/test_project_resolver.py::ResolveAutoDetectTests`
-detecting this worktree's own outer git repo instead of a clean non-repo
-folder), not a candidate defect — see the gate's `evidence` field for the
-full explanation. All other 15 gates (AR-02–AR-14, IC-01, IC-02) are
+verdict, attested from two independent clean environments: the candidate
+commit's own GitHub Actions `Tests` run (conclusion `success`), and a local
+non-nested sibling worktree where `python3 -m pytest -q` reported `1636
+passed, 4 skipped, 154 subtests passed, 0 failed`.
+
+Note on measurement environment: running the suite from a worktree nested
+*under* the repo directory (`.claude/worktrees/*`) produces 2 failures in
+`tests/test_project_resolver.py::ResolveAutoDetectTests`, because
+`resolve_project()` detects the outer repo's git toplevel instead of a clean
+non-repo folder. That is a false signal from the measurement environment, not
+a candidate defect — attestation must therefore always be taken from a
+non-nested checkout. All other 15 gates (AR-02–AR-14, IC-01, IC-02) are
 honestly `pending`: no live external CLI, build, publication, upgrade,
 recovery, timer-soak, or consumer-hook evidence has been captured for this
 candidate in this environment. Each gate's `evidence` field states what
