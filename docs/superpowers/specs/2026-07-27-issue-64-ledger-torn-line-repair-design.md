@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-64-ledger-torn-line-repair
+---
+
 # Ledger 撕裂行修復與 health 指標假陽性（issue #64）設計
 
 - 日期：2026-07-27
@@ -24,7 +29,7 @@
 
 `ledger/dream.py:176` 用 `knowledge.rglob("*.md")` 掃全樹計算 health，把生成的 MOC 索引檔也當成 slice 檢查。這些檔案依設計沒有 `slice_id` / `checksum`。數字恆等於 MOC 檔數（16）。
 
-## 設計決策
+## Decisions
 
 ### 決策一：可救回的行原地救回，不可救回的隔離（A + B fallback）
 
