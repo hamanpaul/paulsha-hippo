@@ -179,6 +179,10 @@ def backlog_census(memory_root: Path, *, now: str | None = None) -> dict[str, An
             except (OSError, UnicodeError):
                 invalid_frontmatter += 1
                 continue
+            # 生成的 MOC 索引檔依設計不帶 slice frontmatter，計入會讓這些指標
+            # 永遠無法歸零而失去診斷價值（issue #64）。以欄位而非檔名判別。
+            if str(frontmatter.get("memory_layer") or "") == "moc":
+                continue
             required = ("slice_id", "project", "checksum", "memory_layer")
             if not frontmatter or any(field not in frontmatter for field in required):
                 invalid_frontmatter += 1
