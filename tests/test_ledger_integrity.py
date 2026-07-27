@@ -1,5 +1,7 @@
 # tests/test_ledger_integrity.py
 import json
+import hashlib
+from pathlib import Path
 
 from paulsha_hippo.ledger import integrity
 
@@ -33,3 +35,59 @@ def test_line_sha256_is_over_raw_line_without_strip():
 
     line = '  {"a": 1}  '
     assert integrity.line_sha256(line) == hashlib.sha256(line.encode("utf-8")).hexdigest()
+
+
+def _write_ledger(tmp_path: Path, name: str, lines: list[str]) -> Path:
+    path = tmp_path / "runtime" / "ledger" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_scan_file_reports_line_numbers_and_classification(tmp_path):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    torn = good[:4] + "\x00" * 8 + good[4:]
+    path = _write_ledger(tmp_path, "import.jsonl", [good, torn, '{"n": '])
+
+    findings = integrity.scan_file(path)
+
+    assert [f.line_no for f in findings] == [2, 3]
+    assert findings[0].classification == "recoverable"
+    assert findings[0].reason == "nul-torn"
+    assert findings[0].sha256 == integrity.line_sha256(torn)
+    assert findings[1].classification == "unrecoverable"
+    assert findings[1].reason == "unparseable"
+
+
+def test_scan_file_on_clean_ledger_returns_empty(tmp_path):
+    path = _write_ledger(tmp_path, "import.jsonl", [json.dumps({"n": 1})])
+    assert integrity.scan_file(path) == []
+
+
+def test_scan_file_does_not_modify_the_file(tmp_path):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    path = _write_ledger(tmp_path, "import.jsonl", [good, good[:3] + "\x00" + good[3:]])
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    integrity.scan_file(path)
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_scan_ledger_dir_skips_clean_files_and_missing_dir(tmp_path):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    _write_ledger(tmp_path, "clean.jsonl", [good])
+    _write_ledger(tmp_path, "import.jsonl", [good[:3] + "\x00" + good[3:]])
+
+    result = integrity.scan_ledger_dir(tmp_path)
+
+    assert set(result) == {"import.jsonl"}
+    assert integrity.scan_ledger_dir(tmp_path / "nope") == {}
+
+
+def test_scan_ledger_dir_ignores_quarantine_sidecars(tmp_path):
+    good = json.dumps({"n": 1}, sort_keys=True)
+    _write_ledger(tmp_path, "import.jsonl", [good])
+    _write_ledger(tmp_path, "import.jsonl.quarantine", ["not json at all"])
+
+    assert integrity.scan_ledger_dir(tmp_path) == {}

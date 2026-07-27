@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
+from pathlib import Path
 
 NUL = "\x00"
 QUARANTINE_SUFFIX = ".quarantine"
@@ -43,3 +45,52 @@ def classify_line(line: str) -> tuple[str, str]:
     except json.JSONDecodeError:
         return ("unrecoverable", "unparseable")
     return ("recoverable", "nul-torn")
+
+
+@dataclass(frozen=True)
+class LineFinding:
+    line_no: int
+    sha256: str
+    classification: str
+    reason: str
+
+
+def _read_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+
+
+def scan_file(path: Path) -> list[LineFinding]:
+    """唯讀掃描單一 JSONL，只回傳非 ok 的行。行號為 1-indexed。"""
+    if not path.is_file():
+        return []
+    findings: list[LineFinding] = []
+    for index, line in enumerate(_read_lines(path), start=1):
+        classification, reason = classify_line(line)
+        if classification == "ok":
+            continue
+        findings.append(
+            LineFinding(
+                line_no=index,
+                sha256=line_sha256(line),
+                classification=classification,
+                reason=reason,
+            )
+        )
+    return findings
+
+
+def ledger_dir(memory_root: Path) -> Path:
+    return memory_root / "runtime" / "ledger"
+
+
+def scan_ledger_dir(memory_root: Path) -> dict[str, list[LineFinding]]:
+    """掃描 runtime/ledger/*.jsonl，只回傳有壞行的檔（key 為檔名）。"""
+    directory = ledger_dir(memory_root)
+    if not directory.is_dir():
+        return {}
+    result: dict[str, list[LineFinding]] = {}
+    for path in sorted(directory.glob("*.jsonl")):
+        findings = scan_file(path)
+        if findings:
+            result[path.name] = findings
+    return result
