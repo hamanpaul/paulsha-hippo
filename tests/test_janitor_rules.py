@@ -218,6 +218,22 @@ class UsageRetentionRuleTests(unittest.TestCase):
         self.assertEqual(source, "captured_at")
         self.assertEqual(base_dt.isoformat(), "2026-05-01T00:00:00+00:00")
 
+    def test_future_last_read_at_cannot_extend_ttl(self):
+        events = rules.plan_scan(
+            [_rec(captured="2020-01-01T00:00:00Z")],
+            {},
+            {},
+            CFG,
+            NOW,
+            HASH,
+            source_path_exists=_PATH_OK,
+            last_read_map={"sl-1": "2027-01-01T00:00:00Z"},
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["reason"], "ttl_expired")
+        self.assertEqual(events[0]["detail"]["source"], "captured_at")
+
     def test_recent_read_keeps_active_record_from_decaying(self):
         # captured_at is ancient, but a read three days ago (< 90d threshold)
         # extends the retention clock so the record must not decay.

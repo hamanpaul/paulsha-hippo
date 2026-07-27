@@ -14,7 +14,9 @@ The usage aggregation SHALL 使用逐行 iterator 載入 ledger，並對 I/O、U
 #### Scenario: streaming / regression 回歸
 
 - **WHEN** `runtime/ledger/offered.jsonl` 或 `runtime/ledger/memory_usage.jsonl` 使用超大檔、或 `Path.read_text` 被 monkeypatch 成拋例外
-- **THEN** 解析流程必須改為逐行 iterator，不得一次載入 list；讀取錯誤採 fail-soft，繼續處理其餘合法行，且不改寫 ledger。
+- **THEN** 解析流程必須改為逐行 iterator，不得一次載入 list；filesystem
+  metadata/open/read/decode 錯誤採 fail-soft，逐行 decode 且繼續處理其餘
+  合法行，並且不改寫 ledger。
 
 ### Requirement: invalid rows 與 bounded diagnostics
 
@@ -31,8 +33,19 @@ Attribution SHALL 僅接受 `(tool, logical session, sl_id)` 完整且先行 off
 
 #### Scenario: offered/read 對應規則
 
-- **WHEN** read 事件對應的 `(tool, logical_session, sl_id)` 缺漏或為 `(unknown)`，或 offered 時間晚於 read，或 read 時間不在窗口內
+- **WHEN** read 事件對應的 `(tool, logical_session, sl_id)` 缺漏或為 `(unknown)`，或 offered/read 任一時間為 future/out-of-window，或 offered 時間晚於 read
 - **THEN** 該 read 不得歸因到 slice，且不參與 `read_count/last_read_at` 聚合。
+
+### Requirement: usage 時間基準可注入
+
+Index build SHALL 接受可注入的 UTC 時間基準與窗口，並原樣傳至 usage
+aggregation；未注入時才使用目前 UTC 與預設窗口。
+
+#### Scenario: dream/index rebuild 可重現
+
+- **WHEN** caller 提供 `usage_now` 與 `usage_window_days`
+- **THEN** 相同 ledger 與相同輸入必須產生相同 `read_count/last_read_at`，
+  且 aggregation 必須使用 caller 提供的值。
 
 ### Requirement: ranking 穩定性與 0.04 上限
 
@@ -42,6 +55,12 @@ The ranking engine SHALL 使用 stable key 搭配 0.04 上限，且無 boost 時
 
 - **WHEN** 有 `read_count` 的 slice 需要計分
 - **THEN** 使用 `usage_boost = min(0.04, 0.01 * log2(1 + read_count))`，無 boost 時走 legacy fast path；有 boost 時 stable key `(adjusted_score, base_score, slice_id)`，且 `base_score` 間距超過 `0.04` 時不得反轉。
+
+#### Scenario: 無 boost 維持 legacy stable order
+
+- **WHEN** index 不含 usage 欄位，或結果集沒有任何正 `read_count`
+- **THEN** 排序只使用既有 base-score key，base-score 同分保持原輸入順序，
+  不得新增 raw BM25 或 slice id tie-break。
 
 ### Requirement: index compat / legacy fallback
 
@@ -59,7 +78,7 @@ janitor `scan` SHALL 維持 `superseded`、`source_invalid`、`ttl` 的決策優
 #### Scenario: superseded/source_invalid/ttl 順序
 
 - **WHEN** slice 同時觸發 `superseded` 與 `ttl`、或有 `source_invalid`
-- **THEN** `superseded` / `source_invalid` 優先於 `ttl`，`read` 不得 re-activate 已 decayed 的 slice；`ttl` 計算源自 `max(captured_at, active_since_ts, valid last_read_at)`，detail 記錄 `ttl_base` 與 `source`。
+- **THEN** `superseded` / `source_invalid` 優先於 `ttl`，`read` 不得 re-activate 已 decayed 的 slice；`ttl` 計算源自 `max(captured_at, active_since_ts, valid last_read_at)`，future/malformed `last_read_at` fail-closed，detail 記錄 `ttl_base` 與 `source`。
 
 ### Requirement: scanner 可觀測性與零值噪訊
 
@@ -79,11 +98,13 @@ The implementation SHALL 維護模組 docstring 真實性與回報欄位穩定�
 - **WHEN** 實作涉及模組說明更新
 - **THEN** 必須維持 `__doc__` 真實內容，不得引入無關格式 churn。
 
-### Requirement: 交付需同 commit 與 frozen plan 閱讀
+### Requirement: 交付需 exact-head 與 frozen plan 閱讀
 
-Builder 實作流程 SHALL 將這 7 件 authority 與實作變更放在同一 commit，供 Agy review 一次性審閱。
+交付流程 SHALL 以同一個 exact candidate head 包含本 change authority、
+regressions 與實作，供 current-head review 一次性審閱。
 
-#### Scenario: Agy review 前置
+#### Scenario: current-head review 前置
 
-- **WHEN** 實作交付 candidate 準備進行 Agy review
-- **THEN** builder 必須將這 7 件 authority 與實作改動放在同一 commit，並由 reviewer 先閱讀 frozen plan 與 7 件 authority 後再結論。
+- **WHEN** candidate 準備開 PR 或 merge
+- **THEN** reviewer 必須先閱讀 frozen plan 與 authority，再以 current head
+  的 code、tests、CI 與 review threads 作結論。

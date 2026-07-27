@@ -7,8 +7,9 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 
 ## 目的
 
-- 建立 v5 planning authority，完整繼承 v4 已接受功能契約與機械化邊界；只清除 persisted-block 並切換 builder provider。
-- 指定 builder：`claude/claude-sonnet-5`（effort high；一次初跑＋至多一次 repair）。
+- 建立 v5 planning authority，完整繼承 v4 已接受功能契約與機械化邊界。
+- 2026-07-27 使用者明確終止 Cortex lifecycle，改由主 Codex agent 以
+  Codex native subagent、TDD、preflight-ci 與 PR direct closeout。
 
 ## supersede 與邊界
 
@@ -42,7 +43,13 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 - fail-soft：I/O、UTF-8、單行 parse 錯誤不應 abort rebuild/search/janitor。
 - scanner 輸出：僅 counter >0 產 warning。
 - module docstring：維持真實 `__doc__`，避免無關 formatting churn。
-- 測試必測：malformed JSON、missing keys、invalid UTF-8/OSError、large ledger/no-read_text、no-zero-warning、legacy DB fallback、stable ranking、0.04 bound、janitor priority/retention、無 ledger mutation。
+- 測試必測：malformed JSON、missing keys、invalid UTF-8/OSError（含
+  filesystem metadata I/O）、large ledger/no-read_text、no-zero-warning、
+  legacy DB fallback 與 stable no-boost order、stable boosted ranking、0.04
+  bound、future janitor evidence fail-closed、janitor priority/retention、
+  無 ledger mutation。
+- 重建時間基準：index build 必須接受 keyword-only 的 UTC `usage_now` /
+  `usage_window_days` 注入，預設行為仍使用目前 UTC 時間。
 
 ## 驗證門檻
 
@@ -53,12 +60,13 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 - `openspec validate --all --strict`
 - `python3 -m policy_check --repo .`
 - `git diff --check`
-- builder 實作與七件 authority 必須同一 commit。
+- exact candidate 必須包含七件 authority、RED tests 與實作。
 
 ## 審查鏈
 
-- builder 後置 `agy/gemini-3.6-flash-high`（verification / code-review / adversarial）
-- final exact candidate 由 `codex/gpt-5.6-luna(max)`（`model_reasoning_effort=max`）PASS
-- Agy reviewer 必須先閱讀 frozen plan/todo/spec/design/tasks 與七件 authority（plan-only artifacts），再對照驗收結果。
-- Agy 判準：未處置缺陷/缺口 FAIL；承認且有界列管殘餘風險不獨立 FAIL。
-- 第二次 Claude build/repair 後仍有未處置 BLOCKER/MAJOR 即停在 `needs_human`，不得自動生成 v6。
+- Codex native subagent 依 RED 實作，主 agent 逐條獨立驗證 frozen
+  plan/todo/spec/design/tasks。
+- 未處置缺陷/缺口 FAIL；不得以既有 suite 綠燈、過期 reviewer 報告或
+  Cortex 狀態代替 exact-head evidence。
+- preflight-ci、PR current-head checks、review threads 與 mergeability
+  全綠後才 merge。

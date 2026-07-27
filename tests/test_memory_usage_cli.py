@@ -88,7 +88,8 @@ def test_read_usage_jsonl_never_calls_path_read_text(tmp_path):
     path.write_text(json.dumps({"ts": "2026-06-29T01:00:00Z"}) + "\n", encoding="utf-8")
     with mock.patch.object(Path, "read_text", side_effect=AssertionError("must not read_text")):
         events = _read_usage_jsonl(path, since=None)
-    assert events == [{"ts": "2026-06-29T01:00:00Z"}]
+        assert iter(events) is events
+        assert list(events) == [{"ts": "2026-06-29T01:00:00Z"}]
 
 
 def test_read_usage_jsonl_bounds_diagnostics_for_malformed_lines(tmp_path):
@@ -97,17 +98,42 @@ def test_read_usage_jsonl_bounds_diagnostics_for_malformed_lines(tmp_path):
     from paulsha_hippo.ledger import usage as usage_ledger
     diagnostics = usage_ledger.new_diagnostics()
     events = _read_usage_jsonl(path, since=None, diagnostics=diagnostics)
-    assert events == [{"ts": "2026-06-29T01:00:00Z"}]
+    assert iter(events) is events
+    assert list(events) == [{"ts": "2026-06-29T01:00:00Z"}]
     assert diagnostics["json_decode_error"] == 1
     assert diagnostics["non_object"] == 1
 
 
-def test_load_usage_rows_returns_bounded_diagnostics_without_changing_output(tmp_path):
+def test_load_usage_rows_returns_raw_iterators_and_bounded_diagnostics(tmp_path):
     led = tmp_path / "runtime" / "ledger"
     led.mkdir(parents=True)
     (led / "offered.jsonl").write_text("not-json\n", encoding="utf-8")
-    offered_rows, used_rows, applied_rows, diagnostics = _load_usage_rows(tmp_path, since=None)
-    assert offered_rows == []
-    assert used_rows == []
-    assert applied_rows == []
+    (led / "memory_usage.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-10T01:05:00Z",
+                "session_id": "s1",
+                "tool": "codex",
+                "sl_id": "sl-a",
+                "source": "read",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    offered_rows, usage_rows, diagnostics = _load_usage_rows(tmp_path, since=None)
+
+    assert iter(offered_rows) is offered_rows
+    assert iter(usage_rows) is usage_rows
+    assert list(offered_rows) == []
+    assert list(usage_rows) == [
+        {
+            "ts": "2026-07-10T01:05:00Z",
+            "session_id": "s1",
+            "tool": "codex",
+            "sl_id": "sl-a",
+            "source": "read",
+        }
+    ]
     assert diagnostics["json_decode_error"] == 1

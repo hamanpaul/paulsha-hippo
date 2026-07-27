@@ -392,7 +392,7 @@ class UsageBoostRankingTests(unittest.TestCase):
             _slice(root, "sl-1", "proj", "alpha", "alpha body")
             led = root / "runtime" / "ledger"
             led.mkdir(parents=True)
-            now = datetime.now(timezone.utc)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
             offer_ts = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
             read_ts_1 = (now - timedelta(hours=12)).isoformat().replace("+00:00", "Z")
             read_ts_2 = (now - timedelta(hours=6)).isoformat().replace("+00:00", "Z")
@@ -410,7 +410,12 @@ class UsageBoostRankingTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            search.build_index(root, link_weights={})
+            search.build_index(
+                root,
+                link_weights={},
+                usage_now=now,
+                usage_window_days=30,
+            )
 
             conn = sqlite3.connect(search.index_path(root))
             try:
@@ -489,6 +494,49 @@ class UsageBoostRankingTests(unittest.TestCase):
 
             self.assertEqual([item["slice_id"] for item in hits], ["sl-better", "sl-worse"])
 
+    def test_usage_boost_exact_tie_uses_base_score_then_slice_id(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            # Both rows have base_score=0.10, boost=0.01 and adjusted=0.09.
+            # Raw BM25 differs, so using BM25 as the second key incorrectly
+            # puts sl-z first instead of falling through to slice_id.
+            data_rows = [
+                ("sl-a", "proj", "a", 0.20, 1, 1, "/k/a.md", 1, None),
+                ("sl-z", "proj", "z", 0.10, 0, 1, "/k/z.md", 1, None),
+            ]
+            fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect", return_value=fake_conn,
+            ):
+                hits = search.search(
+                    root, "usage", project=None, limit=10, include_decayed=True
+                )
+
+            self.assertEqual([item["slice_id"] for item in hits], ["sl-a", "sl-z"])
+
+    def test_build_index_passes_injected_usage_clock_and_window(self):
+        fixed_now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                search.usage_ledger,
+                "collect_usage_reads",
+                wraps=search.usage_ledger.collect_usage_reads,
+            ) as collect:
+                search.build_index(
+                    root,
+                    link_weights={},
+                    usage_now=fixed_now,
+                    usage_window_days=7,
+                )
+
+            collect.assert_called_once_with(root, fixed_now, window_days=7)
+
     def test_no_positive_read_count_takes_legacy_fast_path(self):
         # Even with usage columns present, an all-zero read_count result set
         # must produce identical ordering to the pre-v5 legacy formula.
@@ -510,6 +558,33 @@ class UsageBoostRankingTests(unittest.TestCase):
                 hits = search.search(root, "usage", project=None, limit=10, include_decayed=True)
 
             self.assertEqual([item["slice_id"] for item in hits], ["sl-low", "sl-high"])
+
+    def test_no_boost_base_score_tie_preserves_legacy_input_order(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            # Equal legacy base score (0.10). The legacy one-key stable sort
+            # preserves query order; raw BM25/slice-id tie-breaks change it.
+            data_rows = [
+                ("sl-first", "proj", "first", 0.20, 1, 1, "/k/first.md", 0, None),
+                ("sl-second", "proj", "second", 0.10, 0, 1, "/k/second.md", 0, None),
+            ]
+            fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect", return_value=fake_conn,
+            ):
+                hits = search.search(
+                    root, "usage", project=None, limit=10, include_decayed=True
+                )
+
+            self.assertEqual(
+                [item["slice_id"] for item in hits],
+                ["sl-first", "sl-second"],
+            )
 
 
 class AtomicCoveragePublishTests(unittest.TestCase):

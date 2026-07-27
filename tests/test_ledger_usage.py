@@ -1,7 +1,9 @@
 # tests/test_ledger_usage.py
 from __future__ import annotations
 
+import gc
 import json
+import tracemalloc
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,20 +79,29 @@ class IterLedgerEventsFailSoftTests(unittest.TestCase):
             self.assertEqual(events, [])
             self.assertEqual(path.read_text(encoding="utf-8"), '{"ok":1}\n')
 
+    def test_exists_oserror_is_fail_soft(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            diag = usage_ledger.new_diagnostics()
+            with mock.patch.object(Path, "exists", side_effect=OSError("boom")):
+                self.assertEqual(
+                    list(usage_ledger.iter_ledger_events(path, diag)),
+                    [],
+                )
+
     def test_invalid_utf8_mid_file_is_fail_soft(self):
-        # A UnicodeDecodeError anywhere in the file must not raise out of
-        # iter_ledger_events (fail-soft); Python's buffered text reader may
-        # need to look ahead past a valid line to find the bad bytes, so the
-        # exact partial-recovery boundary isn't guaranteed — only that the
-        # generator terminates cleanly instead of propagating the exception.
+        # Decode must be per physical line: one poisoned row cannot make the
+        # text buffer discard valid rows before or after it.
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "ledger.jsonl"
             with path.open("wb") as fh:
                 fh.write(b'{"ok":1}\n')
                 fh.write(b"\xff\xfe not valid utf-8\n")
+                fh.write(b'{"ok":2}\n')
             diag = usage_ledger.new_diagnostics()
             events = list(usage_ledger.iter_ledger_events(path, diag))
-            self.assertIn(events, ([], [{"ok": 1}]))
+            self.assertEqual(events, [{"ok": 1}, {"ok": 2}])
+            self.assertEqual(diag["utf8_decode_error"], 1)
 
 
 class CollectUsageReadsTests(unittest.TestCase):
@@ -151,6 +162,103 @@ class CollectUsageReadsTests(unittest.TestCase):
                 "read_without_offered": 1,
             })
             self.assertEqual(diag, expected_diag)
+
+    def test_unknown_is_rejected_for_every_identity_component(self):
+        cases = (
+            ("(unknown)", "s1", "sl-a"),
+            ("codex", "(unknown)", "sl-a"),
+            ("codex", "s1", "(unknown)"),
+        )
+        for tool, session_id, slice_id in cases:
+            with self.subTest(tool=tool, session_id=session_id, slice_id=slice_id):
+                self.assertFalse(
+                    usage_ledger.valid_identity(tool, session_id, slice_id)
+                )
+
+    def test_out_of_window_and_future_offers_never_cross_match(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            offers = [
+                {
+                    "tool": "codex",
+                    "session_id": "old",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "offered": [{"sl_id": "sl-old"}],
+                },
+                {
+                    "tool": "codex",
+                    "session_id": "future",
+                    "ts": "2026-07-28T00:00:00Z",
+                    "offered": [{"sl_id": "sl-future"}],
+                },
+            ]
+            reads = [
+                {
+                    "tool": "codex",
+                    "session_id": "old",
+                    "sl_id": "sl-old",
+                    "source": "read",
+                    "ts": "2026-07-21T00:00:00Z",
+                },
+                {
+                    "tool": "codex",
+                    "session_id": "future",
+                    "sl_id": "sl-future",
+                    "source": "read",
+                    "ts": "2026-07-21T00:00:00Z",
+                },
+            ]
+            (led / "offered.jsonl").write_text(
+                "\n".join(json.dumps(event) for event in offers) + "\n",
+                encoding="utf-8",
+            )
+            (led / "memory_usage.jsonl").write_text(
+                "\n".join(json.dumps(event) for event in reads) + "\n",
+                encoding="utf-8",
+            )
+
+            result, diag = usage_ledger.collect_usage_reads(root, now)
+
+            self.assertEqual(result, {})
+            self.assertEqual(diag["window_older"], 1)
+            self.assertEqual(diag["future_event"], 1)
+            self.assertEqual(diag["read_without_offered"], 2)
+
+    def test_repeated_offers_for_one_identity_use_bounded_memory(self):
+        def peak_for(offer_count: int) -> int:
+            with TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                led = root / "runtime" / "ledger"
+                led.mkdir(parents=True)
+                event = {
+                    "tool": "codex",
+                    "session_id": "s1",
+                    "ts": "2026-07-20T00:00:00Z",
+                    "offered": [{"sl_id": "sl-a"}],
+                }
+                with (led / "offered.jsonl").open("w", encoding="utf-8") as handle:
+                    for _ in range(offer_count):
+                        handle.write(json.dumps(event) + "\n")
+                (led / "memory_usage.jsonl").write_text("", encoding="utf-8")
+                gc.collect()
+                tracemalloc.start()
+                usage_ledger.collect_usage_reads(
+                    root, datetime(2026, 7, 27, tzinfo=timezone.utc)
+                )
+                _current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+                return peak
+
+        small_peak = peak_for(100)
+        large_peak = peak_for(20_000)
+        self.assertLess(
+            large_peak,
+            small_peak + 200_000,
+            (small_peak, large_peak),
+        )
 
     def test_does_not_mutate_ledger_files(self):
         with TemporaryDirectory() as tmp:
