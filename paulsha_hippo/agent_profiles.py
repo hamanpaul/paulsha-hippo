@@ -73,12 +73,14 @@ class AgentRunError(RuntimeError):
         profile_id: str | None = None,
         exit_code: int | None = None,
         stderr: str = "",
+        output_bytes: int = 0,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.profile_id = profile_id
         self.exit_code = exit_code
         self.stderr = stderr
+        self.output_bytes = output_bytes
 
 
 ResponseValidator = Callable[[str], object]
@@ -435,6 +437,7 @@ class AgentRunResult:
     fallback_reason: str | None = None
     priority: int = 0
     response_schema: str = RESPONSE_SCHEMA_VERSION
+    output_bytes: int = 0
 
 
 def classify_failure(stderr: object, *, exit_code: int | None = None) -> str:
@@ -583,6 +586,7 @@ class ExternalAgentRouter:
                 category="invalid_output",
                 profile_id=profile.id,
                 stderr=sanitize_stderr(exc),
+                output_bytes=len(raw.encode("utf-8", errors="replace")),
             ) from exc
 
     @staticmethod
@@ -726,6 +730,7 @@ class ExternalAgentRouter:
                             profile_id=profile.id,
                             stderr=stderr,
                             exit_code=exit_code,
+                            output_bytes=len(raw.encode("utf-8", errors="replace")),
                         )
                     self._validate_response(profile, raw, response_validator)
                     outputs.append(raw)
@@ -746,6 +751,9 @@ class ExternalAgentRouter:
                     None if not attempts else "degraded-success",
                     profile.priority,
                     RESPONSE_SCHEMA_VERSION,
+                    output_bytes=sum(
+                        len(output.encode("utf-8", errors="replace")) for output in outputs
+                    ),
                 )
                 attempts.append(result)
                 self.last_result = result
@@ -759,6 +767,7 @@ class ExternalAgentRouter:
                         profile_id=profile.id,
                         exit_code=getattr(caught, "exit_code", None),
                         stderr=getattr(caught, "stderr", ""),
+                        output_bytes=int(getattr(caught, "output_bytes", 0) or 0),
                     )
                 category = self._transition_category(profile, caught)
                 self._last_error = caught
@@ -779,6 +788,7 @@ class ExternalAgentRouter:
                     None,
                     profile.priority,
                     RESPONSE_SCHEMA_VERSION,
+                    output_bytes=int(getattr(caught, "output_bytes", 0) or 0),
                 )
                 attempts.append(result)
                 self._circuit_open_until[profile.id] = time.monotonic() + 60.0

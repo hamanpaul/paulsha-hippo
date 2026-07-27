@@ -258,7 +258,7 @@ class LLMPromoter(Promoter):
             result = getattr(self._agent._inner, "last_result", None)
         return result if isinstance(result, AgentRunResult) else None
 
-    def _router_attempts(self) -> tuple[AgentRunResult, ...]:
+    def router_attempts(self) -> tuple[AgentRunResult, ...]:
         router = self._router()
         if router is not None:
             return tuple(
@@ -379,7 +379,7 @@ class LLMPromoter(Promoter):
                             router_result,
                             config_hash=self._config_hash,
                             skill_hash=sha256_text(self._skill),
-                            attempts=self._router_attempts(),
+                            attempts=self.router_attempts(),
                         )
                     )
                 return validator(raw)
@@ -539,7 +539,7 @@ class LLMPromoter(Promoter):
                         router_result,
                         config_hash=self._config_hash,
                         skill_hash=sha256_text(self._skill),
-                        attempts=self._router_attempts(),
+                        attempts=self.router_attempts(),
                     )
                 )
             return responses, cache_keys
@@ -547,7 +547,7 @@ class LLMPromoter(Promoter):
             raise PromoteError(
                 f"llm promote failed after session attempt(s): {exc}",
                 category=_failure_category(exc),
-                attempts=len(self._router_attempts()),
+                attempts=len(self.router_attempts()),
             ) from exc
 
     def promote(self, fragments: list[Fragment], config: AtomizerConfig) -> list[Slice]:
