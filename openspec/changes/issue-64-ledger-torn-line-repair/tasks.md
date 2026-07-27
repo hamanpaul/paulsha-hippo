@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 work_item: issue-64-ledger-torn-line-repair
 ---
 

@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-64-ledger-torn-line-repair
+---
+
 ## Context
 
 `runtime/ledger/import.jsonl` line 230 含 577 個 `\x00`，插在一筆 `copilot-cli:799ae7d0-1925-4545-b32b-0e3e146d74b5` 記錄中間。全行 1272 bytes，移除 NUL 後剩 695 bytes 的完整 JSON，`recorded_at` 與前後鄰居時間戳吻合。

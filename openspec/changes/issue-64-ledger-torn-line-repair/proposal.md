@@ -1,3 +1,8 @@
+---
+status: accepted
+work_item: issue-64-ledger-torn-line-repair
+---
+
 ## Why
 
 `runtime/ledger/import.jsonl` line 230 是一筆 2026-06-24 的撕裂寫入（577 個 `\x00` 插在一筆完好的 JSON 記錄中間），使 janitor 每輪回報 `skipped 1 bad line(s)`，經 `_run_pass` 的「warnings 非空即不 clean」判定，讓 `hippo dream run` 永久停在 `status: "partial"`、從未全綠。ledger 是 append-only，這行不會自己消失，而目前沒有任何檢查會指出它——這個瑕疵潛伏了 60 天，只能從一句 opaque 的 `partial` 反推。
