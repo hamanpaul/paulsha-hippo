@@ -20,6 +20,7 @@
 - Issue #18 closeout：同步並封存 `openspec/changes/archive/2026-07-26-issue-18-consumption-funnel-closeout` 的接受版 artifacts（`.openspec.yaml` / proposal / design / `stage2-memory-usage-telemetry/spec.md`）作為證據鏈一部；`test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command` 加強為直接驗證 matrix 契約文本（含命令與四項指標）與現有指標數據，不僅驗證指標存在；因 workflow 版本判定（PR-aware R-09 缺漏）令 v6 候選遭誤標 `superseded`，補建對應 changelog.d 前置文件（`issue-18-luna-closeout-followup-v7`），確保 `session citation`／`unique-slice coverage`／`offered-to-read conversion`／`applied` 四項語意的交付紀錄完整。
 - policy manifest 遷移為 `.project-policy.yml`，pin `paulsha-conventions` v1.0.14，並明列記憶政策的假 secret 測試 fixture（#48）。
 - 完成 `v0.1.1` readiness evidence、三輪自然排程 soak、published-wheel smoke 與 Issue #34/#39 OpenSpec archive closeout。
+- `reports/verify/release-readiness-matrix.json` 由 v0.1.1 candidate 重綁至 0.1.2 candidate（main HEAD `c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`），`wheel_sha256` 待建置故設為 `null`。16 個 gate 中僅 AR-01（全套測試）以候選 commit 的 CI 與本機乾淨環境實跑 attest 為 `passed`，其餘 15 個誠實改列 `pending` 並註明待補證據與重跑指令；`docs/release-readiness.md` 新增對應 0.1.2 小節，保留 0.1.1 歷史記載。
 
 ### Fixed
 - Janitor 不再把合法的 remote-form rich project ID 誤判為 `raw-remote-key`，避免已採 hashed directory key 的 atom 讓 Dream 永久降為 `partial`。
@@ -35,9 +36,6 @@
 
 ### Security
 - `agent_profiles.sanitize_stderr` 補上 redaction-先於-截斷（Codex 複驗 BLOCKING）：先前「先截斷（500 字元）才交給下游 `processing.sanitize_error_text` 做 secret redaction」的順序，會在 secret（如 GitHub PAT）跨越截斷邊界時把 token 腰斬成低於 redaction 規則最小長度的殘片，令比對失配、殘片明文落入 `runtime/queue/_failed/*.json`；現在 `sanitize_stderr` 在自身截斷之前就先套用同一份 baseline secret redaction，同時修好共用此函式的 `distiller.attempts` frontmatter 路徑同型風險。
-
-### Changed
-- `reports/verify/release-readiness-matrix.json` 由 v0.1.1 candidate 重綁至 0.1.2 candidate（main HEAD `c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`），`wheel_sha256` 待建置故設為 `null`。16 個 gate 中僅 AR-01（全套測試）以本地實跑 attest 為 `passed`，其餘 15 個誠實改列 `pending` 並註明待補證據與重跑指令；`docs/release-readiness.md` 新增對應 0.1.2 小節，保留 0.1.1 歷史記載。
 
 ## [0.1.1] - 2026-07-22
 
