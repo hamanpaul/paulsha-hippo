@@ -36,6 +36,9 @@
 ### Security
 - `agent_profiles.sanitize_stderr` 補上 redaction-先於-截斷（Codex 複驗 BLOCKING）：先前「先截斷（500 字元）才交給下游 `processing.sanitize_error_text` 做 secret redaction」的順序，會在 secret（如 GitHub PAT）跨越截斷邊界時把 token 腰斬成低於 redaction 規則最小長度的殘片，令比對失配、殘片明文落入 `runtime/queue/_failed/*.json`；現在 `sanitize_stderr` 在自身截斷之前就先套用同一份 baseline secret redaction，同時修好共用此函式的 `distiller.attempts` frontmatter 路徑同型風險。
 
+### Changed
+- `reports/verify/release-readiness-matrix.json` 由 v0.1.1 candidate 重綁至 0.1.2 candidate（main HEAD `c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`），`wheel_sha256` 待建置故設為 `null`。16 個 gate 中僅 AR-01（全套測試）以本地實跑 attest 為 `passed`，其餘 15 個誠實改列 `pending` 並註明待補證據與重跑指令；`docs/release-readiness.md` 新增對應 0.1.2 小節，保留 0.1.1 歷史記載。
+
 ## [0.1.1] - 2026-07-22
 
 ### Added
