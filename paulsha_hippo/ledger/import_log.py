@@ -63,7 +63,11 @@ def read_import_records(import_log_path: Path) -> list[dict]:
 
 
 def read_import_records_tolerant(import_log_path: Path) -> tuple[list[dict], int]:
-    """Read import records while skipping empty or malformed JSONL rows."""
+    """Read import records while skipping empty or malformed JSONL rows.
+
+    已進入 quarantine 清單的壞行不計入 bad_line_count（issue #64 雙邊隔離的
+    讀取端）。清單存在但不可解析時 fail-closed：壞行一律照計。
+    """
     if not import_log_path.exists():
         return [], 0
 
@@ -75,18 +79,26 @@ def read_import_records_tolerant(import_log_path: Path) -> tuple[list[dict], int
     if not content.strip():
         return [], 0
 
+    from . import integrity
+
+    quarantined = integrity.read_quarantine(import_log_path)
+    if quarantined is None:
+        quarantined = frozenset()
+
     records: list[dict] = []
     bad_line_count = 0
-    for line in content.splitlines():
-        line = line.strip()
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
         if not line:
-            bad_line_count += 1
+            if integrity.line_sha256(raw_line) not in quarantined:
+                bad_line_count += 1
             continue
 
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
-            bad_line_count += 1
+            if integrity.line_sha256(raw_line) not in quarantined:
+                bad_line_count += 1
             continue
 
         records.append(record)

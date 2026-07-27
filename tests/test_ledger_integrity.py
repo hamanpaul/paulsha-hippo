@@ -243,3 +243,37 @@ def test_backup_failure_aborts_before_touching_original(tmp_path, monkeypatch):
         integrity.repair_file(path, apply=True, now="2026-07-27T00:00:00Z")
 
     assert path.read_bytes() == original
+
+# ── Task 5：janitor 讀取端排除已隔離行 ────────────────────────────────────────
+from paulsha_hippo.ledger import import_log
+
+
+def test_quarantined_bad_line_is_not_counted(tmp_path):
+    good = json.dumps({"idempotency_key": "k", "status": "written"}, sort_keys=True)
+    broken = '{"n": '
+    path = _write_ledger(tmp_path, "import.jsonl", [good, broken])
+    integrity.append_quarantine(path, integrity.scan_file(path), now="2026-07-27T00:00:00Z")
+
+    records, bad = import_log.read_import_records_tolerant(path)
+
+    assert bad == 0
+    assert len(records) == 1
+
+
+def test_unquarantined_bad_line_is_still_counted(tmp_path):
+    good = json.dumps({"idempotency_key": "k", "status": "written"}, sort_keys=True)
+    path = _write_ledger(tmp_path, "import.jsonl", [good, '{"n": '])
+
+    _records, bad = import_log.read_import_records_tolerant(path)
+
+    assert bad == 1
+
+
+def test_corrupt_quarantine_list_fails_closed(tmp_path):
+    good = json.dumps({"idempotency_key": "k", "status": "written"}, sort_keys=True)
+    path = _write_ledger(tmp_path, "import.jsonl", [good, '{"n": '])
+    integrity.quarantine_path(path).write_text("這不是 JSON\n", encoding="utf-8")
+
+    _records, bad = import_log.read_import_records_tolerant(path)
+
+    assert bad == 1
