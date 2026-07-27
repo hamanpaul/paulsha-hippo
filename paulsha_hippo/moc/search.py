@@ -444,6 +444,8 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
     finally:
         conn.close()
     # rank: lower bm25 is better; add link_weight boost. (recency omitted for determinism in MVP test.)
-    ranked = sorted(rows, key=lambda r: (r[3] - 0.1 * (r[4] or 0)))
+    # stable key: (adjusted_score, base_score, slice_id) so usage-boost ties
+    # break on base_score/slice_id instead of falling back to insertion order.
+    ranked = sorted(rows, key=lambda r: (r[3] - 0.1 * (r[4] or 0), r[3], r[0]))
     return [{"slice_id": r[0], "project": r[1], "title": r[2], "score": r[3], "path": r[6]}
             for r in ranked[:limit]]
