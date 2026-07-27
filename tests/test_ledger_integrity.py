@@ -91,3 +91,41 @@ def test_scan_ledger_dir_ignores_quarantine_sidecars(tmp_path):
     _write_ledger(tmp_path, "import.jsonl.quarantine", ["not json at all"])
 
     assert integrity.scan_ledger_dir(tmp_path) == {}
+
+
+def test_read_quarantine_missing_returns_empty(tmp_path):
+    path = _write_ledger(tmp_path, "import.jsonl", [json.dumps({"n": 1})])
+    assert integrity.read_quarantine(path) == frozenset()
+
+
+def test_append_then_read_quarantine_roundtrip(tmp_path):
+    path = _write_ledger(tmp_path, "import.jsonl", ['{"n": '])
+    findings = integrity.scan_file(path)
+
+    written = integrity.append_quarantine(path, findings, now="2026-07-27T00:00:00Z")
+
+    assert written == 1
+    assert integrity.read_quarantine(path) == frozenset({findings[0].sha256})
+    record = json.loads(integrity.quarantine_path(path).read_text().splitlines()[0])
+    assert record["line_no"] == 1
+    assert record["sha256"] == findings[0].sha256
+    assert record["reason"] == "unparseable"
+    assert record["quarantined_at"] == "2026-07-27T00:00:00Z"
+
+
+def test_append_quarantine_is_idempotent(tmp_path):
+    path = _write_ledger(tmp_path, "import.jsonl", ['{"n": '])
+    findings = integrity.scan_file(path)
+    integrity.append_quarantine(path, findings, now="2026-07-27T00:00:00Z")
+
+    written = integrity.append_quarantine(path, findings, now="2026-07-27T01:00:00Z")
+
+    assert written == 0
+    assert len(integrity.quarantine_path(path).read_text().splitlines()) == 1
+
+
+def test_read_quarantine_corrupt_returns_none_fail_closed(tmp_path):
+    path = _write_ledger(tmp_path, "import.jsonl", ['{"n": '])
+    integrity.quarantine_path(path).write_text("這不是 JSON\n", encoding="utf-8")
+
+    assert integrity.read_quarantine(path) is None

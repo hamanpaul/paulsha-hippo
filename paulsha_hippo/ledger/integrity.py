@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,3 +95,64 @@ def scan_ledger_dir(memory_root: Path) -> dict[str, list[LineFinding]]:
         if findings:
             result[path.name] = findings
     return result
+
+
+def quarantine_path(ledger_path: Path) -> Path:
+    return ledger_path.with_name(ledger_path.name + QUARANTINE_SUFFIX)
+
+
+def read_quarantine(ledger_path: Path) -> frozenset[str] | None:
+    """已隔離行的 sha256 集合。
+
+    清單不存在 → 空集合。清單存在但任一行不可解析 → None，呼叫端必須
+    fail-closed（壞行一律照計），不得因清單不可讀而放行。
+    """
+    path = quarantine_path(ledger_path)
+    if not path.is_file():
+        return frozenset()
+    hashes: set[str] = set()
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        digest = record.get("sha256")
+        if not isinstance(digest, str) or not digest:
+            return None
+        hashes.add(digest)
+    return frozenset(hashes)
+
+
+def append_quarantine(ledger_path: Path, findings: list[LineFinding], *, now: str) -> int:
+    """把不可救回行記入 quarantine 清單，回傳實際新增筆數（已存在者不重複記）。"""
+    existing = read_quarantine(ledger_path)
+    if existing is None:
+        raise ValueError(f"quarantine 清單不可解析：{quarantine_path(ledger_path)}")
+    rows = [f for f in findings if f.classification == "unrecoverable" and f.sha256 not in existing]
+    if not rows:
+        return 0
+    path = quarantine_path(ledger_path)
+    with path.open("a", encoding="utf-8") as handle:
+        for finding in rows:
+            handle.write(
+                json.dumps(
+                    {
+                        "line_no": finding.line_no,
+                        "sha256": finding.sha256,
+                        "reason": finding.reason,
+                        "quarantined_at": now,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        handle.flush()
+        os.fsync(handle.fileno())
+    return len(rows)
