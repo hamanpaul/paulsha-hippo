@@ -6,12 +6,14 @@ lifecycle events.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from paulsha_hippo.janitor import record_source, rules
 from paulsha_hippo.janitor.config import JanitorConfig
 from paulsha_hippo.ledger import import_log, lifecycle
+from paulsha_hippo.ledger import usage as usage_ledger
 
 # Import statuses that carry new evidence and may reactivate a decayed record.
 _REACTIVATION_STATUSES = {"written", "updated"}
@@ -170,11 +172,30 @@ def run_scan(
     if import_bad_line_count:
         warnings.append(f"skipped {import_bad_line_count} bad line(s)")
 
+    # v5 requirement #9: fold last_read_at into janitor retention (ttl_base =
+    # max(captured_at, active_since_ts, valid last_read_at)); only ever
+    # applied to active records inside plan_scan, so a read can't reactivate
+    # an already-decayed one. Fail-soft/bounded and read-only against the
+    # ledger; a nonzero diagnostic is surfaced as a single warning (v5
+    # requirement: no zero-value warning noise).
+    now_dt = usage_ledger.parse_ts(now) or datetime.now(timezone.utc)
+    last_read_map_raw, usage_diag = usage_ledger.collect_usage_reads(memory_root, now_dt)
+    last_read_map = {sid: last_read for sid, (_count, last_read) in last_read_map_raw.items()}
+    nonzero_usage_diag = {key: count for key, count in usage_diag.items() if count > 0}
+    if nonzero_usage_diag:
+        warnings.append(f"usage ledger diagnostics: {nonzero_usage_diag}")
+
     # Plan scan
     if source_path_exists is None:
-        events = rules.plan_scan(records, import_index, lc_state, config, now, config_hash)
+        events = rules.plan_scan(
+            records, import_index, lc_state, config, now, config_hash,
+            last_read_map=last_read_map,
+        )
     else:
-        events = rules.plan_scan(records, import_index, lc_state, config, now, config_hash, source_path_exists)
+        events = rules.plan_scan(
+            records, import_index, lc_state, config, now, config_hash, source_path_exists,
+            last_read_map=last_read_map,
+        )
     lint_findings = rules.plan_lint(records)
     for finding in lint_findings:
         warnings.append(f"lint:{finding['rule']}: {finding['path']} (project={finding['project']})")

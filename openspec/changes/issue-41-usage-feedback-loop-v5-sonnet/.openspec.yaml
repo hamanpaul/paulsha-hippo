@@ -1,0 +1,10 @@
+status: accepted
+work_item: issue-41-usage-feedback-loop-v5-sonnet
+schema: spec-driven
+created: 2026-07-27
+supersedes: issue-41-usage-feedback-loop-v4
+lifecycle_base: b4a317f9bfa38708eabbdb31e083dfc3b6e4c044
+# Active pre-archive change: issue-41 v5 feedback loop authority
+# OpenSpec strict validation 必須識別 issue-41-usage-feedback-loop-v5-sonnet 為 active change。
+# Builder 需將 7 件 authority 與實作同 commit；Agy reviewer 需先讀取 frozen plan/authority。
+# v5 僅清除 v4 persisted-block 並改用 claude/claude-sonnet-5 builder；產品契約不變。

@@ -14,6 +14,30 @@
 - applied：`hippo usage mark-applied` 寫入的 `kind:"applied"` 明確是 explicit acknowledgement，不可當作 read/citation proxy（not a read or citation proxy）；有沒有 read 不會改寫已定義的 citation 與 conversion。
 - `--json` 是契約化輸出；`offered/read/applied` 是 runtime state，live counts are runtime state，文檔不得以 live counts 固定（not fixed）為 source contract。
 
+## usage feedback 對 retrieval / janitor 的影響
+
+- `read` 是同一 `(tool, logical session, slice_id)` 在合法 `offered` 之後，
+  由實際 Read tool 產生且落在觀測窗口內的事件；session citation 是由此
+  attribution 派生的 session-level 指標。`applied` 仍只是 agent 的顯式
+  acknowledgement，不是 read，也不是 citation proxy。
+- retrieval index rebuild 預設只聚合最近 30 天的合法 read；operator 或
+  測試可對 build 注入 UTC `usage_now` 與 `usage_window_days`，以相同
+  clock/window 重現同一份 index metadata。
+- ranking 使用
+  `base_score = bm25 - 0.1 * link_weight`、
+  `usage_boost = min(0.04, 0.01 * log2(1 + read_count))`、
+  `adjusted_score = base_score - usage_boost`。boost 上限 0.04，因此不會反轉
+  `base_score` 差距大於 0.04 的結果；沒有有效 read 時沿用 legacy stable
+  ordering。
+- janitor 的 TTL base 是
+  `max(captured_at, active_since_ts, valid last_read_at)`；read 只延長 active
+  slice 的 retention，不會復活 decayed slice，也不能蓋過
+  `superseded` / definite `source_invalid`。future 或窗口外 read 不構成
+  retention evidence。
+- ledger 解析採 binary per-line UTF-8 fail-soft：單一壞行、metadata/open/read
+  I/O 錯誤只增加固定鍵的 bounded diagnostics，其他合法行仍會處理；
+  scanner 只在 counter 大於零時輸出一則彙整 warning。ledger 全程唯讀。
+
 | 能力 | claude-code | codex | copilot-cli |
 |---|---|---|---|
 | session-start 注入 | supported（SessionStart，既有佈署） | inconclusive（文件列 `SessionStart`；headless probe 對照組未 fire） | supported（文件列 `sessionStart`/`SessionStart`；probe FIRED） |
