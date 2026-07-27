@@ -10,6 +10,11 @@
 ### Fixed
 - Janitor 不再把合法的 remote-form rich project ID 誤判為 `raw-remote-key`，避免已採 hashed directory key 的 atom 讓 Dream 永久降為 `partial`。
 - `moc.search.search()` 排序鍵改為 `(adjusted_score, base_score, slice_id)` 三段式穩定鍵；先前僅以單一 `bm25 - 0.1*link_weight` 鍵排序，usage boost 造成同分時退回插入序而非以 `base_score` 決勝，違反 issue #41 v5 排序不變式（BLOCKER #7）。
+- usage ledger（`offered.jsonl`／`memory_usage.jsonl`）解析改為逐行 streaming iterator，不再以 `Path.read_text().splitlines()` 一次載入整檔；I/O、UTF-8、單行 parse 錯誤 fail-soft 且不改寫 ledger；malformed/非 object/缺漏或空白身分/無效或窗口外時間戳改記入固定鍵集合的有界診斷 counter（issue #41 v5 BLOCKER #1–#4）。
+
+### Added
+- `moc.search` 新增 usage-boost 排序：`slice_meta` 增加 `read_count`／`last_read_at`，`search()` 對舊索引以 schema introspection fallback；`usage_boost = min(0.04, 0.01*log2(1+read_count))`，無正 boost 時走 legacy fast path，`base_score` 間距 > `0.04` 不被反轉。
+- janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`，`ttl_expired` detail 新增 `ttl_base`／`source`；`read` 只延長 active 記錄保留時鐘，不重新啟用已 decayed slice；scanner 新增 usage ledger 診斷警告，僅於 counter > 0 時輸出（issue #41 v5）。
 
 ## [0.1.1] - 2026-07-22
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from unittest import mock
 
-from paulsha_hippo.cli import _memory_usage
+from pathlib import Path
+
+from paulsha_hippo.cli import _load_usage_rows, _memory_usage, _read_usage_jsonl
 
 
 def test_memory_usage_read_based(tmp_path, capsys):
@@ -76,3 +79,35 @@ def test_memory_usage_text_mode_renders_applied_na(tmp_path, capsys):
     assert _memory_usage(args) == 0
     out = capsys.readouterr().out
     assert "tool=codex offered=1 read=0 applied=n/a" in out
+
+
+def test_read_usage_jsonl_never_calls_path_read_text(tmp_path):
+    # v5 BLOCKER #1 at the cli.py anchor: _read_usage_jsonl must stream via
+    # ledger.usage.iter_ledger_events, never Path.read_text().splitlines().
+    path = tmp_path / "offered.jsonl"
+    path.write_text(json.dumps({"ts": "2026-06-29T01:00:00Z"}) + "\n", encoding="utf-8")
+    with mock.patch.object(Path, "read_text", side_effect=AssertionError("must not read_text")):
+        events = _read_usage_jsonl(path, since=None)
+    assert events == [{"ts": "2026-06-29T01:00:00Z"}]
+
+
+def test_read_usage_jsonl_bounds_diagnostics_for_malformed_lines(tmp_path):
+    path = tmp_path / "memory_usage.jsonl"
+    path.write_text('{"ts":"2026-06-29T01:00:00Z"}\nnot-json\n[1,2]\n', encoding="utf-8")
+    from paulsha_hippo.ledger import usage as usage_ledger
+    diagnostics = usage_ledger.new_diagnostics()
+    events = _read_usage_jsonl(path, since=None, diagnostics=diagnostics)
+    assert events == [{"ts": "2026-06-29T01:00:00Z"}]
+    assert diagnostics["json_decode_error"] == 1
+    assert diagnostics["non_object"] == 1
+
+
+def test_load_usage_rows_returns_bounded_diagnostics_without_changing_output(tmp_path):
+    led = tmp_path / "runtime" / "ledger"
+    led.mkdir(parents=True)
+    (led / "offered.jsonl").write_text("not-json\n", encoding="utf-8")
+    offered_rows, used_rows, applied_rows, diagnostics = _load_usage_rows(tmp_path, since=None)
+    assert offered_rows == []
+    assert used_rows == []
+    assert applied_rows == []
+    assert diagnostics["json_decode_error"] == 1

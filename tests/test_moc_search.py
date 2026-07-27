@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -357,6 +358,158 @@ class SearchTests(unittest.TestCase):
                 )
             )
         return rows
+
+
+class UsageBoostRankingTests(unittest.TestCase):
+    """v5 requirement #7/#8: usage_boost ranking, 0.04 bound, legacy DB fallback."""
+
+    def test_legacy_db_without_usage_columns_falls_back(self):
+        # v5 requirement #8: a pre-v5 slice_meta (no read_count/last_read_at)
+        # must not crash search() — schema introspection detects the missing
+        # columns and falls back to the original 6-column query.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(index_path)
+            conn.execute("CREATE VIRTUAL TABLE slices_fts USING fts5("
+                         "slice_id UNINDEXED, project, title, tags, body, tokenize='unicode61')")
+            conn.execute("CREATE TABLE slice_meta (slice_id TEXT PRIMARY KEY, project TEXT, "
+                         "captured_at TEXT, active INTEGER, link_weight INTEGER, path TEXT)")
+            conn.execute("INSERT INTO slices_fts VALUES (?,?,?,?,?)",
+                         ("sl-1", "proj", "alpha", "", "alpha body"))
+            conn.execute("INSERT INTO slice_meta VALUES (?,?,?,?,?,?)",
+                         ("sl-1", "proj", "2026-01-01T00:00:00Z", 1, 0, "/k/alpha.md"))
+            conn.commit()
+            conn.close()
+
+            hits = search.search(root, "alpha", project=None, limit=5, include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
+
+    def test_build_index_populates_read_count_and_last_read_at(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            now = datetime.now(timezone.utc)
+            offer_ts = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            read_ts_1 = (now - timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+            read_ts_2 = (now - timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+            (led / "offered.jsonl").write_text(
+                json.dumps({"tool": "claude-code", "session_id": "s1", "ts": offer_ts,
+                            "offered": [{"sl_id": "sl-1"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (led / "memory_usage.jsonl").write_text(
+                "\n".join(
+                    json.dumps({"tool": "claude-code", "session_id": "s1", "sl_id": "sl-1",
+                                "source": "read", "ts": ts})
+                    for ts in (read_ts_1, read_ts_2)
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            search.build_index(root, link_weights={})
+
+            conn = sqlite3.connect(search.index_path(root))
+            try:
+                row = conn.execute(
+                    "SELECT read_count, last_read_at FROM slice_meta WHERE slice_id = ?",
+                    ("sl-1",),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(row[0], 2)
+            self.assertEqual(row[1], read_ts_2)
+
+    def _mock_usage_search(self, pragma_rows, data_rows):
+        def fake_execute(sql, params=None):
+            cursor = mock.MagicMock()
+            if "PRAGMA table_info" in sql:
+                cursor.fetchall.return_value = pragma_rows
+            else:
+                cursor.fetchall.return_value = data_rows
+            return cursor
+
+        fake_conn = mock.MagicMock()
+        fake_conn.execute.side_effect = fake_execute
+        return fake_conn
+
+    _USAGE_PRAGMA_ROWS = [
+        (0, "slice_id", "TEXT", 0, None, 1),
+        (1, "project", "TEXT", 0, None, 0),
+        (2, "captured_at", "TEXT", 0, None, 0),
+        (3, "active", "INTEGER", 0, None, 0),
+        (4, "link_weight", "INTEGER", 0, None, 0),
+        (5, "path", "TEXT", 0, None, 0),
+        (6, "read_count", "INTEGER", 1, "0", 0),
+        (7, "last_read_at", "TEXT", 0, None, 0),
+    ]
+
+    def test_usage_boost_orders_read_slice_ahead_of_equal_base_score(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            data_rows = [
+                ("sl-a", "proj", "a", 0.00, 0, 1, "/k/a.md", 0, None),
+                ("sl-b", "proj", "b", 0.00, 0, 1, "/k/b.md", 100, "2026-07-20T00:00:00Z"),
+            ]
+            fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect", return_value=fake_conn,
+            ):
+                hits = search.search(root, "usage", project=None, limit=10, include_decayed=True)
+
+            self.assertEqual([item["slice_id"] for item in hits], ["sl-b", "sl-a"])
+
+    def test_usage_boost_never_reverses_gt_0_04_base_score_gap(self):
+        # v5 requirement #7: usage_boost is capped at 0.04, so a >0.04 gap
+        # between base scores can never be reversed by the boost.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            data_rows = [
+                ("sl-worse", "proj", "w", 0.05, 0, 1, "/k/w.md", 10_000_000, "2026-07-20T00:00:00Z"),
+                ("sl-better", "proj", "b", 0.00, 0, 1, "/k/b.md", 0, None),
+            ]
+            fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect", return_value=fake_conn,
+            ):
+                hits = search.search(root, "usage", project=None, limit=10, include_decayed=True)
+
+            self.assertEqual([item["slice_id"] for item in hits], ["sl-better", "sl-worse"])
+
+    def test_no_positive_read_count_takes_legacy_fast_path(self):
+        # Even with usage columns present, an all-zero read_count result set
+        # must produce identical ordering to the pre-v5 legacy formula.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            data_rows = [
+                ("sl-high", "proj", "high", 0.10, 1, 1, "/k/high.md", 0, None),
+                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md", 0, None),
+            ]
+            fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect", return_value=fake_conn,
+            ):
+                hits = search.search(root, "usage", project=None, limit=10, include_decayed=True)
+
+            self.assertEqual([item["slice_id"] for item in hits], ["sl-low", "sl-high"])
 
 
 class AtomicCoveragePublishTests(unittest.TestCase):

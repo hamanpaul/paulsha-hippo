@@ -203,5 +203,65 @@ class LintFieldExtractionTests(unittest.TestCase):
         self.assertEqual(rules.plan_lint([record]), [])
 
 
+class UsageRetentionRuleTests(unittest.TestCase):
+    """v5 requirement #9: ttl_base = max(captured_at, active_since_ts, valid last_read_at)."""
+
+    def test_ttl_base_prefers_last_read_at_over_captured_at(self):
+        rec = _rec(captured="2020-01-01T00:00:00Z")
+        base_dt, source = rules._ttl_base(rec, {}, last_read_at="2026-06-01T00:00:00Z")
+        self.assertEqual(source, "last_read_at")
+        self.assertEqual(base_dt.isoformat(), "2026-06-01T00:00:00+00:00")
+
+    def test_ttl_base_ignores_stale_last_read_at(self):
+        rec = _rec(captured="2026-05-01T00:00:00Z")
+        base_dt, source = rules._ttl_base(rec, {}, last_read_at="2020-01-01T00:00:00Z")
+        self.assertEqual(source, "captured_at")
+        self.assertEqual(base_dt.isoformat(), "2026-05-01T00:00:00+00:00")
+
+    def test_recent_read_keeps_active_record_from_decaying(self):
+        # captured_at is ancient, but a read three days ago (< 90d threshold)
+        # extends the retention clock so the record must not decay.
+        events = rules.plan_scan(
+            [_rec(captured="2020-01-01T00:00:00Z")], {}, {}, CFG, NOW, HASH,
+            source_path_exists=_PATH_OK, last_read_map={"sl-1": "2026-05-28T00:00:00Z"},
+        )
+        self.assertEqual(events, [])
+
+    def test_ttl_expired_detail_records_ttl_base_and_source(self):
+        events = rules.plan_scan(
+            [_rec(captured="2020-01-01T00:00:00Z")], {}, {}, CFG, NOW, HASH,
+            source_path_exists=_PATH_OK, last_read_map={"sl-1": "2020-06-01T00:00:00Z"},
+        )
+        self.assertEqual(len(events), 1)
+        detail = events[0]["detail"]
+        self.assertEqual(detail["source"], "last_read_at")
+        self.assertEqual(detail["ttl_base"], "2020-06-01T00:00:00+00:00")
+
+    def test_read_does_not_reactivate_a_decayed_record(self):
+        # v5 requirement #9: a fresh last_read_at must never reactivate an
+        # already-decayed slice; only reimport events (_decide_reactivation)
+        # may do that. plan_scan only consults last_read_map for active
+        # records, so a decayed record stays decayed regardless of reads.
+        lc_state = {"sl-1": {"state": "decayed", "since_ts": "2026-03-01T00:00:00Z"}}
+        events = rules.plan_scan(
+            [_rec()], {}, lc_state, CFG, NOW, HASH, source_path_exists=_PATH_OK,
+            last_read_map={"sl-1": "2026-05-30T00:00:00Z"},
+        )
+        self.assertEqual(events, [])
+
+    def test_superseded_still_wins_over_fresh_last_read_at(self):
+        # Priority order (superseded > source_invalid > ttl) must not change
+        # just because the record has a recent read.
+        old = _rec(rid="sl-old", captured="2026-05-30T00:00:00Z")
+        new = _rec(rid="sl-new", supersedes=("sl-old",), captured="2026-05-30T00:00:00Z", source="claude:s2")
+        events = rules.plan_scan(
+            [old, new], {}, {}, CFG, NOW, HASH, source_path_exists=_PATH_OK,
+            last_read_map={"sl-old": "2026-05-30T00:00:00Z"},
+        )
+        decayed = [e for e in events if e["record_id"] == "sl-old"]
+        self.assertEqual(len(decayed), 1)
+        self.assertEqual(decayed[0]["reason"], "superseded")
+
+
 if __name__ == "__main__":
     unittest.main()

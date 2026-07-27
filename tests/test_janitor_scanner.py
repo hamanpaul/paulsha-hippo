@@ -130,5 +130,53 @@ class ScannerLintTests(unittest.TestCase):
             self.assertFalse([warning for warning in result["warnings"] if warning.startswith("lint:")])
 
 
+class UsageDiagnosticsWarningTests(unittest.TestCase):
+    """v5 requirement: usage-ledger diagnostics only warn when counter > 0."""
+
+    def test_clean_ledger_emits_no_usage_diagnostics_warning(self):
+        with TemporaryDirectory() as tmp:
+            root, kroot = _setup(tmp)
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            (led / "offered.jsonl").write_text(
+                json.dumps({"tool": "claude-code", "session_id": "s1",
+                            "ts": "2026-05-20T00:00:00Z", "offered": [{"sl_id": "sl-1"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (led / "memory_usage.jsonl").write_text(
+                json.dumps({"tool": "claude-code", "session_id": "s1", "sl_id": "sl-1",
+                            "source": "read", "ts": "2026-05-21T00:00:00Z"}) + "\n",
+                encoding="utf-8",
+            )
+            cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            result = scanner.run_scan(root, knowledge_root=kroot, config=cfg, config_hash=cfg_hash,
+                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True)
+            self.assertFalse(
+                [w for w in result["warnings"] if w.startswith("usage ledger diagnostics")]
+            )
+
+    def test_malformed_usage_ledger_emits_single_bounded_warning(self):
+        with TemporaryDirectory() as tmp:
+            root, kroot = _setup(tmp)
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            (led / "memory_usage.jsonl").write_text(
+                "not-json\n"
+                + json.dumps({"tool": "(unknown)", "session_id": "s1", "sl_id": "sl-1",
+                              "source": "read", "ts": "2026-05-21T00:00:00Z"}) + "\n",
+                encoding="utf-8",
+            )
+            cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            result = scanner.run_scan(root, knowledge_root=kroot, config=cfg, config_hash=cfg_hash,
+                                      now="2026-05-31T00:00:00Z", source_path_exists=lambda r: True)
+            usage_warnings = [w for w in result["warnings"] if w.startswith("usage ledger diagnostics")]
+            self.assertEqual(len(usage_warnings), 1)
+            self.assertIn("json_decode_error", usage_warnings[0])
+            self.assertIn("missing_tool", usage_warnings[0])
+            # ledger itself must be untouched by the scan
+            content = (led / "memory_usage.jsonl").read_text(encoding="utf-8")
+            self.assertTrue(content.startswith("not-json\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

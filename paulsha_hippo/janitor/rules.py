@@ -48,22 +48,36 @@ def _age_days(base: datetime, now: datetime) -> float:
     return delta.total_seconds() / 86400.0
 
 
-def _ttl_base(record: KnowledgeRecord, lc_info: dict[str, Any]) -> datetime | None:
-    """Determine TTL base timestamp for a record."""
+def _ttl_base(
+    record: KnowledgeRecord, lc_info: dict[str, Any], last_read_at: "str | None" = None,
+) -> "tuple[datetime, str] | None":
+    """Determine TTL base timestamp for a record and which input it came from.
+
+    v5 requirement #9: ``max(captured_at, active_since_ts, valid last_read_at)``
+    — a read only extends the retention clock of an already-active record
+    (this is only ever called for active records; decayed records go through
+    ``_decide_reactivation`` instead, so a read can never reactivate one).
+    """
     captured_dt = _parse_ts(record.captured_at)
     if captured_dt is None:
         return None
-    
+    base_dt, source = captured_dt, "captured_at"
+
     # Anti-flap: if record is active and since_ts is newer, use that
     state = lc_info.get("state", "active")
     if state == "active":
         since_ts = lc_info.get("since_ts")
         if since_ts:
             since_dt = _parse_ts(since_ts)
-            if since_dt and since_dt > captured_dt:
-                return since_dt
-    
-    return captured_dt
+            if since_dt and since_dt > base_dt:
+                base_dt, source = since_dt, "active_since_ts"
+
+    if last_read_at:
+        read_dt = _parse_ts(last_read_at)
+        if read_dt and read_dt > base_dt:
+            base_dt, source = read_dt, "last_read_at"
+
+    return base_dt, source
 
 
 def _decide_decay(
@@ -72,16 +86,23 @@ def _decide_decay(
     config: JanitorConfig,
     now: datetime,
     lc_info: dict[str, Any],
-    source_path_exists: SourcePathCheck
+    source_path_exists: SourcePathCheck,
+    last_read_at: "str | None" = None,
 ) -> dict[str, Any] | None:
-    """Decide if record should decay."""
+    """Decide if record should decay.
+
+    v5 requirement #9: ``superseded``/``source_invalid`` stay strictly higher
+    priority than ``ttl_expired`` (checked first, unconditionally on
+    ``last_read_at``) so a read can never keep an otherwise-superseded or
+    source-invalid record active.
+    """
     # Priority 1: superseded
     if config.decay_superseded and record.record_id in superseded_by:
         return {
             "reason": "superseded",
             "detail": {"superseded_by": superseded_by[record.record_id]}
         }
-    
+
     # Priority 2: source_invalid
     if config.check_provenance_path:
         path_result = source_path_exists(record)
@@ -90,22 +111,28 @@ def _decide_decay(
                 "reason": "source_invalid",
                 "detail": {"check": "provenance_path"}
             }
-    
+
     # Priority 3: ttl_expired
-    ttl_base = _ttl_base(record, lc_info)
-    if ttl_base is None:
+    ttl_result = _ttl_base(record, lc_info, last_read_at)
+    if ttl_result is None:
         return None
-    
+    ttl_base, ttl_source = ttl_result
+
     # Determine threshold
     threshold = config.default_decay_age_days
-    
+
     age = _age_days(ttl_base, now)
     if age > threshold:
         return {
             "reason": "ttl_expired",
-            "detail": {"age_days": age, "threshold_days": threshold}
+            "detail": {
+                "age_days": age,
+                "threshold_days": threshold,
+                "ttl_base": ttl_base.isoformat(),
+                "source": ttl_source,
+            }
         }
-    
+
     return None
 
 
@@ -208,13 +235,14 @@ def plan_scan(
     config: JanitorConfig,
     now: str,
     config_hash: str,
-    source_path_exists: SourcePathCheck = _default_source_path_exists
+    source_path_exists: SourcePathCheck = _default_source_path_exists,
+    last_read_map: "dict[str, str] | None" = None,
 ) -> list[dict[str, Any]]:
     """
     Plan decay/reactivation events for records.
-    
+
     Pure function that evaluates all records and returns event list.
-    
+
     Args:
         records: List of knowledge records to evaluate
         import_index: Mapping of source_key -> list of import events
@@ -223,10 +251,14 @@ def plan_scan(
         now: Current timestamp string (ISO format)
         config_hash: Hash of janitor config
         source_path_exists: Callable to check if source path exists
-    
+        last_read_map: record_id -> ISO ``last_read_at`` (v5 requirement #9);
+            only consulted for currently-active records, so a read can never
+            reactivate an already-decayed record.
+
     Returns:
         List of event dictionaries (decayed or reactivation)
     """
+    last_read_map = last_read_map or {}
     # Parse now with fallback
     now_dt = _parse_ts(now)
     if now_dt is None:
@@ -254,7 +286,10 @@ def plan_scan(
         
         if state == "active":
             # Evaluate decay
-            decision = _decide_decay(record, superseded_by, config, now_dt, lc_info, source_path_exists)
+            last_read_at = last_read_map.get(record.record_id)
+            decision = _decide_decay(
+                record, superseded_by, config, now_dt, lc_info, source_path_exists, last_read_at,
+            )
             if decision:
                 events.append(_decayed_event(record, decision, now, config_hash))
         else:

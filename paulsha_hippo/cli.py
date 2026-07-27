@@ -13,6 +13,7 @@ from typing import Sequence
 
 from paulsha_hippo import paths
 from . import policy as memory_policy
+from .ledger import usage as usage_ledger
 from .moc import frontmatter_io as _fio
 from .moc import moc_builder as _moc_builder
 from .noise import classify_noise
@@ -817,38 +818,46 @@ def _rekey(args: argparse.Namespace) -> int:
     return 0
 
 
-def _read_usage_jsonl(path: Path, since: str | None) -> list[dict]:
-    """Read one usage ledger without changing it, using the existing since rule."""
+def _read_usage_jsonl(path: Path, since: str | None,
+                       diagnostics: dict[str, int] | None = None) -> list[dict]:
+    """Read one usage ledger without changing it, using the existing since rule.
+
+    v5 BLOCKER #1/#4: streams the ledger one line at a time via
+    ``ledger.usage.iter_ledger_events`` (no ``Path.read_text().splitlines()``,
+    no whole-file list materialization); I/O, UTF-8 and per-line parse errors
+    are fail-soft and never mutate the ledger. Malformed/non-object lines are
+    tallied into ``diagnostics`` (v5 BLOCKER #2) when the caller supplies a
+    bounded counter dict; otherwise a scratch one is used and discarded.
+    """
+    diag = diagnostics if diagnostics is not None else usage_ledger.new_diagnostics()
     out = []
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            if since and str(event.get("ts", "")) < since:
-                continue
-            out.append(event)
+    for event in usage_ledger.iter_ledger_events(path, diag):
+        if since and str(event.get("ts", "")) < since:
+            continue
+        out.append(event)
     return out
 
 
-def _load_usage_rows(root: Path, since: str | None) -> tuple[list[dict], list[dict], list[dict]]:
-    """Load offered/read/applied rows with the same event filters as ``_memory_usage``."""
+def _load_usage_rows(
+    root: Path, since: str | None,
+) -> tuple[list[dict], list[dict], list[dict], dict[str, int]]:
+    """Load offered/read/applied rows with the same event filters as ``_memory_usage``.
+
+    The fourth return value is the bounded parse-diagnostics counter
+    (v5 BLOCKER #2) accumulated across both ledgers; callers that don't
+    surface it may discard it.
+    """
     led = root / "runtime" / "ledger"
-    offered_rows = _read_usage_jsonl(led / "offered.jsonl", since)
-    usage_rows = _read_usage_jsonl(led / "memory_usage.jsonl", since)
+    diagnostics = usage_ledger.new_diagnostics()
+    offered_rows = _read_usage_jsonl(led / "offered.jsonl", since, diagnostics)
+    usage_rows = _read_usage_jsonl(led / "memory_usage.jsonl", since, diagnostics)
     used_rows = [
         event
         for event in usage_rows
         if event.get("source") == "read" and event.get("kind") != "applied"
     ]
     applied_rows = [event for event in usage_rows if event.get("kind") == "applied"]
-    return offered_rows, used_rows, applied_rows
+    return offered_rows, used_rows, applied_rows, diagnostics
 
 
 def _offered_items(event: dict) -> list:
@@ -883,7 +892,7 @@ def _memory_usage(args: argparse.Namespace) -> int:
         return 2
 
     root = Path(args.memory_root)
-    offered_rows, used_rows, applied_rows = _load_usage_rows(root, args.since)
+    offered_rows, used_rows, applied_rows, _load_diagnostics = _load_usage_rows(root, args.since)
 
     agg = defaultdict(lambda: {"offered_count": 0, "read_count": 0, "last_read": ""})
     sessions = set()
@@ -1229,7 +1238,7 @@ def _memory_usage_funnel(args: argparse.Namespace) -> int:
         return 2
 
     root = Path(args.memory_root)
-    offered_rows, used_rows, applied_rows = _load_usage_rows(root, args.since)
+    offered_rows, used_rows, applied_rows, _load_diagnostics = _load_usage_rows(root, args.since)
 
     offered_sessions, offered_by_tool, offered_slices = _funnel_offer_index(
         offered_rows
@@ -1375,27 +1384,24 @@ def _usage_mark_applied(args: argparse.Namespace) -> int:
 
     寫入前反查 offered.jsonl：同 (session_id, tool) 必須存在先行 offered 記錄，且
     slice_id 必須屬於那些 offered slices，否則 exit 1 並拒絕寫入偽造事件。
+
+    v5 BLOCKER #1/#4：offered.jsonl 以逐行 iterator 讀取（不使用
+    ``Path.read_text().splitlines()``），I/O 與單行 parse 錯誤 fail-soft，且此
+    函式只讀取 offered.jsonl，不會改寫它。
     """
     led_dir = Path(args.memory_root) / "runtime" / "ledger"
     session_seen = False
     offered_slices: set[str] = set()
     offered_path = led_dir / "offered.jsonl"
-    if offered_path.exists():
-        for line in offered_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if e.get("session_id") != args.session_id or e.get("tool") != args.tool:
-                continue
-            session_seen = True
-            for offered in e.get("offered", []):
-                sid = offered.get("sl_id") if isinstance(offered, dict) else offered
-                if sid:
-                    offered_slices.add(str(sid))
+    diagnostics = usage_ledger.new_diagnostics()
+    for e in usage_ledger.iter_ledger_events(offered_path, diagnostics):
+        if e.get("session_id") != args.session_id or e.get("tool") != args.tool:
+            continue
+        session_seen = True
+        for offered in e.get("offered", []):
+            sid = offered.get("sl_id") if isinstance(offered, dict) else offered
+            if sid:
+                offered_slices.add(str(sid))
     if not session_seen:
         print(
             f"hippo usage mark-applied: error: 查無 (session_id={args.session_id}, "

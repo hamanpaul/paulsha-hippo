@@ -9,6 +9,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -17,6 +18,7 @@ from ..atomizer.publication import committed_publication_ids
 from ..importer.config import default_projects_path, load_projects_config
 from ..ledger import lifecycle
 from ..ledger import retrieval_set
+from ..ledger import usage as usage_ledger
 from ..noise import classify_noise, pool_exclude_reason
 from . import frontmatter_io as fio
 
@@ -244,10 +246,21 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
     try:
         conn.execute("CREATE VIRTUAL TABLE slices_fts USING fts5("
                      "slice_id UNINDEXED, project, title, tags, body, tokenize='unicode61')")
+        # read_count/last_read_at (v5): usage-boost aggregation for search()
+        # ranking; NOT NULL DEFAULT 0 / NULL so any row insert without usage
+        # data (the common case) is an explicit zero-boost row, and legacy
+        # readers of this table via schema introspection can still fall back.
         conn.execute("CREATE TABLE slice_meta (slice_id TEXT PRIMARY KEY, project TEXT, "
-                     "captured_at TEXT, active INTEGER, link_weight INTEGER, path TEXT)")
+                     "captured_at TEXT, active INTEGER, link_weight INTEGER, path TEXT, "
+                     "read_count INTEGER NOT NULL DEFAULT 0, last_read_at TEXT)")
         knowledge = memory_root / "knowledge"
         events = lifecycle.read_events(memory_root)
+        # v5 requirement #2/#9: read_count/last_read_at per slice, fed from the
+        # same identity+window-matched aggregation janitor retention uses
+        # (ledger.usage.collect_usage_reads); fail-soft/bounded, read-only.
+        usage_reads, _usage_diag = usage_ledger.collect_usage_reads(
+            memory_root, datetime.now(timezone.utc)
+        )
 
         def flush_batch(rows: list[tuple[str, str, str, str, str, str, str]]) -> None:
             if not rows:
@@ -265,10 +278,12 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
                  for sid, project, title, tags, body, _captured_at, _path in rows],
             )
             conn.executemany(
-                "INSERT INTO slice_meta VALUES (?,?,?,?,?,?)",
+                "INSERT INTO slice_meta VALUES (?,?,?,?,?,?,?,?)",
                 [
                     (sid, project, captured_at, 1 if sid in active else 0,
-                     link_weights.get(sid, 0), fpath)
+                     link_weights.get(sid, 0), fpath,
+                     usage_reads.get(sid, (0, None))[0],
+                     usage_reads.get(sid, (0, None))[1])
                     for sid, project, _title, _tags, _body, captured_at, fpath in rows
                 ],
             )
@@ -421,6 +436,28 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
     }
 
 
+def _slice_meta_has_usage_columns(conn: sqlite3.Connection) -> bool:
+    """v5 requirement #8: schema-introspection fallback for older ``slice_meta``.
+
+    A DB built before v5 has no ``read_count``/``last_read_at`` columns; rather
+    than an in-place migration, ``search()`` detects that via
+    ``PRAGMA table_info`` and falls back to the legacy (no-boost) query.
+    """
+    try:
+        columns = conn.execute("PRAGMA table_info(slice_meta)").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    names = {row[1] for row in columns if len(row) > 1}
+    return "read_count" in names and "last_read_at" in names
+
+
+def _row_read_count(row: tuple) -> int:
+    if len(row) <= 7:
+        return 0
+    value = row[7]
+    return value if isinstance(value, int) and value > 0 else 0
+
+
 def search(memory_root: Path, query: str, *, project: str | None, limit: int,
            include_decayed: bool) -> list[dict]:
     path = index_path(memory_root)
@@ -428,8 +465,10 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
         raise SearchIndexError("search index not built; run the dream/moc pass first")
     conn = sqlite3.connect(path)
     try:
-        sql = ("SELECT f.slice_id, m.project, f.title, bm25(slices_fts) AS bm, "
-               "m.link_weight, m.active, m.path "
+        has_usage_cols = _slice_meta_has_usage_columns(conn)
+        usage_select = ", m.read_count, m.last_read_at" if has_usage_cols else ""
+        sql = (f"SELECT f.slice_id, m.project, f.title, bm25(slices_fts) AS bm, "
+               f"m.link_weight, m.active, m.path{usage_select} "
                "FROM slices_fts f JOIN slice_meta m ON m.slice_id = f.slice_id "
                "WHERE slices_fts MATCH ?")
         params: list[object] = [query]
@@ -446,6 +485,23 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
     # rank: lower bm25 is better; add link_weight boost. (recency omitted for determinism in MVP test.)
     # stable key: (adjusted_score, base_score, slice_id) so usage-boost ties
     # break on base_score/slice_id instead of falling back to insertion order.
-    ranked = sorted(rows, key=lambda r: (r[3] - 0.1 * (r[4] or 0), r[3], r[0]))
+    #
+    # v5 requirement #7: with usage_boost = min(0.04, 0.01*log2(1+read_count))
+    # subtracted from the base score, a >0.04 gap between two rows' base
+    # scores can never reverse (the boost is capped at 0.04 on each side), so
+    # no extra ordering guard is needed beyond the cap itself. When no row in
+    # the result set has a positive read_count (including legacy DBs without
+    # the usage columns at all), sorting takes the original legacy fast path
+    # unchanged instead of computing a boost that would always be zero.
+    if not has_usage_cols or not any(_row_read_count(r) > 0 for r in rows):
+        ranked = sorted(rows, key=lambda r: (r[3] - 0.1 * (r[4] or 0), r[3], r[0]))
+    else:
+        def _sort_key(row: tuple) -> tuple[float, float, str]:
+            bm = row[3]
+            base_score = bm - 0.1 * (row[4] or 0)
+            boost = usage_ledger.usage_boost(_row_read_count(row))
+            return (base_score - boost, bm, row[0])
+
+        ranked = sorted(rows, key=_sort_key)
     return [{"slice_id": r[0], "project": r[1], "title": r[2], "score": r[3], "path": r[6]}
             for r in ranked[:limit]]
