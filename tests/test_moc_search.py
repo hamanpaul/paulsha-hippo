@@ -33,6 +33,34 @@ class SearchTests(unittest.TestCase):
             self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
             self.assertIn("project", hits[0])
 
+    def test_search_stable_sort_uses_base_score_before_slice_id(self):
+        # v5 plan BLOCKER #7：有 usage boost 時排序鍵須為
+        # (adjusted_score, base_score, slice_id)，同分時以 base_score 決勝，
+        # 而非退回目前實作僅用 (bm - 0.1*link_weight) 單一鍵造成的插入序。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = search.index_path(root)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text("mock-db", encoding="utf-8")
+
+            # Same adjusted score (0.0), but different base score.
+            rows = [
+                ("sl-high", "proj", "high", 0.10, 1, 1, "/k/high.md"),
+                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md"),
+            ]
+            cursor = mock.MagicMock()
+            cursor.fetchall.return_value = rows
+            fake_conn = mock.MagicMock()
+            fake_conn.execute.return_value = cursor
+
+            with mock.patch(
+                "paulsha_hippo.moc.search.sqlite3.connect",
+                return_value=fake_conn,
+            ):
+                hits = search.search(root, "usage", project=None, limit=10, include_decayed=True)
+
+            self.assertEqual([item["slice_id"] for item in hits], ["sl-low", "sl-high"])
+
     def test_missing_index_raises(self):
         with TemporaryDirectory() as tmp:
             with self.assertRaises(search.SearchIndexError):
