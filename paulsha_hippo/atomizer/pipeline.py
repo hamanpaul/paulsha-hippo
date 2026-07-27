@@ -23,8 +23,12 @@ LOGGER = logging.getLogger(__name__)
 _ATOMIZER_INBOX_FILE_MAX_BYTES = 64 * 1024 * 1024
 # park evidence 的 attempts_detail.stderr_tail 上限（issue #69 子項 A）。router
 # 已在建構 AgentRunResult 時以 sanitize_stderr 套用 500 字元上限；這裡再用既有的
-# secret-redaction 錯誤文字淨化（sanitize_error_text）覆蓋一次並以本上限截斷，
-# 是 park evidence 落盤前唯一的 choke point，不依賴上游是否已經夠短。
+# secret-redaction 錯誤文字淨化（sanitize_error_text）覆蓋一次並以本上限截斷。
+# 兩層都遵循「redaction 先於截斷」的契約：sanitize_stderr 本身已在其 500 字元
+# 截斷之前先套用 baseline secret redaction（Codex 複驗 BLOCKING 修復——先前
+# 「先截斷才 redact」會把跨邊界的 secret 腰斬成殘片致比對失配），本函式在此
+# 之上再覆蓋一次、以本上限截斷，是 park evidence 落盤前的第二層 choke point，
+# 但不再是唯一防線；即使上游意外沒截夠短，這裡的 redact-先於-截斷仍會擋下。
 _ATTEMPTS_DETAIL_STDERR_LIMIT = 2000
 
 
@@ -203,14 +207,20 @@ def _read_attempts(counter: Path) -> int:
 def _attempt_failure_kind(category: str | None, exit_code: int | None) -> str:
     """Map one router attempt's bounded diagnostics to a park-evidence failure_kind.
 
-    ``timeout``／``empty_output``／``invalid_output`` already carry an unambiguous
-    router category. A nonzero exit code that fell through those (e.g. a bare
-    ``process`` category) is a genuine ``nonzero_exit``. Anything left——no exit
-    code and no specific category (missing executable races, subprocess-level
-    decode failures)——has no exit-code signal at all and is reported as
+    ``timeout``／``empty_output``／``invalid_output``／``ineligible``／``budget``
+    already carry an unambiguous router category and are passed through
+    unchanged. ``ineligible`` (profile enabled but not currently runnable, e.g.
+    missing executable) and ``budget`` (session deadline／call budget
+    exhausted) are router-internal classifications that never spawn a
+    subprocess——``exit_code`` is always ``None`` for them——so fallback-mapping
+    them would mislabel a routing decision as a subprocess decode failure. A
+    nonzero exit code that fell through those (e.g. a bare ``process``
+    category) is a genuine ``nonzero_exit``. Anything left——no exit code and
+    no specific category (missing executable races, subprocess-level decode
+    failures)——has no exit-code signal at all and is reported as
     ``decode_error`` so it stays distinguishable from a clean nonzero exit.
     """
-    if category in {"timeout", "empty_output", "invalid_output"}:
+    if category in {"timeout", "empty_output", "invalid_output", "ineligible", "budget"}:
         return category
     if exit_code is not None and exit_code != 0:
         return "nonzero_exit"

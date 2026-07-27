@@ -160,6 +160,50 @@ class ParkEvidenceAttemptsDetailTests(unittest.TestCase):
         self.assertEqual(attempt["failure_kind"], "timeout")
         self.assertLessEqual(len(attempt["stderr_tail"]), 2000)
 
+    def test_secret_spanning_truncation_boundary_is_fully_redacted(self):
+        # Codex 複驗 BLOCKING boundary-bisection 案例，走完整 park evidence 路徑：
+        # fake agent 吐出「490 字元 padding + 44 字元 ghp_ token」的 stderr，
+        # 若兩層 sanitize（agent_profiles.sanitize_stderr 先截斷、
+        # processing.sanitize_error_text 後 redact）順序有缺，token 會在
+        # sanitize_stderr 就被腰斬成低於 github_pat 規則最小長度的殘片，
+        # 令下游 redaction 比對不到，殘片明文落入 attempts_detail.stderr_tail。
+        token = "ghp_" + "A1b2C3d4" * 5
+        padding = "x" * 490
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            script = _write_fake_agent(
+                tmp_path,
+                "fake-secret-boundary.sh",
+                "#!/bin/sh\ncat >/dev/null\n"
+                f"echo '{padding} {token} trailing' >&2\n"
+                "exit 2\n",
+            )
+            payload = self._run_once(tmp_path, script)
+
+        detail = payload["attempts_detail"]
+        self.assertEqual(len(detail), 1)
+        attempt = detail[0]
+        self.assertEqual(attempt["failure_kind"], "nonzero_exit")
+        self.assertNotIn("ghp_", attempt["stderr_tail"])
+        self.assertNotIn("ghp_", json.dumps(payload))
+
+
+class AttemptFailureKindMappingTests(unittest.TestCase):
+    """非阻擋修正 1：router 內部分類（從未 spawn subprocess）不得誤標 decode_error。
+
+    ``ineligible``（profile 啟用但目前不可執行，如 executable 缺失）與
+    ``budget``（deadline／call budget 耗盡）都是 router 自己的判斷，從未
+    spawn 過子行程——``exit_code`` 恆為 ``None``。舊行為把這兩類 fallback
+    成 ``decode_error``，誤導值班者以為是子行程解碼失敗；已帶明確語意的
+    category 必須直接透傳為 failure_kind。
+    """
+
+    def test_ineligible_category_passes_through_unchanged(self):
+        self.assertEqual(pipeline._attempt_failure_kind("ineligible", None), "ineligible")
+
+    def test_budget_category_passes_through_unchanged(self):
+        self.assertEqual(pipeline._attempt_failure_kind("budget", None), "budget")
+
 
 if __name__ == "__main__":
     unittest.main()

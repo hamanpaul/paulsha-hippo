@@ -536,6 +536,14 @@ class DoctorBackendProbeTests(unittest.TestCase):
             self._doctor_with_command(("/bin/sh", "-c", r'printf "\377\376\200\201" >&2')),
             1,
         )
+        # 非阻擋修正 2：這是 exec 層故障（decode 於 subprocess.run() 內部拋出，
+        # 根本沒走到 JSON 解析），kind 必須回報 "exec_error"、不得誤標
+        # "invalid_json"（釘住這個選擇，避免與真正「回應不是單一 JSON」混淆）。
+        ok, detail, kind = ops._exec_probe_service_effective(
+            ["/bin/sh", "-c", r'printf "\377\376\200\201"'], {"PATH": "/usr/bin:/bin"})
+        self.assertFalse(ok)
+        self.assertEqual(kind, "exec_error")
+        self.assertTrue(detail)
 
     def test_probe_smoke_prompt_requests_single_json(self):
         # #69 子項 B：smoke prompt 必須要求單一 JSON，而非只求「有回應」——

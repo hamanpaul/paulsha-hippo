@@ -759,7 +759,7 @@ def _exec_probe_service_effective(command: list[str], probe_env: dict[str, str],
         # 內拋 UnicodeDecodeError（ValueError 子類，非 OSError）。此正是本 probe
         # 要偵測的故障類；比照恢復 gate fail-closed 語意判 FAIL，不得逸出崩潰 CLI。
         return False, (f"exec 失敗：backend 輸出非 UTF-8 位元組"
-                       f"（跑錯 binary／crash dump／locale 錯亂；fail-closed）：{exc}"), "invalid_json"
+                       f"（跑錯 binary／crash dump／locale 錯亂；fail-closed）：{exc}"), "exec_error"
     if completed.returncode != 0:
         stderr_tail = " ".join(str(completed.stderr or "").split())[:200]
         return False, (f"exit {completed.returncode}（smoke prompt 失敗；"
