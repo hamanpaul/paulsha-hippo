@@ -9,12 +9,12 @@
 
 ### Fixed
 - Janitor 不再把合法的 remote-form rich project ID 誤判為 `raw-remote-key`，避免已採 hashed directory key 的 atom 讓 Dream 永久降為 `partial`。
-- `moc.search.search()` 排序鍵改為 `(adjusted_score, base_score, slice_id)` 三段式穩定鍵；先前僅以單一 `bm25 - 0.1*link_weight` 鍵排序，usage boost 造成同分時退回插入序而非以 `base_score` 決勝，違反 issue #41 v5 排序不變式（BLOCKER #7）。
-- usage ledger（`offered.jsonl`／`memory_usage.jsonl`）解析改為逐行 streaming iterator，不再以 `Path.read_text().splitlines()` 一次載入整檔；I/O、UTF-8、單行 parse 錯誤 fail-soft 且不改寫 ledger；malformed/非 object/缺漏或空白身分/無效或窗口外時間戳改記入固定鍵集合的有界診斷 counter（issue #41 v5 BLOCKER #1–#4）。
+- `moc.search.search()` 有 boost 時使用 `(adjusted_score, base_score, slice_id)` 穩定鍵，無有效 boost（含舊 schema fallback）則維持 legacy base-score one-key stable ordering。
+- usage ledger（`offered.jsonl`／`memory_usage.jsonl`）改為 binary per-line UTF-8 streaming；metadata/open/read、decode 與單行 parse 錯誤 fail-soft 且不改寫 ledger，壞行不再吞掉周邊合法行。offered/read 的未來、窗口外時間與 `(unknown)` tool/session/slice identity 一律排除並記固定鍵 bounded diagnostics。
 
 ### Added
-- `moc.search` 新增 usage-boost 排序：`slice_meta` 增加 `read_count`／`last_read_at`，`search()` 對舊索引以 schema introspection fallback；`usage_boost = min(0.04, 0.01*log2(1+read_count))`，無正 boost 時走 legacy fast path，`base_score` 間距 > `0.04` 不被反轉。
-- janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`，`ttl_expired` detail 新增 `ttl_base`／`source`；`read` 只延長 active 記錄保留時鐘，不重新啟用已 decayed slice；scanner 新增 usage ledger 診斷警告，僅於 counter > 0 時輸出（issue #41 v5）。
+- `moc.search` 新增可注入 UTC `usage_now`／`usage_window_days` 的 usage-boost index metadata；預設窗口 30 天，`usage_boost = min(0.04, 0.01*log2(1+read_count))`，`base_score` 間距 > `0.04` 不被反轉。
+- janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`；future read 不得延長 TTL，`superseded`／`source_invalid` 優先序與 read 不 reactivation 維持不變。CLI usage/funnel 以 one-shot raw iterators 折疊 compact per-session/per-slice state，不再保留 ledger-wide raw row lists。
 
 ## [0.1.1] - 2026-07-22
 

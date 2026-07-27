@@ -44,7 +44,11 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 6. [GREEN] Codex native subagent 修復 RED；保留 #18 funnel/applied、
    hook/argv/runtime safety、legacy DB、flock/temp/atomic replace 與 janitor
    優先序。
+   - [x] binary per-line fail-soft、bounded identity/window aggregation、
+     compact CLI folds、injectable index clock/window、ranking/TTL 修正完成。
+   - [x] focused：`91 passed, 3 subtests passed`。
 7. [GREEN] 交付前 run：
+   - [x] focused issue #41 suite
    - `pytest --ignore=tests/installed`
    - installed-fixture wheel gate（於正確 built-wheel 環境）
    - `openspec validate issue-41-usage-feedback-loop-v5-sonnet --strict`

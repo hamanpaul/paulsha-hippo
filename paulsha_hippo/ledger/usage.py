@@ -21,6 +21,8 @@ from typing import Iterator
 # the key set itself never grows, so counters stay bounded regardless of how
 # many distinct malformed inputs are seen.
 DIAG_KEYS = (
+    "io_error",
+    "utf8_decode_error",
     "json_decode_error",
     "non_object",
     "missing_tool",
@@ -56,20 +58,27 @@ def iter_ledger_events(path: Path, diagnostics: dict[str, int]) -> "Iterator[dic
     opened for reading here, so a bad read can never mutate it, and whatever
     lines were already readable are still yielded before/around the failure.
     """
-    if not path.exists():
-        return
     try:
-        handle = path.open("r", encoding="utf-8")
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return
     except OSError:
+        diagnostics["io_error"] += 1
         return
     try:
         while True:
             try:
-                line = handle.readline()
-            except (OSError, UnicodeDecodeError):
+                raw_line = handle.readline()
+            except OSError:
+                diagnostics["io_error"] += 1
                 return
-            if line == "":
+            if raw_line == b"":
                 return
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError:
+                diagnostics["utf8_decode_error"] += 1
+                continue
             line = line.strip()
             if not line:
                 continue
@@ -104,14 +113,12 @@ def parse_ts(value: object) -> "datetime | None":
 
 def valid_identity(tool: object, session_id: object, slice_id: object) -> bool:
     """v5 BLOCKER #3: ``(unknown)``/blank tool, session or slice id can't identify anything."""
-    tool_str = str(tool or "").strip()
-    if not tool_str or tool_str == "(unknown)":
-        return False
-    if not str(session_id or "").strip():
-        return False
-    if not str(slice_id or "").strip():
-        return False
-    return True
+    values = (
+        str(tool or "").strip(),
+        str(session_id or "").strip(),
+        str(slice_id or "").strip(),
+    )
+    return all(value and value != "(unknown)" for value in values)
 
 
 def usage_boost(read_count: int) -> float:
@@ -126,7 +133,7 @@ def _classify_missing_identity(diagnostics: dict[str, int], tool: object,
     tool_str = str(tool or "").strip()
     if not tool_str or tool_str == "(unknown)":
         diagnostics["missing_tool"] += 1
-    elif not str(session_id or "").strip():
+    elif not str(session_id or "").strip() or str(session_id).strip() == "(unknown)":
         diagnostics["missing_session"] += 1
     else:
         diagnostics["missing_sl_id"] += 1
@@ -151,7 +158,7 @@ def collect_usage_reads(
     diagnostics = new_diagnostics()
     window_start = now - timedelta(days=window_days)
 
-    offered_index: dict[tuple[str, str, str], list[datetime]] = {}
+    offered_index: dict[tuple[str, str, str], datetime] = {}
     for event in iter_ledger_events(led / "offered.jsonl", diagnostics):
         tool = event.get("tool")
         session_id = event.get("session_id")
@@ -162,13 +169,21 @@ def collect_usage_reads(
         if offer_ts is None:
             diagnostics["invalid_ts"] += 1
             continue
+        if offer_ts > now:
+            diagnostics["future_event"] += 1
+            continue
+        if offer_ts < window_start:
+            diagnostics["window_older"] += 1
+            continue
         for item in offered_list:
             slice_id = item.get("sl_id") if isinstance(item, dict) else item
             if not valid_identity(tool, session_id, slice_id):
                 _classify_missing_identity(diagnostics, tool, session_id, slice_id)
                 continue
             key = (str(tool), str(session_id), str(slice_id))
-            offered_index.setdefault(key, []).append(offer_ts)
+            prior = offered_index.get(key)
+            if prior is None or offer_ts < prior:
+                offered_index[key] = offer_ts
 
     counts: dict[str, int] = {}
     last_read: dict[str, datetime] = {}
@@ -192,8 +207,8 @@ def collect_usage_reads(
             diagnostics["window_older"] += 1
             continue
         key = (str(tool), str(session_id), str(slice_id))
-        offer_times = offered_index.get(key)
-        if not offer_times or not any(offer_ts < read_ts for offer_ts in offer_times):
+        offer_ts = offered_index.get(key)
+        if offer_ts is None or offer_ts >= read_ts:
             diagnostics["read_without_offered"] += 1
             continue
         sid = str(slice_id)

@@ -178,8 +178,14 @@ def _tags_fts_text(tags: object) -> "str | None":
     return None
 
 
-def build_index(memory_root: Path, link_weights: dict[str, int],
-                doc_corpus: "object | None" = None) -> dict[str, object]:
+def build_index(
+    memory_root: Path,
+    link_weights: dict[str, int],
+    doc_corpus: "object | None" = None,
+    *,
+    usage_now: "datetime | None" = None,
+    usage_window_days: int = usage_ledger.USAGE_BOOST_WINDOW_DAYS,
+) -> dict[str, object]:
     """建 retrieval index（temp DB + atomic replace）並回傳 coverage 報表。
 
     回傳 dict（跨批次契約 #6）：六欄 ``scanned / invalid_frontmatter /
@@ -211,12 +217,25 @@ def build_index(memory_root: Path, link_weights: dict[str, int],
     per-invocation 唯一暫存路徑 + atomic replace——讀者（search()）永遠
     只看到完整舊版或完整新版索引。
     """
+    effective_usage_now = usage_now or datetime.now(timezone.utc)
     with _index_write_lock(memory_root):
-        return _build_index_locked(memory_root, link_weights, doc_corpus)
+        return _build_index_locked(
+            memory_root,
+            link_weights,
+            doc_corpus,
+            usage_now=effective_usage_now,
+            usage_window_days=usage_window_days,
+        )
 
 
-def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
-                        doc_corpus: "object | None") -> dict[str, object]:
+def _build_index_locked(
+    memory_root: Path,
+    link_weights: dict[str, int],
+    doc_corpus: "object | None",
+    *,
+    usage_now: datetime,
+    usage_window_days: int,
+) -> dict[str, object]:
     path = index_path(memory_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     # 持鎖中無其他活 writer：目錄裡任何 *.tmp 都是 crash 殘留的半成品
@@ -259,7 +278,7 @@ def _build_index_locked(memory_root: Path, link_weights: dict[str, int],
         # same identity+window-matched aggregation janitor retention uses
         # (ledger.usage.collect_usage_reads); fail-soft/bounded, read-only.
         usage_reads, _usage_diag = usage_ledger.collect_usage_reads(
-            memory_root, datetime.now(timezone.utc)
+            memory_root, usage_now, window_days=usage_window_days
         )
 
         def flush_batch(rows: list[tuple[str, str, str, str, str, str, str]]) -> None:
@@ -494,13 +513,15 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
     # the usage columns at all), sorting takes the original legacy fast path
     # unchanged instead of computing a boost that would always be zero.
     if not has_usage_cols or not any(_row_read_count(r) > 0 for r in rows):
-        ranked = sorted(rows, key=lambda r: (r[3] - 0.1 * (r[4] or 0), r[3], r[0]))
+        # Any result without an effective usage signal follows the original
+        # one-key stable sort exactly, including pre-v5 schema fallback.
+        ranked = sorted(rows, key=lambda r: r[3] - 0.1 * (r[4] or 0))
     else:
         def _sort_key(row: tuple) -> tuple[float, float, str]:
             bm = row[3]
             base_score = bm - 0.1 * (row[4] or 0)
             boost = usage_ledger.usage_boost(_row_read_count(row))
-            return (base_score - boost, bm, row[0])
+            return (base_score - boost, base_score, row[0])
 
         ranked = sorted(rows, key=_sort_key)
     return [{"slice_id": r[0], "project": r[1], "title": r[2], "score": r[3], "path": r[6]}

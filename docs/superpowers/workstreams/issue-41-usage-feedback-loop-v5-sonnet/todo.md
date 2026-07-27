@@ -32,10 +32,11 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 
 - [x] planning authority 7 件建立。
 - [x] initial candidate `6af69a4` 已建立，但 exact-candidate audit 判定未完成。
-- [x] direct RED regressions 完成：focused run 為 `14 failed, 72 passed,
+- [x] direct RED regressions 完成：focused run 為 `14 failed, 79 passed,
   1 subtests passed`，並確認均在 `6af69a4` call chain 失敗。
-- [ ] Codex subagent GREEN implementation 完成。
-- [ ] focused / full / installed-wheel tests 通過。
+- [x] Codex subagent bounded GREEN implementation 完成。
+- [x] focused tests：`91 passed, 3 subtests passed`。
+- [ ] full / installed-wheel tests 通過。
 - [ ] OpenSpec / policy / diff / preflight-ci gates 通過。
 - [ ] PR current-head review/checks 通過並 merge。
 
@@ -51,20 +52,20 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
 
 ## 需求缺口（只列 BLOCKER/MAJOR）
 
-- [ ] BLOCKER：I/O/UTF-8/single-line parse fail-soft 全流程
-- [ ] BLOCKER：malformed/non-object/missing key/timestamp/window 規則與 fixed counter
-- [ ] BLOCKER：`Path.read_text` 失敗與大檔 streaming regression
-- [ ] BLOCKER：不得保留 ledger-wide row lists；只允許 iterator +
+- [x] BLOCKER：I/O/UTF-8/single-line parse fail-soft 全流程
+- [x] BLOCKER：malformed/non-object/missing key/timestamp/window 規則與 fixed counter
+- [x] BLOCKER：`Path.read_text` 失敗與大檔 streaming regression
+- [x] BLOCKER：不得保留 ledger-wide row lists；只允許 iterator +
   compact aggregate state
-- [ ] BLOCKER：future/out-of-window offer 與 `(unknown)` session/sl_id
+- [x] BLOCKER：future/out-of-window offer 與 `(unknown)` session/sl_id
   不得 cross-match
-- [ ] MAJOR：module docstring/格式最小 churn
-- [ ] MAJOR：boosted stable key 第二欄必須是 `base_score`
-- [ ] MAJOR：index build 必須可注入 `usage_now/window_days`
-- [ ] MAJOR：no-boost fast path 維持 legacy base-score stable order
-- [ ] MAJOR：future `last_read_at` 不得延長 janitor TTL
-- [ ] MAJOR：legacy DB fallback、janitor priority retention detail
-- [ ] MAJOR：scanner zero-warning gate（counter==0 不輸出）
+- [x] MAJOR：module docstring/格式最小 churn
+- [x] MAJOR：boosted stable key 第二欄必須是 `base_score`
+- [x] MAJOR：index build 必須可注入 `usage_now/window_days`
+- [x] MAJOR：no-boost fast path 維持 legacy base-score stable order
+- [x] MAJOR：future `last_read_at` 不得延長 janitor TTL
+- [x] MAJOR：legacy DB fallback、janitor priority retention detail
+- [x] MAJOR：scanner zero-warning gate（counter==0 不輸出）
 
 ## 審查與交付條件（v5 direct）
 

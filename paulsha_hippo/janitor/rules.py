@@ -49,7 +49,11 @@ def _age_days(base: datetime, now: datetime) -> float:
 
 
 def _ttl_base(
-    record: KnowledgeRecord, lc_info: dict[str, Any], last_read_at: "str | None" = None,
+    record: KnowledgeRecord,
+    lc_info: dict[str, Any],
+    last_read_at: "str | None" = None,
+    *,
+    now: "datetime | None" = None,
 ) -> "tuple[datetime, str] | None":
     """Determine TTL base timestamp for a record and which input it came from.
 
@@ -74,7 +78,7 @@ def _ttl_base(
 
     if last_read_at:
         read_dt = _parse_ts(last_read_at)
-        if read_dt and read_dt > base_dt:
+        if read_dt and (now is None or read_dt <= now) and read_dt > base_dt:
             base_dt, source = read_dt, "last_read_at"
 
     return base_dt, source
@@ -113,7 +117,7 @@ def _decide_decay(
             }
 
     # Priority 3: ttl_expired
-    ttl_result = _ttl_base(record, lc_info, last_read_at)
+    ttl_result = _ttl_base(record, lc_info, last_read_at, now=now)
     if ttl_result is None:
         return None
     ttl_base, ttl_source = ttl_result

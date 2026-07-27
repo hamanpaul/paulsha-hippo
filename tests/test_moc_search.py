@@ -44,15 +44,34 @@ class SearchTests(unittest.TestCase):
             index_path.parent.mkdir(parents=True, exist_ok=True)
             index_path.write_text("mock-db", encoding="utf-8")
 
-            # Same adjusted score (0.0), but different base score.
+            # Same adjusted score (0.0), but different base score. This must
+            # exercise the real usage-schema path rather than accidentally
+            # testing the no-boost legacy fallback.
             rows = [
-                ("sl-high", "proj", "high", 0.10, 1, 1, "/k/high.md"),
-                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md"),
+                ("sl-high", "proj", "high", 0.14, 1, 1, "/k/high.md", 15, None),
+                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md", 0, None),
             ]
-            cursor = mock.MagicMock()
-            cursor.fetchall.return_value = rows
+
+            pragma_rows = [
+                (0, "slice_id", "TEXT", 0, None, 1),
+                (1, "project", "TEXT", 0, None, 0),
+                (2, "captured_at", "TEXT", 0, None, 0),
+                (3, "active", "INTEGER", 0, None, 0),
+                (4, "link_weight", "INTEGER", 0, None, 0),
+                (5, "path", "TEXT", 0, None, 0),
+                (6, "read_count", "INTEGER", 1, "0", 0),
+                (7, "last_read_at", "TEXT", 0, None, 0),
+            ]
+
+            def fake_execute(sql, params=None):
+                cursor = mock.MagicMock()
+                cursor.fetchall.return_value = (
+                    pragma_rows if "PRAGMA table_info" in sql else rows
+                )
+                return cursor
+
             fake_conn = mock.MagicMock()
-            fake_conn.execute.return_value = cursor
+            fake_conn.execute.side_effect = fake_execute
 
             with mock.patch(
                 "paulsha_hippo.moc.search.sqlite3.connect",
@@ -547,7 +566,7 @@ class UsageBoostRankingTests(unittest.TestCase):
             index_path.write_text("mock-db", encoding="utf-8")
 
             data_rows = [
-                ("sl-high", "proj", "high", 0.10, 1, 1, "/k/high.md", 0, None),
+                ("sl-high", "proj", "high", 0.20, 1, 1, "/k/high.md", 0, None),
                 ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md", 0, None),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
