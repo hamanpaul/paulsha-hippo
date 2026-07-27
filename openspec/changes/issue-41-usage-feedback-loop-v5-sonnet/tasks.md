@@ -49,14 +49,18 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
    - [x] focused：`91 passed, 3 subtests passed`。
 7. [GREEN] 交付前 run：
    - [x] focused issue #41 suite
-   - `pytest --ignore=tests/installed`
-   - installed-fixture wheel gate（於正確 built-wheel 環境）
-   - `openspec validate issue-41-usage-feedback-loop-v5-sonnet --strict`
-   - `openspec validate --all --strict`
-   - `python3 -m policy_check --repo .`
-   - `git diff --check`
+   - [x] canonical preflight `tests/`（含 clean-wheel installed fixture）
+   - [x] `openspec validate issue-41-usage-feedback-loop-v5-sonnet --strict`
+   - [x] `openspec validate --all --strict`
+   - [x] PR-metadata-aware policy gate
+   - [x] `git diff --check`
+   - [x] local `PREFLIGHT PASS`：
+     `hamanpaul/paulsha-conventions@451c268`（v1.0.14），tests gate
+     `104.80s`
 8. [GREEN] 主 agent exact-head 檢查：7 件 authority、RED、實作與
    OpenSpec strict validation 一致。
+   - [x] 主 agent call-chain review 與 focused + #18 funnel：
+     `101 passed, 3 subtests passed`
 9. [GREEN] 結案門檻：preflight-ci、PR current-head checks、review
    threads、mergeability 全綠；PR body `Closes #41`，merge 後 issue closed。
 

@@ -36,8 +36,10 @@ work_item: issue-41-usage-feedback-loop-v5-sonnet
   1 subtests passed`，並確認均在 `6af69a4` call chain 失敗。
 - [x] Codex subagent bounded GREEN implementation 完成。
 - [x] focused tests：`91 passed, 3 subtests passed`。
-- [ ] full / installed-wheel tests 通過。
-- [ ] OpenSpec / policy / diff / preflight-ci gates 通過。
+- [x] canonical preflight 完整 `tests/`（含 clean-wheel installed fixture）
+  通過，tests gate `104.80s`。
+- [x] OpenSpec strict / policy / diff / local preflight-ci 全部通過；
+  engine exact pin `hamanpaul/paulsha-conventions@451c268`（v1.0.14）。
 - [ ] PR current-head review/checks 通過並 merge。
 
 ## 共識邊界
