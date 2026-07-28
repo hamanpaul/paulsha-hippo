@@ -1,3 +1,5 @@
+> **Fact:** `paulsha-hippo` 是 outcome-linked engineering experience lifecycle 的唯一 authority，負責跨 vendor 經驗的 provenance、recall、applied attribution、reinforce、contradict 與 retire。
+
 # paulsha-hippo 🦛
 
 > 跨 LLM vendor 的經驗筆記基座——session 自動蒸餾成原子筆記，睡眠期（dream）整理，隔天喚醒（wakeup）回灌 context。
