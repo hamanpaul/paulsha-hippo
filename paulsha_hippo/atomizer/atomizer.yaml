@@ -27,7 +27,7 @@ phase_map:
 default_artifact_kind: report
 default_phase: review
 external_agents:
-  deadline_seconds: 300
+  deadline_seconds: 600
   max_attempts: 6
   max_agent_calls: 6
   profiles:

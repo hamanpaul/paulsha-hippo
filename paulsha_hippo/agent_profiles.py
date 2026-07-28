@@ -23,6 +23,17 @@ ROUTER_CONTRACT_VERSION = "1"
 RESPONSE_SCHEMA_VERSION = "1"
 MIN_PROVIDER_CONTEXT = 32_768
 FIXED_TIMEOUT_SECONDS = 300
+# Bound for the *whole* fallback chain, distinct from FIXED_TIMEOUT_SECONDS which
+# bounds a *single* agent call. Conflating the two structurally starves every
+# profile after the first: `_run_one` receives
+# `min(profile.timeout, remaining_seconds)`, so when four eligible profiles share
+# one agent's worth of budget the tier-3 fallback can never get its allotted
+# time. Measured: claude 35.1s + codex 16.5s + cg 66.6s consumed 118s of a 300s
+# session budget, leaving local-vllm 181s for work that needed 203s. The
+# per-call cap (and therefore hang protection) is deliberately left unchanged;
+# only the chain-wide budget grows, so a slow-but-progressing fallback can run
+# to its own limit instead of inheriting the leftovers.
+FIXED_SESSION_DEADLINE_SECONDS = 600
 FIXED_MAX_OUTPUT_TOKENS = 2_048
 FIXED_MAX_ATTEMPTS = 6
 FIXED_MAX_AGENT_CALLS = 6
@@ -511,7 +522,7 @@ class ExternalAgentRouter:
         profiles: Sequence[AgentProfile],
         *,
         task_class: str = "atomization",
-        deadline_seconds: int = FIXED_TIMEOUT_SECONDS,
+        deadline_seconds: int = FIXED_SESSION_DEADLINE_SECONDS,
         max_attempts: int = FIXED_MAX_ATTEMPTS,
         max_agent_calls: int = FIXED_MAX_AGENT_CALLS,
         executor: Callable[[AgentProfile, str, int], tuple[str, str, int | None]] | None = None,
