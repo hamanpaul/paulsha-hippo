@@ -61,6 +61,22 @@ _FORBIDDEN_TOKENS = {
     "--dangerously-skip-permissions",
     "--no-sandbox",
 }
+_PERMISSION_MODE_FLAG = "--permission-mode"
+# A permission mode is part of the command contract, not just a safety knob.
+# ``plan`` puts the external agent into an approval workflow (explore → design →
+# ExitPlanMode): handed a real atomization prompt it answers with prose asking
+# how to proceed instead of the frozen response document, so no JSON reaches the
+# parser at all.  ``bypassPermissions`` is the flag-value spelling of the
+# already-forbidden ``--dangerously-skip-permissions`` token.  Write protection
+# never depended on either: it comes from the zero-tool argument.
+_FORBIDDEN_PERMISSION_MODES = {
+    "plan": (
+        "--permission-mode plan conflicts with the single-JSON response contract"
+    ),
+    "bypasspermissions": (
+        "--permission-mode bypassPermissions is a permission bypass and is forbidden"
+    ),
+}
 _SHELL_TOKENS = {"bash", "sh", "zsh", "fish", "cmd", "powershell"}
 _SHELL_META = set(";&|<>$`\\")
 _CREDENTIAL_NAME_RE = re.compile(
@@ -321,6 +337,15 @@ def _validate_argv(argv: tuple[str, ...], profile_id: str) -> tuple[str, ...]:
         flag_name = token.lower().split("=", 1)[0]
         if token_name in _SHELL_TOKENS or flag_name in _FORBIDDEN_TOKENS:
             raise ProfileConfigError(f"profile {profile_id}: forbidden executable/flag {token}")
+        if flag_name == _PERMISSION_MODE_FLAG:
+            mode = (
+                token.split("=", 1)[1]
+                if "=" in token
+                else (argv[index + 1] if index + 1 < len(argv) else "")
+            )
+            reason = _FORBIDDEN_PERMISSION_MODES.get(mode.strip().casefold())
+            if reason:
+                raise ProfileConfigError(f"profile {profile_id}: {reason}")
     if len(argv) >= 2 and argv[0].split("/")[-1] in _SHELL_TOKENS and argv[1] in {"-c", "-lc"}:
         raise ProfileConfigError(f"profile {profile_id}: shell wrapper is forbidden")
     if any(token in _FORBIDDEN_TOKENS for token in argv):
@@ -350,7 +375,7 @@ def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
 
 def default_profiles() -> tuple[AgentProfile, ...]:
     rows = (
-        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--print")),
+        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print")),
         ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-")),
         ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print")),
         ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),

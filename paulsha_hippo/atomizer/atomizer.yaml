@@ -41,7 +41,7 @@ external_agents:
       supported_models: [sonnet]
       effort: high
       supported_efforts: [medium, high, xhigh]
-      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --safe-mode, --disable-slash-commands, --strict-mcp-config, --mcp-config, '{"mcpServers":{}}', --tools, "", --permission-mode, plan, --no-session-persistence, --print]
+      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --safe-mode, --disable-slash-commands, --strict-mcp-config, --mcp-config, '{"mcpServers":{}}', --tools, "", --no-session-persistence, --print]
     - id: codex
       enabled: true
       tier: 1
