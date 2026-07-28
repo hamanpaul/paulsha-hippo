@@ -10,14 +10,26 @@ down is kept as historical record of that release's readiness process.
 ## 0.1.2 release candidate readiness
 
 The matrix is currently rebound to the 0.1.2 candidate at commit
-`c147218353bdc1e06f6a2f1cbc59a3a61130ceb6` (main HEAD). `wheel_sha256` is
+`2f3dc981e6c283fbe3f85ccc9fbd7cb79c8ae809` (main HEAD). `wheel_sha256` is
 `null` because the 0.1.2 wheel has not been built yet.
 
+**Rebind history.** The candidate was previously
+`c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`; three merges landed after it
+(#75 session budget, #76 policy v1.0.15, #78 tier-1 plan-mode contract fix),
+so that binding — and the AR-01 evidence attached to it — went stale.
+`readiness.bind_candidate()` encodes exactly this rule: on candidate drift,
+every `passed` gate reverts to `pending` and its evidence is dropped. AR-01 was
+therefore re-run from scratch against the new candidate rather than carried
+over. (The helper itself requires a non-empty `wheel_sha256` and cannot be
+called while the wheel is unbuilt, so the rebind is applied by hand under the
+same semantics, then re-validated through `readiness.load_matrix()`.)
+
 Of the 16 gates, only **AR-01** (full test suite) carries a real `passed`
-verdict, attested from two independent clean environments: the candidate
-commit's own GitHub Actions `Tests` run (conclusion `success`), and a local
-non-nested sibling worktree where `python3 -m pytest -q` reported `1636
-passed, 4 skipped, 154 subtests passed, 0 failed`.
+verdict, attested from two independent clean environments that agree exactly:
+the candidate commit's own GitHub Actions `Tests` run (conclusion `success`,
+`1646 passed, 4 skipped, 154 subtests passed in 107.61s`), and a local
+non-nested sibling worktree where `python3 -m pytest -q` reported `1646
+passed, 4 skipped, 154 subtests passed, 0 failed in 186.01s`.
 
 Note on measurement environment: running the suite from a worktree nested
 *under* the repo directory (`.claude/worktrees/*`) produces 2 failures in
@@ -26,11 +38,19 @@ Note on measurement environment: running the suite from a worktree nested
 non-repo folder. That is a false signal from the measurement environment, not
 a candidate defect — attestation must therefore always be taken from a
 non-nested checkout. All other 15 gates (AR-02–AR-14, IC-01, IC-02) are
-honestly `pending`: no live external CLI, build, publication, upgrade,
-recovery, timer-soak, or consumer-hook evidence has been captured for this
-candidate in this environment. Each gate's `evidence` field states what
-0.1.2-specific evidence is still needed, and `rerun` records the exact
-command to (re)produce it.
+honestly `pending`: no build, publication, upgrade, recovery, timer-soak,
+external-profile-probe, or consumer-hook evidence has been captured for this
+candidate. Each gate's `evidence` field states what 0.1.2-specific evidence is
+still needed, and `rerun` records the exact command to (re)produce it.
+
+One environment note has changed since the previous rebind: AR-05 used to
+record that this machine had no probeable external CLI. It now does — `claude`
+2.1.220, `codex` 0.145.0 and `cg` are all on `PATH` and were exercised on
+2026-07-28 — so AR-05 is runnable; it is `pending` only because no probe output
+has been captured for *this* candidate. Most of the remaining gates are gated
+on one missing artifact rather than on defects: AR-02/AR-03/AR-07/AR-14 all
+wait on a built wheel (`wheel_sha256` is still `null`), and AR-05/AR-06/AR-08/
+IC-01 wait on that wheel being installed into a clean environment.
 
 **AR-11 note (2026-07-28) — 13 clean timer cycles that do *not* count.**
 From `2026-07-27T13:00:42Z` to `2026-07-28T01:00:42Z` the dream service ran 13
@@ -56,6 +76,32 @@ This matters as a worked example: the 13 cycles are genuinely healthy and every
 number above was independently verified against the raw ledger. The error to
 avoid is not fabricated data — it is drawing a pass verdict from real data that
 does not meet the actual pass condition.
+
+**AR-11 update (2026-07-28, this rebind) — the blocker moved, the count did
+not.** The reason no cycle could produce an accepted atom was that the tier-1
+`claude` profile carried `--permission-mode plan`, so a real atomization
+payload came back as prose asking how to proceed rather than a single JSON
+document (issue #77, fixed in PR #78 — i.e. in this very candidate). The
+`05:00:42Z` timer cycle parked session `claude-code:7d35853a…` with
+`failure_kind: invalid_output`, 606 bytes, 86.4s; re-running that same
+session's chunk 0 after the fix, through the deployed runtime and deployed
+config, returned exit 0, 190.5s, 15,858 bytes of valid schema-1 JSON accepted
+by `llm_output.parse_response()`.
+
+**AR-11 nonetheless stays 0/3.** No qualifying timer cycle has occurred since
+the fix, and one structural obstacle remains: a single chunk costs ~190–244s
+while a 47-fragment session packs into 7 chunks, against a 600s chain budget
+and a 300s per-call cap — so a large session still times out and parks. "A
+cycle with ingress will produce an accepted atom" is therefore not yet true,
+and the soak cannot be assumed to accrue simply by waiting.
+
+A correctness note for whoever attests this gate next: `health.eligible` is
+assigned from `notes_created` (`dream/orchestrator.py:112`) and is therefore
+the count of atoms produced in that cycle — **not** an ingress signal. Use
+`passes.atomize.split_sessions > 0` for "a new ingress session", together with
+`passes.atomize.slices > 0` for "at least one accepted atom". The index-coverage
+`eligible` figure is a different number entirely
+(`runtime/indexes/retrieval.coverage.json`, currently 946/946).
 
 This rebind exists specifically to avoid repeating the AR-11 mistake from
 0.1.1: that gate's evidence once read "three consecutive systemd timer runs
