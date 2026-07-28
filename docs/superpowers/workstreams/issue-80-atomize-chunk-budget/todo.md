@@ -26,3 +26,9 @@ work_item: issue-80-atomize-chunk-budget
 
 - [ ] 同步使用者 live config `~/.config/paulsha-hippo/config.yaml` 補 tier-1 的 `max_session_chunks`
 - [ ] 觀察後續有 ingress 的 timer cycle 是否產出 accepted atom（AR-11 的前置條件）
+
+## 派工環境前置（2026-07-28 實測）
+
+- cortex 套件預設的 canonical planning identity `agy / "Gemini 3.1 Pro (High)"` 已失效：probe 以字面比對 `agy models` 輸出，而 agy 現在輸出 kebab id（`gemini-3.1-pro-high`），比不到即回 `model-not-listed`，令 workflow run 永遠停在 `define` / `needs_human`（cortex #255）。繞法是在 `~/.agents/config/paulsha/model-identities.yaml` 以真實 id 另宣告一個 agy planning identity。
+- builder 身分由 `model-identities.yaml` 決定（workflow 路徑的 launcher 直接取 `identity.executor` 與 `identity.model_id`），沒有 `PSC_MANAGER_MODEL` 這個環境變數可 pin 模型。本批次的 builder 為 `codex / gpt-5.3-codex-spark`。
+- `PSC_PREFLIGHT_CMD` 未設時 `cortex doctor` 報 FAIL，且 run 走到 verify/ship 會失敗；本機已設為 `policy-preflight --repo-visibility private`。
