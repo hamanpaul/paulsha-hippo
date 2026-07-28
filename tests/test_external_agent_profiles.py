@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -11,29 +12,158 @@ from paulsha_hippo.agent_profiles import (
     AgentProfile,
     ExternalAgentRouter,
     ProfileConfigError,
+    FIXED_PER_CHUNK_DEADLINE_SECONDS,
+    FIXED_SESSION_DEADLINE_CAP_SECONDS,
+    FIXED_SESSION_DEADLINE_SECONDS,
     cache_identity,
     child_environment,
     default_profiles,
+    session_deadline_seconds,
 )
 from paulsha_hippo.atomizer.agent_exec import CachingAgentClient
 
 STUB = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "fake-agent.py"
 
 
-def _profile(profile_id: str, *, tier: int = 1, priority: int = 1, argv: tuple[str, ...] | None = None) -> AgentProfile:
-    return AgentProfile.from_mapping(
-        {
-            "id": profile_id,
-            "tier": tier,
-            "priority": priority,
-            "traits": ["test"],
-            "task_classes": ["atomization", "title"],
-            "model": "test-model",
-            "effort": "medium",
-            "supported_efforts": ["low", "medium", "high"],
+def _profile(
+    profile_id: str,
+    *,
+    tier: int = 1,
+    priority: int = 1,
+    argv: tuple[str, ...] | None = None,
+    max_session_chunks: int | None = None,
+) -> AgentProfile:
+    raw: dict[str, object] = {
+        "id": profile_id,
+        "tier": tier,
+        "priority": priority,
+        "traits": ["test"],
+        "task_classes": ["atomization", "title"],
+        "model": "test-model",
+        "effort": "medium",
+        "supported_efforts": ["low", "medium", "high"],
         "argv": list(argv or (sys.executable, str(STUB))),
-        }
+    }
+    if max_session_chunks is not None:
+        raw["max_session_chunks"] = max_session_chunks
+    return AgentProfile.from_mapping(raw)
+
+
+def _agent_profile_kwargs(
+    profile_id: str = "task-class-probe",
+    *,
+    max_session_chunks: int | object = None,
+    tier: int = 1,
+    priority: int = 1,
+) -> dict[str, object]:
+    raw = {
+        "id": profile_id,
+        "tier": tier,
+        "priority": priority,
+        "traits": ["test"],
+        "task_classes": ["atomization", "title"],
+        "model": "test-model",
+        "effort": "medium",
+        "supported_efforts": ["low", "medium", "high"],
+        "argv": [sys.executable, str(STUB)],
+    }
+    if max_session_chunks is not None:
+        raw["max_session_chunks"] = max_session_chunks
+    return raw
+
+
+def test_session_deadline_scales_with_chunk_count():
+    assert session_deadline_seconds(1) == FIXED_SESSION_DEADLINE_SECONDS
+    assert session_deadline_seconds(2) == FIXED_SESSION_DEADLINE_SECONDS
+    assert session_deadline_seconds(7) == min(
+        FIXED_SESSION_DEADLINE_CAP_SECONDS,
+        max(
+            FIXED_SESSION_DEADLINE_SECONDS,
+            7 * FIXED_PER_CHUNK_DEADLINE_SECONDS,
+        ),
     )
+    assert session_deadline_seconds(100) == FIXED_SESSION_DEADLINE_CAP_SECONDS
+
+
+def test_per_call_timeout_still_bounded_by_fixed_timeout_seconds():
+    captured: list[int] = []
+
+    def run_one(profile, prompt, call_index, timeout):  # noqa: ARG001
+        captured.append(timeout)
+        return "valid", "", 0
+
+    router = ExternalAgentRouter((_profile("only", tier=1),))
+    router._run_one = run_one  # type: ignore[method-assign]
+    time_points = iter([0.0, 0.0, 0.0, 0.0, 0.0, 450.0, 450.0])
+
+    original_monotonic = time.monotonic
+    time.monotonic = lambda: next(time_points)  # type: ignore[method-assign]
+    try:
+        assert router.run_session(("chunk-0", "chunk-1"), response_validator=lambda raw: raw == "valid") == (
+            "valid",
+            "valid",
+        )
+    finally:
+        time.monotonic = original_monotonic
+
+    assert captured == [300, 150]
+
+
+def test_router_rejects_invalid_max_session_chunks():
+    raw = _agent_profile_kwargs("invalid-zero", max_session_chunks=0)
+    with pytest.raises(ProfileConfigError, match="max_session_chunks"):
+        AgentProfile.from_mapping(raw)
+    raw = _agent_profile_kwargs("invalid-negative", max_session_chunks=-1)
+    with pytest.raises(ProfileConfigError, match="max_session_chunks"):
+        AgentProfile.from_mapping(raw)
+    raw = _agent_profile_kwargs("invalid-float", max_session_chunks=2.5)
+    with pytest.raises(ProfileConfigError, match="max_session_chunks"):
+        AgentProfile.from_mapping(raw)
+    raw = _agent_profile_kwargs("invalid-bool", max_session_chunks=True)
+    with pytest.raises(ProfileConfigError, match="max_session_chunks"):
+        AgentProfile.from_mapping(raw)
+
+
+def test_profile_max_session_chunks_defaults_to_none_and_is_keyword_only():
+    profile = _profile("no-limit")
+    assert profile.max_session_chunks is None
+    with pytest.raises(TypeError):
+        profile.eligible("atomization", 7)  # type: ignore[call-arg]
+
+
+def test_eligibility_obeys_max_session_chunks():
+    profile = _profile("limited", tier=1, max_session_chunks=6)
+    assert profile.eligible(task_class="atomization", chunk_count=7) == (
+        False,
+        "session_size",
+    )
+    assert profile.eligible(task_class="atomization", chunk_count=6) == (True, "eligible")
+    assert profile.eligible(task_class="atomization", chunk_count=None) == (True, "eligible")
+
+
+def test_router_skips_profile_with_oversized_session_without_call():
+    oversized = _profile("tier1-small", tier=1, max_session_chunks=1)
+    accept = _profile("tier2", tier=2)
+    calls: list[str] = []
+
+    def execute(profile, prompt, attempt):
+        calls.append(profile.id)
+        return "answer", "", 0
+
+    router = ExternalAgentRouter((oversized, accept), executor=execute, max_agent_calls=10)
+    assert router.run_session(tuple("0123456")) == tuple("answer" for _ in range(7))
+    assert calls == ["tier2"] * 7
+    assert [a.profile_id for a in router.attempts] == ["tier1-small", "tier2"]
+    assert router.attempts[0].failure_category == "ineligible"
+    assert router.attempts[0].profile_id == "tier1-small"
+
+
+def test_default_profiles_have_max_session_chunks_bounds():
+    profiles = default_profiles()
+    mapping = {profile.id: profile.max_session_chunks for profile in profiles}
+    assert mapping["claude"] == 6
+    assert mapping["codex"] == 6
+    assert mapping["cg"] is None
 
 
 def test_default_profiles_have_three_deterministic_tiers_and_traits():
@@ -122,6 +252,20 @@ def test_packaged_config_template_argv_matches_canonical_defaults():
         for entry in document["external_agents"]["profiles"]
     }
     assert shipped == {profile.id: profile.argv for profile in default_profiles()}
+
+
+def test_packaged_config_template_max_session_chunks_matches_canonical_defaults():
+    import yaml
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "paulsha_hippo" / "atomizer" / "atomizer.yaml"
+    )
+    document = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+    shipped = {
+        entry["id"]: entry.get("max_session_chunks")
+        for entry in document["external_agents"]["profiles"]
+    }
+    assert shipped == {profile.id: profile.max_session_chunks for profile in default_profiles()}
 
 
 @pytest.mark.parametrize("category", ["policy", "config", "schema", "unsafe", "not-a-category"])
@@ -405,6 +549,12 @@ def test_cache_identity_is_profile_specific():
     assert cache_identity(profile=first, **common, response_schema="2") != cache_identity(
         profile=first, **common, response_schema="1"
     )
+
+
+def test_cache_namespace_includes_max_session_chunks():
+    limited = _profile("first", max_session_chunks=6)
+    unlimited = _profile("first")
+    assert ExternalAgentRouter((limited,)).cache_namespace() != ExternalAgentRouter((unlimited,)).cache_namespace()
 
 
 def test_router_cache_envelope_preserves_fallback_provenance(tmp_path):
