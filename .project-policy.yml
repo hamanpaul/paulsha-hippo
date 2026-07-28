@@ -1,5 +1,5 @@
 policy_profile: flat
-policy_version: 1.0.14
+policy_version: 1.0.15
 tier: shareable
 secret_scan:
   allow:

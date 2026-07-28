@@ -1,5 +1,6 @@
-### Changed
-
+---
+type: change
+---
 - Issue #39 distillation now uses one declarative external headless CLI router
   for atomization, title repair, and SkillOpt. Tiered fallback, stdin-only
   prompts, minimal non-secret environment, bounded attempts, circuit state,

@@ -1,4 +1,6 @@
-### Fixed
+---
+type: fix
+---
 - dream 執行期間、其他 agent 對同一 memory root 的併發 ledger 寫入不再被 janitor
   誤判為 `future_event`、令整輪降為 `partial`。`dream/orchestrator.py` 以單一 `now`
   釘住整輪並先跑 atomize（已知的 rglob 效能問題可讓單輪耗時 10+ 分鐘），janitor 隨後

@@ -1,4 +1,6 @@
-### Fixed
+---
+type: fix
+---
 - 未經 offer 的「直讀」（agent 讀取一個當下沒被 shortlist 給它的 knowledge 檔）不再被
   `collect_usage_reads()` 整批丟棄。實測真實 ledger 30 天窗內 600 筆 read 中有 550 筆屬此類，
   這些 slice 先前在 janitor retention 的 `last_read_at` 上等同從未被讀過而可能誤 decay；

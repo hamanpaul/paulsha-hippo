@@ -46,7 +46,7 @@ pipeline：hooks ingress → raw → atomize 蒸餾 → ledger/moc → dream（�
 
 目前 release candidate 為 `0.1.1`（Issue 34 語意保全、外部 CLI atomization 與可逆 recovery；尚未 tag/release）。版本記錄見 `CHANGELOG.md`；
 發版採 semver，主 repo 以 commit SHA pin 依賴（tag 僅人讀標記）。
-Repo policy 由 canonical `.project-policy.yml` 宣告，並 pin paulsha-conventions v1.0.14。
+Repo policy 由 canonical `.project-policy.yml` 宣告，並 pin paulsha-conventions v1.0.15。
 
 ## 家族
 

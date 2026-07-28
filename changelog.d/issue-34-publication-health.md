@@ -1,5 +1,6 @@
-### Added
-
+---
+type: feat
+---
 - Canonical atom titles, collision-resistant rich project directory keys,
   publication commit markers, malformed-inbox quarantine, complete backlog
   health census, run IDs, produced-slice reconciliation, and NAME_MAX-safe
