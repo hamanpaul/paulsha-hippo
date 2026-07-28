@@ -55,6 +55,75 @@ def test_default_profiles_have_three_deterministic_tiers_and_traits():
     assert codex.supported_efforts == ("high",)
 
 
+def test_default_claude_profile_does_not_run_in_plan_permission_mode():
+    """Plan mode contradicts the frozen single-JSON output contract.
+
+    Claude Code's plan mode is an approval workflow (explore → design → plan
+    file → ExitPlanMode); asked to atomize a real session it answers with prose
+    asking how to proceed instead of emitting the contract document, so the
+    parser sees no JSON at all.  Measured on a 48-fragment parked session:
+    606 bytes of prose containing neither ``{`` nor ``[`` with the flag, versus
+    22,778 bytes of valid schema-1 JSON with the flag removed and every other
+    argument identical.  Write protection is unaffected — it comes from
+    ``--tools ""`` (claude CLI 2.1.220: "Use \"\" to disable all tools"), not
+    from the permission mode.
+    """
+    claude = default_profiles()[0]
+    pairs = tuple(zip(claude.argv, claude.argv[1:]))
+    assert ("--permission-mode", "plan") not in pairs
+    # The restrictions that actually bound the external agent stay in place.
+    assert ("--tools", "") in pairs
+    for flag in ("--safe-mode", "--disable-slash-commands", "--strict-mcp-config"):
+        assert flag in claude.argv
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("claude", "--permission-mode", "plan", "--print"),
+        ("claude", "--permission-mode=plan", "--print"),
+        ("claude", "--permission-mode", "PLAN", "--print"),
+    ],
+)
+def test_profile_rejects_plan_permission_mode(argv):
+    with pytest.raises(ProfileConfigError, match="plan"):
+        _profile("plan-mode", argv=argv)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("claude", "--permission-mode", "bypassPermissions", "--print"),
+        ("claude", "--permission-mode=bypassPermissions", "--print"),
+    ],
+)
+def test_profile_rejects_permission_bypass_mode(argv):
+    """``bypassPermissions`` is the flag-value spelling of an already-forbidden
+    token (``--dangerously-skip-permissions``) and must be rejected alike."""
+    with pytest.raises(ProfileConfigError, match="permission bypass"):
+        _profile("bypass-mode", argv=argv)
+
+
+def test_packaged_config_template_argv_matches_canonical_defaults():
+    """The shipped template must not drift from the canonical profile argv.
+
+    Every profile command lives in two repo surfaces (this module's defaults and
+    ``atomizer.yaml``); a fix applied to one and missed in the other ships the
+    defect anyway, which is how the plan-mode argument survived unnoticed.
+    """
+    import yaml
+
+    template_path = (
+        Path(__file__).resolve().parents[1] / "paulsha_hippo" / "atomizer" / "atomizer.yaml"
+    )
+    document = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+    shipped = {
+        entry["id"]: tuple(entry["argv"])
+        for entry in document["external_agents"]["profiles"]
+    }
+    assert shipped == {profile.id: profile.argv for profile in default_profiles()}
+
+
 @pytest.mark.parametrize("category", ["policy", "config", "schema", "unsafe", "not-a-category"])
 def test_fallback_policy_accepts_only_immutable_transition_allowlist(category):
     profile = _profile("fallback-policy")

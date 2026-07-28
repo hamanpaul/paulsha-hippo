@@ -20,9 +20,12 @@ circuit cooldown。只允許明確的失敗類別 fallback；安全設定錯誤�
 但使用 Tier 2/3 時 provenance 會記 `degraded-success` 與先前 attempts。
 
 所有 profile 必須使用 `shell=False` 的 tokenized argv；prompt 只走 stdin。`{PROMPT}`、
-shell alias/function、shell metacharacter、`--yolo`、`--autopilot`、permission bypass、
-tool/MCP/remote fallback 均拒絕。child env 是固定 allowlist，外部 launcher 可在
-Hippo 邊界外處理認證。
+shell alias/function、shell metacharacter、`--yolo`、`--autopilot`、permission bypass
+（含 `--permission-mode bypassPermissions` 這個旗標值寫法）、tool/MCP/remote fallback
+均拒絕。`--permission-mode plan` 亦拒絕：plan mode 是核可工作流，與「直接輸出單一 JSON
+文件」的回覆契約衝突，實測會讓 agent 對真實 atomization prompt 回散文請示而非執行；
+防寫入靠的是 `--tools ''`（零工具），不是 permission mode。child env 是固定 allowlist，
+外部 launcher 可在 Hippo 邊界外處理認證。
 
 每個 profile 另有明確 `enabled` gate；停用 profile 會在 executable probe 前即標成
 `ineligible/disabled`，不消耗 agent call。Provenance 同時記錄 tier 與 tier 內 priority。
