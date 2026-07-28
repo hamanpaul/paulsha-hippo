@@ -33,7 +33,13 @@ FIXED_TIMEOUT_SECONDS = 300
 # per-call cap (and therefore hang protection) is deliberately left unchanged;
 # only the chain-wide budget grows, so a slow-but-progressing fallback can run
 # to its own limit instead of inheriting the leftovers.
+# 600s remains the lower bound to preserve single/double-chunk behavior.
 FIXED_SESSION_DEADLINE_SECONDS = 600
+# 240s/chunk is anchored by observed per-chunk completion on large sessions
+# (roughly 190.5s / 244s in measured profiles); the cap was tuned so one
+# session doesn't monopolize the hourly timer cycle.
+FIXED_PER_CHUNK_DEADLINE_SECONDS = 240
+FIXED_SESSION_DEADLINE_CAP_SECONDS = 1800
 FIXED_MAX_OUTPUT_TOKENS = 2_048
 FIXED_MAX_ATTEMPTS = 6
 FIXED_MAX_AGENT_CALLS = 6
@@ -83,6 +89,16 @@ _CREDENTIAL_NAME_RE = re.compile(
     r"(?:api[_-]?key|token|secret|password|oauth|credential|private[_-]?key)",
     re.IGNORECASE,
 )
+
+
+def session_deadline_seconds(chunk_count: int) -> int:
+    """Scale session budget by chunk count with fixed floor and fixed cap."""
+    if chunk_count <= 0:
+        return FIXED_SESSION_DEADLINE_SECONDS
+    return min(
+        FIXED_SESSION_DEADLINE_CAP_SECONDS,
+        max(FIXED_SESSION_DEADLINE_SECONDS, FIXED_PER_CHUNK_DEADLINE_SECONDS * chunk_count),
+    )
 
 
 class ProfileConfigError(ValueError):
@@ -173,6 +189,7 @@ class AgentProfile:
     timeout: int = FIXED_TIMEOUT_SECONDS
     provider_context: int = MIN_PROVIDER_CONTEXT
     revision: str = "1"
+    max_session_chunks: int | None = None
     enabled: bool = True
     native_fallback_disabled: bool = True
     zero_tool: bool = True
@@ -242,6 +259,19 @@ class AgentProfile:
         )
         timeout = int(raw.get("timeout", FIXED_TIMEOUT_SECONDS))
         provider_context = int(raw.get("provider_context", MIN_PROVIDER_CONTEXT))
+        max_session_chunks_raw = raw.get("max_session_chunks")
+        if max_session_chunks_raw is None:
+            max_session_chunks = None
+        else:
+            if (
+                not isinstance(max_session_chunks_raw, int)
+                or isinstance(max_session_chunks_raw, bool)
+                or max_session_chunks_raw <= 0
+            ):
+                raise ProfileConfigError(
+                    f"profile {profile_id}: max_session_chunks must be a positive integer"
+                )
+            max_session_chunks = max_session_chunks_raw
         if timeout != FIXED_TIMEOUT_SECONDS:
             raise ProfileConfigError(f"profile {profile_id}: timeout is fixed at {FIXED_TIMEOUT_SECONDS}")
         if provider_context < MIN_PROVIDER_CONTEXT:
@@ -269,6 +299,7 @@ class AgentProfile:
             supported_models=supported_models,
             timeout=timeout,
             provider_context=provider_context,
+            max_session_chunks=max_session_chunks,
             revision=str(raw.get("revision", "1")),
             enabled=enabled,
             fallback_on=_validate_fallback_on(
@@ -295,11 +326,23 @@ class AgentProfile:
     def command_fingerprint(self) -> str:
         return fingerprint_argv(self.render_argv())
 
-    def eligible(self, *, task_class: str = "atomization", path: str | None = None) -> tuple[bool, str]:
+    def eligible(
+        self,
+        *,
+        task_class: str = "atomization",
+        path: str | None = None,
+        chunk_count: int | None = None,
+    ) -> tuple[bool, str]:
         if not self.enabled:
             return False, "disabled"
         if task_class not in self.task_classes:
             return False, "task_class"
+        if (
+            self.max_session_chunks is not None
+            and chunk_count is not None
+            and chunk_count > self.max_session_chunks
+        ):
+            return False, "session_size"
         if self.provider_context < MIN_PROVIDER_CONTEXT:
             return False, "context_budget"
         if not self.native_fallback_disabled:
@@ -375,19 +418,20 @@ def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
 
 def default_profiles() -> tuple[AgentProfile, ...]:
     rows = (
-        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print")),
-        ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-")),
-        ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print")),
-        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
-        ("co-gem", 3, 10, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
-        ("claude-gem", 3, 20, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("claude-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin")),
+        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print"), 6),
+        ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-"), 6),
+        ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print"), None),
+        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
+        ("co-gem", 3, 10, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
+        ("claude-gem", 3, 20, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("claude-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
     )
     disabled = {"cg", "co-gem", "claude-gem"}
     return tuple(AgentProfile(
         id=profile_id, tier=tier, priority=priority, traits=traits, task_classes=tasks,
         model=model, effort=effort, supported_efforts=efforts, argv=argv,
         supported_models=(model,), enabled=profile_id not in disabled,
-    ) for profile_id, tier, priority, traits, tasks, model, effort, efforts, argv in rows)
+        max_session_chunks=max_session_chunks,
+    ) for profile_id, tier, priority, traits, tasks, model, effort, efforts, argv, max_session_chunks in rows)
 
 
 def profiles_from_config(value: object) -> tuple[AgentProfile, ...]:
@@ -594,6 +638,7 @@ class ExternalAgentRouter:
                     "priority": profile.priority,
                     "model": profile.model,
                     "effort": profile.effort,
+                    "max_session_chunks": profile.max_session_chunks,
                     "command_fingerprint": profile.command_fingerprint(),
                     "fallback_on": profile.fallback_on,
                 }
@@ -706,6 +751,7 @@ class ExternalAgentRouter:
         frozen_prompts = tuple(str(prompt) for prompt in prompts)
         if not frozen_prompts:
             return ()
+        session_deadline = session_deadline_seconds(len(frozen_prompts))
         self.last_result = None
         self.attempts = ()
         self._last_error = None
@@ -715,13 +761,14 @@ class ExternalAgentRouter:
         for profile in self.profiles:
             if len(attempts) >= self.max_attempts or calls >= self.max_agent_calls:
                 break
-            if time.monotonic() - started >= self.deadline_seconds:
+            if time.monotonic() - started >= session_deadline:
                 break
             if self._circuit_open_until.get(profile.id, 0.0) > time.monotonic():
                 continue
             eligible, reason = profile.eligible(
                 task_class=self.task_class,
                 path=self.execution_path,
+                chunk_count=len(frozen_prompts),
             )
             if not eligible:
                 # Disabled or task-mismatched profiles are declaratively absent
@@ -755,7 +802,7 @@ class ExternalAgentRouter:
             outputs: list[str] = []
             try:
                 for prompt in frozen_prompts:
-                    remaining_seconds = self.deadline_seconds - (time.monotonic() - started)
+                    remaining_seconds = session_deadline - (time.monotonic() - started)
                     if remaining_seconds <= 0:
                         raise AgentRunError(
                             "external agent session deadline exhausted",

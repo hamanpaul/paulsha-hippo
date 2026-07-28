@@ -565,11 +565,25 @@ def load_config(
         external_agents.get("max_agent_calls", FIXED_MAX_AGENT_CALLS),
         "external_agents.max_agent_calls",
     )
-    if (router_deadline > FIXED_SESSION_DEADLINE_SECONDS
-            or router_attempts > FIXED_MAX_ATTEMPTS
+    if (router_attempts > FIXED_MAX_ATTEMPTS
             or router_calls > FIXED_MAX_AGENT_CALLS):
         raise AtomizerConfigError(
             "external_agents budgets cannot exceed fixed bounded limits"
+        )
+    # The chain budget is derived from the packed chunk count
+    # (`agent_profiles.session_deadline_seconds`), with
+    # FIXED_SESSION_DEADLINE_SECONDS as its floor; `run_session` consults
+    # neither `self.deadline_seconds` for the loop break nor for the per-call
+    # remainder.  A configured value therefore cannot change the budget, so it
+    # is rejected rather than accepted and ignored — a knob that silently does
+    # nothing is the same defect shape as #77, where a declared flag did not do
+    # what it said.  Honouring a lower value would also re-create the #75
+    # starvation, since the chain would again be capped below the work it holds.
+    if router_deadline != FIXED_SESSION_DEADLINE_SECONDS:
+        raise AtomizerConfigError(
+            "external_agents.deadline_seconds is fixed at "
+            f"{FIXED_SESSION_DEADLINE_SECONDS}: the chain budget scales with the "
+            "session's chunk count and cannot be overridden per deployment"
         )
 
     # Build config object

@@ -408,3 +408,34 @@ class SessionDeadlineStarvationTests(unittest.TestCase):
 
         self.assertEqual(FIXED_TIMEOUT_SECONDS, 300)
         self.assertEqual(AgentProfile.timeout, FIXED_TIMEOUT_SECONDS)
+
+
+class SessionDeadlineIsNotASilentKnobTests(unittest.TestCase):
+    """A configured chain budget must never be accepted and then ignored.
+
+    Since #80 the chain budget is derived from the packed chunk count
+    (`session_deadline_seconds`), with `FIXED_SESSION_DEADLINE_SECONDS` as the
+    floor. `external_agents.deadline_seconds` therefore no longer influences the
+    budget at all: `run_session` reads neither `self.deadline_seconds` for the
+    loop break nor for the per-call remainder. A value below the floor used to
+    tighten the chain and now does nothing, which is the same failure shape as
+    issue #77 — a declared setting that does not do what it says. Config must
+    reject what the runtime will not honour instead of silently absorbing it.
+    """
+
+    def _write_override(self, body: str) -> Path:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as handle:
+            handle.write(body)
+            return Path(handle.name)
+
+    def test_deadline_below_the_floor_is_rejected_rather_than_ignored(self):
+        from paulsha_hippo.agent_profiles import FIXED_SESSION_DEADLINE_SECONDS
+
+        path = self._write_override(
+            f"external_agents:\n  deadline_seconds: {FIXED_SESSION_DEADLINE_SECONDS - 300}\n"
+        )
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=path)
+        finally:
+            path.unlink(missing_ok=True)
