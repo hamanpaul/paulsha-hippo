@@ -27,6 +27,8 @@ work_items:
         ref: 'docs/superpowers/plans/2026-07-28-issue-80-atomize-chunk-budget.md'
       - kind: path
         ref: 'docs/superpowers/workstreams/issue-80-atomize-chunk-budget/todo.md'
+      - kind: path
+        ref: 'docs/superpowers/workstreams/issue-80-atomize-chunk-budget/environment.md'
     excludes: []
   issue-64-ledger-torn-line-repair:
     title: 'issue-64-ledger-torn-line-repair'
