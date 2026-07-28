@@ -1,4 +1,6 @@
-### Fixed
+---
+type: fix
+---
 - ledger 撕裂行（嵌入 NUL 位元組的 JSONL 行）不再讓 janitor 每輪回報壞行、使
   `hippo dream run` 永久停在 `partial`。新增 `hippo doctor` 的 ledger 完整性檢查與
   `hippo ledger repair`（預設 dry-run，`--apply` 才寫入）：可救回的行原地救回（先備份、

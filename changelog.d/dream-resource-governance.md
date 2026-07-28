@@ -1,4 +1,6 @@
-### Added
+---
+type: feat
+---
 - dream `--require-idle` 增加記憶體 headroom 閘，新增 `--min-avail-mem-pct`（預設 20%）並在低記憶體時輸出 `skipped: "low memory"` 與 `avail_pct`。
 - `hippo dream supervise` 偵測 systemd dream timer 已接管時會讓位，避免與 timer 雙跑。
 

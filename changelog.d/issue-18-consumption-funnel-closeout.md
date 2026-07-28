@@ -1,3 +1,6 @@
+---
+type: change
+---
 - Issue #18：同步並封存 `openspec/changes/archive/2026-07-26-issue-18-consumption-funnel-closeout` 的接受版 artifacts（`.openspec.yaml` / proposal / design / `stage2-memory-usage-telemetry/spec.md`），作為 closeout 證據鏈一部。
 - Issue #18：將 `docs/cross-cli-capability-matrix.md` 明文補齊 `hippo usage funnel --memory-root <path> --json` 契約，定義 `session citation`、`unique-slice coverage`、`offered-to-read conversion` 與 `applied` 非 read/citation proxy 的語意。
 - Issue #18：加強 focused 測試 `test_usage_funnel_enforces_task8_contract_dimensions_and_installed_command`，改為直接驗證 matrix 契約文本（含命令與四項指標）與現有指標數據驗證。

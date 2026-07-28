@@ -1,5 +1,6 @@
-### Added
-
+---
+type: feat
+---
 - 新增 `hippo usage funnel` session 層級漏斗報表，以收到非空記憶 brief 的 session 為分母，統計 offered → read → applied 的轉換率，並提供 per-tool 與被讀取 slice 的 top-N 特徵；支援 `--since`、`--json` 及既有／新版 offered ledger 格式。
 
 ### Changed

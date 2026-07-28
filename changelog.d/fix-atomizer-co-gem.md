@@ -1,4 +1,6 @@
-### Changed
+---
+type: change
+---
 - atomizer 預設改走本機 `co-gem`（Gemma `gem` profile），由 stdin 接收蒸餾 prompt；停用舊的 Claude Gemma4 upstream 設定，改指向本機 llama router `127.0.0.1:8080`。
 - importer 分離 `session_title` 與完整 assistant outcomes，新增 capture identity、semantic hash 及 fail-closed derived-field sanitizer；raw archive 保持原 bytes。
 - Gemma atomizer 以 32,768 為最低支援 context 與預設值；12K input、2,048 output、48 KiB argv、300 秒、2 次 bounded attempts、串行與 zero-tool flags 維持固定，較大的 provider context 不放寬這些界線；大 session 以穩定 paragraph parts 全覆蓋分塊，不截尾。

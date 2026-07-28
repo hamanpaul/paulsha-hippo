@@ -1,5 +1,5 @@
 ---
-type: chore
+type: change
 scope: release
 ---
 ### Changed

@@ -1,2 +1,4 @@
-### Changed
+---
+type: change
+---
 - `reports/verify/release-readiness-matrix.json` 的 **AR-11**（canary/soak）evidence 更新為記載已觀測但**不計入 soak** 的 13 輪：2026-07-27T13:00:42Z 至 2026-07-28T01:00:42Z 連續 13 輪 systemd timer 觸發、逐小時無缺口、0 次跳過、全部 `status: ok`／`errors: 0`／三個 pass 零 warning、`build_commit` 全為 candidate `c147218`、`index_coverage.eligible == indexed == 933`。gate **維持 `pending`**：canonical spec（`openspec/specs/atomization-release-integrity/spec.md`「Release canary, rollback, and issue closure」）要求 soak 為「至少三輪連續 systemd-timer 觸發、每輪各有全新 ingress session 且至少一個 accepted atom」，並明文排除 zero-ingress／zero-accepted-atom cycle 與手動執行；該 13 輪逐輪 `health.eligible=0`、`atomize.slices=0`、`produced_slice_ids=[]`，全屬 zero-ingress cycle，故 soak 進度為 **0/3**。evidence 與 `docs/release-readiness.md` 一併載明仍需的條件與正確的 rerun 判定方式（只計 `eligible>0` 且 `atomize.slices>0` 的 timer cycle）。
