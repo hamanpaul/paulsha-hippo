@@ -15,6 +15,7 @@ from paulsha_hippo.agent_profiles import (
     AgentProfile,
     FIXED_MAX_AGENT_CALLS,
     FIXED_MAX_ATTEMPTS,
+    FIXED_SESSION_DEADLINE_SECONDS,
     FIXED_TIMEOUT_SECONDS,
     ProfileConfigError,
     default_profiles,
@@ -66,7 +67,7 @@ class AtomizerConfig:
     agent_exec_max_output_tokens: int = DEFAULT_AGENT_EXEC_MAX_OUTPUT_TOKENS
     agent_exec_backend: str = "external-cli"
     external_profiles: tuple[AgentProfile, ...] = field(default_factory=default_profiles)
-    router_deadline_seconds: int = FIXED_TIMEOUT_SECONDS
+    router_deadline_seconds: int = FIXED_SESSION_DEADLINE_SECONDS
     router_max_attempts: int = FIXED_MAX_ATTEMPTS
     router_max_agent_calls: int = FIXED_MAX_AGENT_CALLS
     context_window: int = DEFAULT_CONTEXT_WINDOW
@@ -553,7 +554,7 @@ def load_config(
     except ProfileConfigError as exc:
         raise AtomizerConfigError(str(exc)) from exc
     router_deadline = _parse_positive_int(
-        external_agents.get("deadline_seconds", FIXED_TIMEOUT_SECONDS),
+        external_agents.get("deadline_seconds", FIXED_SESSION_DEADLINE_SECONDS),
         "external_agents.deadline_seconds",
     )
     router_attempts = _parse_positive_int(
@@ -564,7 +565,9 @@ def load_config(
         external_agents.get("max_agent_calls", FIXED_MAX_AGENT_CALLS),
         "external_agents.max_agent_calls",
     )
-    if router_deadline > FIXED_TIMEOUT_SECONDS or router_attempts > FIXED_MAX_ATTEMPTS or router_calls > FIXED_MAX_AGENT_CALLS:
+    if (router_deadline > FIXED_SESSION_DEADLINE_SECONDS
+            or router_attempts > FIXED_MAX_ATTEMPTS
+            or router_calls > FIXED_MAX_AGENT_CALLS):
         raise AtomizerConfigError(
             "external_agents budgets cannot exceed fixed bounded limits"
         )

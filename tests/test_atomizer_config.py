@@ -354,3 +354,57 @@ class AgentExecConfigTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SessionDeadlineStarvationTests(unittest.TestCase):
+    """A fallback chain's session budget must not be capped at one agent's timeout.
+
+    `external_agents.deadline_seconds` bounds the *whole* fallback chain, while
+    `FIXED_TIMEOUT_SECONDS` bounds a *single* agent call. Capping the former by
+    the latter structurally starves every profile after the first: the router
+    hands each call `min(profile.timeout, remaining_seconds)`, so with four
+    eligible profiles sharing one agent's worth of budget the tier-3 fallback
+    can never receive its allotted time. Measured instance: claude 35.1s +
+    codex 16.5s + cg 66.6s consumed 118s of the 300s session budget, leaving
+    local-vllm 181s for work that needed 203s.
+    """
+
+    def _write_override(self, body: str) -> Path:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as handle:
+            handle.write(body)
+            return Path(handle.name)
+
+    def test_session_deadline_may_exceed_single_agent_timeout(self):
+        from paulsha_hippo.agent_profiles import (
+            FIXED_SESSION_DEADLINE_SECONDS,
+            FIXED_TIMEOUT_SECONDS,
+        )
+
+        self.assertGreater(FIXED_SESSION_DEADLINE_SECONDS, FIXED_TIMEOUT_SECONDS)
+        path = self._write_override(
+            f"external_agents:\n  deadline_seconds: {FIXED_SESSION_DEADLINE_SECONDS}\n"
+        )
+        try:
+            cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=path)
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertEqual(cfg.router_deadline_seconds, FIXED_SESSION_DEADLINE_SECONDS)
+
+    def test_session_deadline_above_its_own_cap_is_still_rejected(self):
+        from paulsha_hippo.agent_profiles import FIXED_SESSION_DEADLINE_SECONDS
+
+        path = self._write_override(
+            f"external_agents:\n  deadline_seconds: {FIXED_SESSION_DEADLINE_SECONDS + 1}\n"
+        )
+        try:
+            with self.assertRaises(AtomizerConfigError):
+                load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=path)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_per_agent_timeout_cap_is_unchanged(self):
+        """Hang protection for a single call must not be relaxed by this fix."""
+        from paulsha_hippo.agent_profiles import FIXED_TIMEOUT_SECONDS, AgentProfile
+
+        self.assertEqual(FIXED_TIMEOUT_SECONDS, 300)
+        self.assertEqual(AgentProfile.timeout, FIXED_TIMEOUT_SECONDS)

@@ -32,6 +32,31 @@ candidate in this environment. Each gate's `evidence` field states what
 0.1.2-specific evidence is still needed, and `rerun` records the exact
 command to (re)produce it.
 
+**AR-11 note (2026-07-28) — 13 clean timer cycles that do *not* count.**
+From `2026-07-27T13:00:42Z` to `2026-07-28T01:00:42Z` the dream service ran 13
+consecutive systemd-timer cycles: hourly with no gaps, zero
+`system busy`/`low memory`/lock skips, every run `status: ok` with `errors: 0`
+and zero warnings across all three passes, all on `build_commit c147218…`, and
+`index_coverage.eligible == indexed == 933` throughout.
+
+**None of those 13 cycles count toward the AR-11 soak.** The canonical
+requirement (`openspec/specs/atomization-release-integrity/spec.md`, "Release
+canary, rollback, and issue closure") is *"at least three consecutive
+systemd-timer-triggered scheduled cycles, each with a unique new ingress
+session and at least one accepted atom"*, and states explicitly that *"a
+skipped, zero-ingress, or zero-accepted-atom cycle MUST NOT count toward the
+soak"* and that *"direct service invocation, manual pipeline execution, and
+isolated canaries MUST NOT count as scheduled cycles."* All 13 cycles had
+`health.eligible = 0`, `atomize.slices = 0`, `atomize.produced_slice_ids = []`
+and `atomize.split_sessions = 0` — every one is a zero-ingress,
+zero-accepted-atom cycle. AR-11 therefore stands at **0/3**, and remains
+`pending`.
+
+This matters as a worked example: the 13 cycles are genuinely healthy and every
+number above was independently verified against the raw ledger. The error to
+avoid is not fabricated data — it is drawing a pass verdict from real data that
+does not meet the actual pass condition.
+
 This rebind exists specifically to avoid repeating the AR-11 mistake from
 0.1.1: that gate's evidence once read "three consecutive systemd timer runs
 ... were ok," but the dream ledger later showed all three runs were actually
