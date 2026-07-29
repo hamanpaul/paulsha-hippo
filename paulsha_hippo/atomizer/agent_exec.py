@@ -412,26 +412,32 @@ class CachingAgentClient(AgentClient):
         if not isinstance(result, AgentRunResult):
             self.last_cache_keys = base_keys
             return outputs
-        profile_keys = tuple(
-            self._profile_cache_key(key, result.profile_id, expected_schema)
-            for key in base_keys
-        )
+        # A session can be completed by more than one profile (issue #86 /
+        # D3): each chunk lands under the profile that actually produced it,
+        # not the profile that happened to finish the session, so chunks
+        # never cross-pollute another profile's cache namespace.
+        chunk_provenance = tuple(getattr(self._inner, "chunk_provenance", ()))
+        if len(chunk_provenance) != len(outputs):
+            raise RuntimeError(
+                "router chunk_provenance is missing an entry for a produced "
+                "session chunk output"
+            )
         attempts = getattr(self._inner, "attempts", ())
-        payloads = [
-            {
+        serialized_attempts = [
+            asdict(item) for item in attempts if isinstance(item, AgentRunResult)
+        ]
+        profile_keys = tuple(
+            self._profile_cache_key(key, chunk_result.profile_id, expected_schema)
+            for key, chunk_result in zip(base_keys, chunk_provenance)
+        )
+        for key, output, chunk_result in zip(profile_keys, outputs, chunk_provenance):
+            payload = {
                 "cache_schema": "2",
                 "response_schema": expected_schema,
                 "output": output,
-                "provenance": asdict(result),
-                "attempts": [
-                    asdict(item)
-                    for item in attempts
-                    if isinstance(item, AgentRunResult)
-                ],
+                "provenance": asdict(chunk_result),
+                "attempts": serialized_attempts,
             }
-            for output in outputs
-        ]
-        for key, payload in zip(profile_keys, payloads):
             self._write_text_atomically(
                 self.cache_path_for_key(key),
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),

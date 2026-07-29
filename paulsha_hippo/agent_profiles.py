@@ -611,6 +611,12 @@ class ExternalAgentRouter:
         self._last_error: AgentRunError | None = None
         self.last_result: AgentRunResult | None = None
         self.attempts: tuple[AgentRunResult, ...] = ()
+        # Per-chunk producer record for the most recent run_session() call
+        # (issue #86 / D3): chunk_provenance[i] is the AgentRunResult of the
+        # profile that actually validated frozen_prompts[i], so a session
+        # finished by more than one profile can never be reported as if a
+        # single profile produced every chunk.
+        self.chunk_provenance: tuple[AgentRunResult, ...] = ()
         self._executor = executor
 
     def cache_namespace(self) -> str:
@@ -741,23 +747,33 @@ class ExternalAgentRouter:
         *,
         response_validator: ResponseValidator | None = None,
     ) -> tuple[str, ...]:
-        """Run a frozen prompt session with one profile pinned for all chunks.
+        """Run a frozen prompt session, retaining a validated prefix across profiles.
 
-        A profile is considered successful only after every prompt validates.  If
-        a later chunk fails, all earlier outputs are discarded and the next
-        profile receives the original prompt sequence from chunk zero.  The
-        deadline and agent-call budget belong to this whole session.
+        Every prompt is still validated individually via ``_validate_response``
+        and the prompt sequence itself stays frozen.  When a profile fails
+        partway through the session the chunks it already validated are kept;
+        the next eligible profile resumes from the first chunk that has no
+        validated output instead of repeating validated work (issue #86 / D3).
+        ``self.chunk_provenance`` records, per chunk, the profile that actually
+        produced it so a session finished by more than one profile is never
+        reported as the product of a single profile. The deadline and
+        agent-call budget remain one session-wide resource shared by every
+        profile that is tried; retention never resets or extends them.
         """
         frozen_prompts = tuple(str(prompt) for prompt in prompts)
         if not frozen_prompts:
             return ()
-        session_deadline = session_deadline_seconds(len(frozen_prompts))
+        total_chunks = len(frozen_prompts)
+        session_deadline = session_deadline_seconds(total_chunks)
         self.last_result = None
         self.attempts = ()
+        self.chunk_provenance = ()
         self._last_error = None
         started = time.monotonic()
         attempts: list[AgentRunResult] = []
         calls = 0
+        validated: dict[int, str] = {}
+        chunk_results: dict[int, AgentRunResult] = {}
         for profile in self.profiles:
             if len(attempts) >= self.max_attempts or calls >= self.max_agent_calls:
                 break
@@ -768,7 +784,7 @@ class ExternalAgentRouter:
             eligible, reason = profile.eligible(
                 task_class=self.task_class,
                 path=self.execution_path,
-                chunk_count=len(frozen_prompts),
+                chunk_count=total_chunks,
             )
             if not eligible:
                 # Disabled or task-mismatched profiles are declaratively absent
@@ -799,10 +815,15 @@ class ExternalAgentRouter:
                 continue
             attempt_index = len(attempts) + 1
             attempt_started = time.monotonic()
-            outputs: list[str] = []
+            outputs_this_attempt: list[str] = []
+            # Resume from the first chunk with no validated output rather than
+            # restarting the whole frozen sequence.
+            resume_from = next(index for index in range(total_chunks) if index not in validated)
             try:
-                for prompt in frozen_prompts:
-                    remaining_seconds = session_deadline - (time.monotonic() - started)
+                for index in range(resume_from, total_chunks):
+                    prompt = frozen_prompts[index]
+                    chunk_started = time.monotonic()
+                    remaining_seconds = session_deadline - (chunk_started - started)
                     if remaining_seconds <= 0:
                         raise AgentRunError(
                             "external agent session deadline exhausted",
@@ -833,7 +854,30 @@ class ExternalAgentRouter:
                             output_bytes=len(raw.encode("utf-8", errors="replace")),
                         )
                     self._validate_response(profile, raw, response_validator)
-                    outputs.append(raw)
+                    validated[index] = raw
+                    outputs_this_attempt.append(raw)
+                    chunk_results[index] = AgentRunResult(
+                        profile.id,
+                        profile.revision,
+                        profile.tier,
+                        attempt_index,
+                        profile.model,
+                        profile.effort,
+                        None,
+                        "unverified",
+                        profile.command_fingerprint(),
+                        time.monotonic() - chunk_started,
+                        None,
+                        "",
+                        0,
+                        None if attempt_index == 1 else "degraded-success",
+                        profile.priority,
+                        RESPONSE_SCHEMA_VERSION,
+                        output_bytes=len(raw.encode("utf-8", errors="replace")),
+                    )
+                    # Land per-chunk provenance the moment it validates, not
+                    # only once the whole session completes.
+                    self.chunk_provenance = tuple(chunk_results.values())
                 result = AgentRunResult(
                     profile.id,
                     profile.revision,
@@ -852,13 +896,15 @@ class ExternalAgentRouter:
                     profile.priority,
                     RESPONSE_SCHEMA_VERSION,
                     output_bytes=sum(
-                        len(output.encode("utf-8", errors="replace")) for output in outputs
+                        len(output.encode("utf-8", errors="replace"))
+                        for output in outputs_this_attempt
                     ),
                 )
                 attempts.append(result)
                 self.last_result = result
                 self.attempts = tuple(attempts)
-                return tuple(outputs)
+                self.chunk_provenance = tuple(chunk_results[index] for index in range(total_chunks))
+                return tuple(validated[index] for index in range(total_chunks))
             except Exception as caught:
                 if not isinstance(caught, AgentRunError):
                     caught = AgentRunError(

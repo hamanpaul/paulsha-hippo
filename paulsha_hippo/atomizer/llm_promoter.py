@@ -534,12 +534,18 @@ class LLMPromoter(Promoter):
                 responses.append(validator(raw))
             router_result = self._router_result()
             if router_result is not None:
+                # A session can be completed by more than one profile (issue
+                # #86 / D3): chunk_provenance lives on the router itself, not
+                # on a CachingAgentClient wrapper, so it is read via the same
+                # unwrapped `router` this method already resolved above.
+                chunk_provenance = getattr(router, "chunk_provenance", ()) or None
                 self.last_provenance = safe_provenance(
                     provenance_from_result(
                         router_result,
                         config_hash=self._config_hash,
                         skill_hash=sha256_text(self._skill),
                         attempts=self.router_attempts(),
+                        chunk_provenance=chunk_provenance,
                     )
                 )
             return responses, cache_keys

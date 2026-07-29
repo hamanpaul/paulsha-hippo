@@ -94,7 +94,12 @@ def test_per_call_timeout_still_bounded_by_fixed_timeout_seconds():
 
     router = ExternalAgentRouter((_profile("only", tier=1),))
     router._run_one = run_one  # type: ignore[method-assign]
-    time_points = iter([0.0, 0.0, 0.0, 0.0, 0.0, 450.0, 450.0])
+    # 9 monotonic() reads per this 1-profile/2-chunk session: started, the
+    # deadline/circuit checks, attempt_started, then per chunk a shared
+    # chunk_started/remaining_seconds read plus one elapsed-time read after
+    # the call returns (issue #86 per-chunk provenance), and finally the
+    # attempt's own elapsed-time read.
+    time_points = iter([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 450.0, 450.0, 450.0])
 
     original_monotonic = time.monotonic
     time.monotonic = lambda: next(time_points)  # type: ignore[method-assign]
@@ -451,15 +456,52 @@ def test_router_reuses_exact_frozen_prompt_and_bounds_calls():
     assert len(router.attempts) == 2
 
 
-def test_router_session_validates_each_chunk_and_restarts_from_frozen_chunk_zero():
-    from paulsha_hippo.agent_profiles import AgentRunError
+def test_router_session_resumes_from_first_unvalidated_chunk():
+    """Issue #86 / D3: a validated prefix must survive a profile transition.
 
+    Profile A validates chunk 0 and 1, then fails at chunk 2.  Profile B must
+    receive only chunk 2 -- not the whole frozen prompt sequence -- and the
+    final outputs must be the retained A0/A1 plus B's chunk 2, not a full
+    re-run by B.
+    """
     profiles = (_profile("first", tier=1), _profile("second", tier=2))
     calls: list[tuple[str, str, int]] = []
 
     def execute(profile, prompt, call):
         calls.append((profile.id, prompt, call))
-        if profile.id == "first" and prompt == "chunk-1":
+        if profile.id == "first" and prompt == "chunk-2":
+            return "malformed", "", 0
+        return f"{profile.id}:{prompt}", "", 0
+
+    def validate(raw):
+        if raw.endswith("malformed"):
+            raise ValueError("response schema mismatch")
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    outputs = router.run_session(
+        ("chunk-0", "chunk-1", "chunk-2"), response_validator=validate
+    )
+    assert outputs == ("first:chunk-0", "first:chunk-1", "second:chunk-2")
+    assert calls == [
+        ("first", "chunk-0", 1),
+        ("first", "chunk-1", 2),
+        ("first", "chunk-2", 3),
+        ("second", "chunk-2", 4),
+    ]
+    assert router.last_result is not None
+    assert router.last_result.profile_id == "second"
+    assert router.last_result.fallback_reason == "degraded-success"
+    assert router.attempts[0].failure_category == "invalid_output"
+
+
+def test_router_session_records_chunk_provenance_for_mixed_profile_session():
+    """Issue #86 / D3: provenance SHALL identify the producing profile per chunk."""
+    from paulsha_hippo.agent_profiles import AgentRunResult
+
+    profiles = (_profile("first", tier=1), _profile("second", tier=2))
+
+    def execute(profile, prompt, call):
+        if profile.id == "first" and prompt == "chunk-2":
             return "malformed", "", 0
         return "valid", "", 0
 
@@ -468,23 +510,44 @@ def test_router_session_validates_each_chunk_and_restarts_from_frozen_chunk_zero
             raise ValueError("response schema mismatch")
 
     router = ExternalAgentRouter(profiles, executor=execute)
-    assert router.run_session(("chunk-0", "chunk-1"), response_validator=validate) == (
-        "valid",
-        "valid",
-    )
-    assert calls == [
-        ("first", "chunk-0", 1),
-        ("first", "chunk-1", 2),
-        ("second", "chunk-0", 3),
-        ("second", "chunk-1", 4),
+    router.run_session(("chunk-0", "chunk-1", "chunk-2"), response_validator=validate)
+
+    assert len(router.chunk_provenance) == 3
+    assert all(isinstance(entry, AgentRunResult) for entry in router.chunk_provenance)
+    assert [entry.profile_id for entry in router.chunk_provenance] == [
+        "first",
+        "first",
+        "second",
     ]
-    assert router.last_result is not None
-    assert router.last_result.profile_id == "second"
+    # A session completed by multiple profiles must not read as one profile's work.
     assert router.last_result.fallback_reason == "degraded-success"
-    assert router.attempts[0].failure_category == "invalid_output"
+
+
+def test_router_session_single_profile_completion_has_uniform_chunk_provenance():
+    """A session with no fallback transition must not look mixed."""
+    profile = _profile("only", tier=1)
+
+    def execute(profile, prompt, call):
+        return "valid", "", 0
+
+    router = ExternalAgentRouter((profile,), executor=execute)
+    router.run_session(("chunk-0", "chunk-1"))
+
+    assert [entry.profile_id for entry in router.chunk_provenance] == ["only", "only"]
+    assert router.last_result.fallback_reason is None
 
 
 def test_router_session_shares_call_budget_across_fallback_restarts():
+    """Retention must not reset or refill the session-wide call budget (redline #6).
+
+    Profile A validates chunk 0, then fails on chunk 1.  Retention means B
+    only needs to redo chunk 1 and then produce chunk 2 -- but the session's
+    call budget is shared, not reset per profile: A already spent 2 of the 3
+    available calls, so B gets exactly one more call (chunk 1) before the
+    shared budget is exhausted partway through B's own attempt on chunk 2.
+    This proves the budget carries over across the profile transition
+    instead of being refilled for the fallback profile.
+    """
     profiles = (_profile("first", tier=1), _profile("second", tier=2))
     calls: list[tuple[str, str]] = []
 
@@ -504,8 +567,14 @@ def test_router_session_shares_call_budget_across_fallback_restarts():
         max_agent_calls=3,
     )
     with pytest.raises(Exception, match="fallback exhausted"):
-        router.run_session(("chunk-0", "chunk-1"), response_validator=validate)
-    assert calls == [("first", "chunk-0"), ("first", "chunk-1"), ("second", "chunk-0")]
+        router.run_session(
+            ("chunk-0", "chunk-1", "chunk-2"), response_validator=validate
+        )
+    assert calls == [
+        ("first", "chunk-0"),
+        ("first", "chunk-1"),
+        ("second", "chunk-1"),
+    ]
     assert router.attempts[-1].failure_category == "budget"
 
 
@@ -606,7 +675,11 @@ def test_typed_router_rejects_legacy_raw_cache_and_rewrites_envelope(tmp_path):
     assert payload["response_schema"] == "1"
 
 
-def test_session_cache_never_mixes_profiles_or_persists_partial_chunks(tmp_path):
+def test_session_cache_lands_per_chunk_and_isolates_profiles(tmp_path):
+    """Issue #86 / D3 3.3: a chunk lands the moment it validates -- callers do
+    not wait for the whole session -- and each chunk's cache envelope is
+    attributed to the profile that actually produced it, not the profile that
+    happened to finish the session."""
     profiles = (_profile("first", tier=1), _profile("second", tier=2))
     calls: list[tuple[str, str]] = []
 
@@ -629,25 +702,45 @@ def test_session_cache_never_mixes_profiles_or_persists_partial_chunks(tmp_path)
         response_validator=validate,
         response_schema="1",
     ) == ("valid", "valid")
+    # chunk-0 is retained from "first"; only chunk-1 is re-tried by "second".
     assert calls == [
         ("first", "chunk-0"),
         ("first", "chunk-1"),
-        ("second", "chunk-0"),
         ("second", "chunk-1"),
     ]
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in tmp_path.glob("*.json")]
     assert len(payloads) == 2
-    assert {payload["provenance"]["profile_id"] for payload in payloads} == {"second"}
     assert all(payload["response_schema"] == "1" for payload in payloads)
 
-    def should_not_execute(profile, prompt, attempt):
-        raise AssertionError("complete selected-profile cache must be reusable")
+    assert len(cached.last_cache_keys) == 2
+    chunk0_payload = json.loads(cached.cache_path_for_key(cached.last_cache_keys[0]).read_text())
+    chunk1_payload = json.loads(cached.cache_path_for_key(cached.last_cache_keys[1]).read_text())
+    # No cross-profile pollution: each chunk's envelope names its own producer.
+    assert chunk0_payload["provenance"]["profile_id"] == "first"
+    assert chunk1_payload["provenance"]["profile_id"] == "second"
 
-    replay_router = ExternalAgentRouter(profiles, executor=should_not_execute)
+    # A mixed-profile session is a conservative miss on full-session replay
+    # (tasks.md 3.3 only requires per-chunk landing/isolation, not a mixed
+    # replay); the session genuinely re-executes rather than silently
+    # combining stale single-profile candidate caches.
+    replay_calls: list[tuple[str, str]] = []
+
+    def replay_execute(profile, prompt, attempt):
+        replay_calls.append((profile.id, prompt))
+        if profile.id == "first" and prompt == "chunk-1":
+            return "bad", "", 0
+        return "valid", "", 0
+
+    replay_router = ExternalAgentRouter(profiles, executor=replay_execute)
     replay = CachingAgentClient(replay_router, tmp_path)
     assert replay.run_session(
-        ("changed prompt is deliberately ignored by explicit cache keys", "chunk-1"),
+        ("chunk-0", "chunk-1"),
         cache_keys=keys,
         response_validator=validate,
         response_schema="1",
     ) == ("valid", "valid")
+    assert replay_calls == [
+        ("first", "chunk-0"),
+        ("first", "chunk-1"),
+        ("second", "chunk-1"),
+    ]

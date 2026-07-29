@@ -21,6 +21,11 @@ from ..agent_profiles import (
 )
 
 _MAX_PROVENANCE_ATTEMPTS = 6
+# Bounds how many per-chunk provenance entries a session's distiller record can
+# carry (issue #86 / D3). Sessions are packed into a small, bounded number of
+# chunks already (see FIXED_MAX_AGENT_CALLS / max_session_chunks); this is a
+# defensive cap on the persisted record, not an expected ceiling in practice.
+_MAX_PROVENANCE_CHUNKS = 64
 
 
 def _attempt_payload(result: AgentRunResult) -> dict[str, Any]:
@@ -50,6 +55,27 @@ def _bounded_attempts(attempts: Sequence[AgentRunResult]) -> list[dict[str, Any]
         _attempt_payload(attempt)
         for attempt in tuple(attempts)[:_MAX_PROVENANCE_ATTEMPTS]
         if isinstance(attempt, AgentRunResult)
+    ]
+
+
+def _chunk_provenance_payload(chunk_index: int, result: AgentRunResult) -> dict[str, Any]:
+    """Project one chunk's producer without prompt/output/credential fields."""
+    return {
+        "chunk_index": chunk_index,
+        "profile_id": result.profile_id,
+        "tier": result.tier,
+        "elapsed_seconds": round(float(result.elapsed_seconds), 6),
+    }
+
+
+def _bounded_chunk_provenance(
+    chunk_provenance: Sequence[AgentRunResult],
+) -> list[dict[str, Any]]:
+    bounded = tuple(chunk_provenance)[:_MAX_PROVENANCE_CHUNKS]
+    return [
+        _chunk_provenance_payload(index, result)
+        for index, result in enumerate(bounded)
+        if isinstance(result, AgentRunResult)
     ]
 
 
@@ -96,6 +122,7 @@ def provenance_from_result(
     build: str | None = None,
     fallback_reason: str | None = None,
     attempts: Sequence[AgentRunResult] | None = None,
+    chunk_provenance: Sequence[AgentRunResult] | None = None,
 ) -> dict[str, Any]:
     resolved_build = build if build is not None else _runtime_build_commit()
     if result is None:
@@ -119,6 +146,8 @@ def provenance_from_result(
         }
         if attempts is not None:
             payload["attempts"] = _bounded_attempts(attempts)
+        if chunk_provenance is not None:
+            payload["chunk_provenance"] = _bounded_chunk_provenance(chunk_provenance)
         return payload
     payload = {
         "profile_id": result.profile_id,
@@ -144,6 +173,8 @@ def provenance_from_result(
     }
     if attempts is not None:
         payload["attempts"] = _bounded_attempts(attempts)
+    if chunk_provenance is not None:
+        payload["chunk_provenance"] = _bounded_chunk_provenance(chunk_provenance)
     return payload
 
 
@@ -158,7 +189,7 @@ def safe_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
         "requested_effort", "observed_model", "model_verification", "command_fingerprint",
         "config_hash", "skill_hash", "hippo_version", "build_commit", "fallback_reason",
         "response_schema", "elapsed_seconds", "failure_category", "stderr", "exit_code",
-        "attempts",
+        "attempts", "chunk_provenance",
     }
     result = {key: value[key] for key in sorted(allowed) if key in value}
     if "stderr" in result:
@@ -185,6 +216,18 @@ def safe_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
                     bounded_attempt["stderr"] = sanitize_stderr(bounded_attempt["stderr"])
                 bounded.append(bounded_attempt)
         result["attempts"] = bounded
+    if "chunk_provenance" in result:
+        bounded_chunks: list[dict[str, Any]] = []
+        raw_chunks = result["chunk_provenance"]
+        if isinstance(raw_chunks, Sequence) and not isinstance(raw_chunks, (str, bytes)):
+            chunk_allowed = {"chunk_index", "profile_id", "tier", "elapsed_seconds"}
+            for chunk in list(raw_chunks)[:_MAX_PROVENANCE_CHUNKS]:
+                if not isinstance(chunk, Mapping):
+                    continue
+                bounded_chunks.append(
+                    {key: chunk[key] for key in sorted(chunk_allowed) if key in chunk}
+                )
+        result["chunk_provenance"] = bounded_chunks
     return result
 
 
