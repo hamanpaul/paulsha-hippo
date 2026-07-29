@@ -30,7 +30,6 @@ DIAG_KEYS = (
     "missing_sl_id",
     "invalid_ts",
     "future_event",
-    "window_older",
 )
 
 # Fixed, bounded statistic key set (issue #67) — normal outcomes that are
@@ -38,8 +37,20 @@ DIAG_KEYS = (
 # because janitor surfaces every non-zero *diagnostic* as a warning, which
 # downgrades the whole dream run to ``partial``; a direct read is ordinary
 # agent behaviour and must never do that.
+#
+# Issue #87: ``window_older`` (an offered/read event whose ts fell before the
+# analysis window) is the 4th instance of the same anti-pattern (after #64
+# torn lines, #67 direct_read, #71 future_event). offered.jsonl/
+# memory_usage.jsonl are append-only ledgers, so an event aging past the
+# 30-day window as real time advances is a time-driven inevitability, not a
+# defect — unlike ``future_event`` (a ts *ahead* of now, which is genuine
+# clock skew and stays in DIAG_KEYS). It must still be counted here rather
+# than dropped silently: observability of how much ledger history has aged
+# out is useful, it just must not surface as a warning that pins a
+# `hippo dream run` at `partial`.
 STAT_KEYS = (
     "direct_read",
+    "window_older",
 )
 
 # Usage-boost read_count/last_read_at aggregation only considers reads within
@@ -172,10 +183,14 @@ def collect_usage_reads(
     ``read_count``. A slice with direct reads only therefore surfaces as
     ``(0, <ts>)``: zero boost, live retention.
 
-    Missing/``(unknown)`` identity, unparsable timestamps, future timestamps and
-    out-of-window timestamps remain genuine defects and are tallied into the
-    bounded :data:`DIAG_KEYS` counters instead of raising or silently vanishing.
-    Read-only against the ledger; never writes to it.
+    Missing/``(unknown)`` identity, unparsable timestamps and future timestamps
+    remain genuine defects and are tallied into the bounded :data:`DIAG_KEYS`
+    counters instead of raising or silently vanishing. Issue #87: an
+    out-of-window timestamp (the event predates the analysis window) is *not*
+    a defect — append-only ledgers age events past the window as a matter of
+    course — so it is tallied into :data:`STAT_KEYS` (``window_older``)
+    instead, same treatment as #67's ``direct_read``. Read-only against the
+    ledger; never writes to it.
     """
     led = memory_root / "runtime" / "ledger"
     diagnostics = new_diagnostics()
@@ -197,7 +212,7 @@ def collect_usage_reads(
             diagnostics["future_event"] += 1
             continue
         if offer_ts < window_start:
-            diagnostics["window_older"] += 1
+            stats["window_older"] += 1
             continue
         for item in offered_list:
             slice_id = item.get("sl_id") if isinstance(item, dict) else item
@@ -228,7 +243,7 @@ def collect_usage_reads(
             diagnostics["future_event"] += 1
             continue
         if read_ts < window_start:
-            diagnostics["window_older"] += 1
+            stats["window_older"] += 1
             continue
         key = (str(tool), str(session_id), str(slice_id))
         offer_ts = offered_index.get(key)
