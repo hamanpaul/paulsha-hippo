@@ -152,6 +152,64 @@ class JanitorDirectReadWarningTests(unittest.TestCase):
         )
 
 
+class JanitorWindowOlderWarningTests(unittest.TestCase):
+    """Issue #87: an event aging out of the 30-day usage-boost window is the
+    necessary, time-driven consequence of an append-only ledger's history
+    growing past the analysis window — not a ledger defect. Same rationale as
+    #67's ``direct_read``; it must not pin the whole dream run at ``partial``
+    (4th instance of the "benign state misclassified as a warning-triggering
+    diagnostic" anti-pattern, after #64 torn lines, #67 ``direct_read``, #71
+    ``future_event``).
+    """
+
+    def _scan_with_reads(self, reads: list[dict], offers: list[dict] | None = None) -> dict:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            knowledge_root = root / "knowledge"
+            knowledge_root.mkdir(parents=True)
+            _write_record(knowledge_root / "sl-a.md", "sl-a", "sess-a")
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True, exist_ok=True)
+            (led / "offered.jsonl").write_text(
+                "".join(json.dumps(e) + "\n" for e in (offers or [])), encoding="utf-8"
+            )
+            (led / "memory_usage.jsonl").write_text(
+                "".join(json.dumps(e) + "\n" for e in reads), encoding="utf-8"
+            )
+            cfg, cfg_hash = janitor_config.load_config(override_path=None)
+            return scanner.run_scan(
+                root,
+                now="2026-07-27T00:00:00Z",
+                knowledge_root=knowledge_root,
+                config=cfg,
+                config_hash=cfg_hash,
+                source_path_exists=lambda record: True,
+                usage_now="2026-07-27T00:00:00Z",
+            )
+
+    def test_window_older_reads_emit_no_usage_diagnostics_warning(self):
+        result = self._scan_with_reads([
+            {"tool": "claude-code", "session_id": "s1", "sl_id": "sl-a",
+             "source": "read", "ts": "2026-01-01T00:00:00Z"},
+        ])
+
+        self.assertEqual(
+            [w for w in result["warnings"] if "usage ledger diagnostics" in w], []
+        )
+
+    def test_window_older_offers_emit_no_usage_diagnostics_warning(self):
+        result = self._scan_with_reads(
+            reads=[],
+            offers=[{"tool": "claude-code", "session_id": "s1",
+                     "ts": "2026-01-01T00:00:00Z",
+                     "offered": [{"sl_id": "sl-a"}]}],
+        )
+
+        self.assertEqual(
+            [w for w in result["warnings"] if "usage ledger diagnostics" in w], []
+        )
+
+
 class JanitorUsageNowConcurrencyTests(unittest.TestCase):
     """Issue #70: a dream run freezes a single `now` at run-start and hands it
     to both the (slow) atomize pass and the janitor pass that runs after it.

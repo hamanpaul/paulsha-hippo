@@ -163,10 +163,13 @@ class CollectUsageReadsTests(unittest.TestCase):
                 "missing_sl_id": 1,
                 "invalid_ts": 1,
                 "future_event": 1,
-                "window_older": 1,
             })
             self.assertEqual(diag, expected_diag)
-            self.assertEqual(stats, {"direct_read": 1})
+            # Issue #87: an event aging out of the 30-day window is the ordinary
+            # consequence of an append-only ledger's history growing past the
+            # analysis window, not a defect, so it lands in STAT_KEYS (like #67's
+            # direct_read) rather than DIAG_KEYS.
+            self.assertEqual(stats, {"direct_read": 1, "window_older": 1})
 
     def test_unknown_is_rejected_for_every_identity_component(self):
         cases = (
@@ -235,7 +238,8 @@ class CollectUsageReadsTests(unittest.TestCase):
                 "sl-old": (0, "2026-07-21T00:00:00Z"),
                 "sl-future": (0, "2026-07-21T00:00:00Z"),
             })
-            self.assertEqual(diag["window_older"], 1)
+            # Issue #87: the out-of-window *offer* is a stat, not a diagnostic.
+            self.assertEqual(stats["window_older"], 1)
             self.assertEqual(diag["future_event"], 1)
             self.assertEqual(stats["direct_read"], 2)
 
@@ -403,7 +407,7 @@ class DirectReadAttributionTests(unittest.TestCase):
             self.assertEqual(diag, usage_ledger.new_diagnostics())
             self.assertEqual(stats["direct_read"], 1)
 
-    def test_malformed_and_out_of_window_reads_are_still_diagnostics_not_direct(self):
+    def test_malformed_reads_are_diagnostics_and_out_of_window_reads_are_stats_not_direct(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             now = datetime(2026, 7, 27, tzinfo=timezone.utc)
@@ -416,10 +420,75 @@ class DirectReadAttributionTests(unittest.TestCase):
 
             result, diag, stats = usage_ledger.collect_usage_reads(root, now)
 
+            # Issue #87: the aged-out read never reaches last_read either (it
+            # `continue`s before the last_read update), same as a diagnostic
+            # would, but it is bookkept as a stat rather than a diagnostic.
             self.assertEqual(result, {})
-            self.assertEqual(diag["window_older"], 1)
             self.assertEqual(diag["missing_tool"], 1)
+            self.assertEqual(stats["window_older"], 1)
             self.assertEqual(stats["direct_read"], 0)
+
+
+class WindowOlderClassificationTests(unittest.TestCase):
+    """Issue #87: an event aging out of the 30-day analysis window is the
+    ordinary, time-driven consequence of an append-only ledger's history
+    growing past the window — not a ledger defect. Same rationale as #67's
+    ``direct_read``: janitor surfaces every non-zero *diagnostic* as a
+    warning that pins the whole ``hippo dream run`` at ``partial``, so
+    ``window_older`` must live in :data:`STAT_KEYS`, not :data:`DIAG_KEYS`
+    (4th instance of this anti-pattern, after #64 torn lines, #67
+    ``direct_read``, #71 ``future_event``). It must still be counted
+    (observability is not allowed to disappear) — just not as a diagnostic.
+    """
+
+    def test_window_older_is_a_stat_key_not_a_diag_key(self):
+        self.assertIn("window_older", usage_ledger.STAT_KEYS)
+        self.assertNotIn("window_older", usage_ledger.DIAG_KEYS)
+
+    def test_out_of_window_offer_is_counted_as_stat_not_diagnostic(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            (led / "offered.jsonl").write_text(
+                json.dumps({
+                    "tool": "codex", "session_id": "s1",
+                    "ts": "2026-01-01T00:00:00Z",
+                    "offered": [{"sl_id": "sl-a"}],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            (led / "memory_usage.jsonl").write_text("", encoding="utf-8")
+
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            self.assertEqual(result, {})
+            self.assertEqual(diag, usage_ledger.new_diagnostics())
+            self.assertEqual(stats["window_older"], 1)
+
+    def test_out_of_window_read_is_stat_not_direct_and_skips_last_read(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            led = root / "runtime" / "ledger"
+            led.mkdir(parents=True)
+            now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+            (led / "offered.jsonl").write_text("", encoding="utf-8")
+            (led / "memory_usage.jsonl").write_text(
+                json.dumps({
+                    "tool": "codex", "session_id": "s1", "sl_id": "sl-a",
+                    "source": "read", "ts": "2026-01-01T00:00:00Z",
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            result, diag, stats = usage_ledger.collect_usage_reads(root, now)
+
+            # window-older read `continue`s before the last_read update, so it
+            # must not appear in last_read_map at all (not even as a 0-count row).
+            self.assertEqual(result, {})
+            self.assertEqual(diag, usage_ledger.new_diagnostics())
+            self.assertEqual(stats, {"direct_read": 0, "window_older": 1})
 
 
 class UsageBoostFormulaTests(unittest.TestCase):
