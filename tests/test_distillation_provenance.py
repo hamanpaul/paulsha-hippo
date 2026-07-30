@@ -111,6 +111,65 @@ def test_distiller_provenance_round_trips_through_atom_frontmatter():
     assert slice_frontmatter.validate(parsed, atom.body) == []
 
 
+def test_chunk_provenance_round_trips_through_atom_frontmatter():
+    """Issue #86 finding: a mixed-profile session's per-chunk provenance must
+    actually reach the persisted slice frontmatter, not just the in-memory
+    distiller dict. Otherwise the persisted ``distiller.profile_id`` reads as
+    if a single profile produced the whole slice, contradicting the
+    chunk_provenance recorded for it -- the "distiller.profile_id 說謊"
+    scenario the design doc explicitly forbids."""
+    value = safe_provenance(
+        {
+            "profile_id": "second",
+            "profile_revision": "1",
+            "tier": 2,
+            "fallback_reason": "degraded-success",
+            "response_schema": "1",
+            "stderr": "",
+            "exit_code": 0,
+            "chunk_provenance": [
+                {"chunk_index": 0, "profile_id": "first", "tier": 1, "elapsed_seconds": 1.5},
+                {"chunk_index": 1, "profile_id": "second", "tier": 2, "elapsed_seconds": 2.5},
+            ],
+        }
+    )
+    atom = slice_frontmatter.Slice(
+        slice_id="sl-chunk-provenance",
+        frontmatter={
+            "phase": "review", "project": "demo", "slice_id": "sl-chunk-provenance",
+            "artifact_kind": "report", "version": "1", "created_at": "2026-07-30T00:00:00Z",
+            "created_by": "claude", "source_session": "s1", "gate_required": False,
+            "checksum": "", "memory_layer": "knowledge", "source_agent": "claude",
+            "captured_at": "2026-07-30T00:00:00Z", "provenance": {}, "supersedes": [],
+            "distiller": value, "title": "混合 profile", "atom_title": "混合 profile",
+        },
+        body="body\n",
+    )
+    atom = slice_frontmatter.Slice(
+        slice_id=atom.slice_id,
+        frontmatter={
+            **atom.frontmatter,
+            "checksum": __import__("hashlib").sha256(atom.body.encode()).hexdigest(),
+        },
+        body=atom.body,
+    )
+
+    rendered = slice_frontmatter.render(atom)
+    assert "chunk_provenance" in rendered
+
+    parsed, _body = frontmatter_io.read(rendered)
+
+    # The whole point: the slice actually persisted on disk must not lose the
+    # per-chunk producer record -- distiller.profile_id staying "second" is
+    # only honest because chunk_provenance is also on disk to show chunk 0
+    # was produced by "first".
+    assert parsed["distiller"]["profile_id"] == "second"
+    chunk_provenance = parsed["distiller"]["chunk_provenance"]
+    assert [entry["profile_id"] for entry in chunk_provenance] == ["first", "second"]
+    assert [entry["chunk_index"] for entry in chunk_provenance] == [0, 1]
+    assert slice_frontmatter.validate(parsed, atom.body) == []
+
+
 def test_safe_provenance_does_not_accept_unbounded_stderr():
     safe = safe_provenance({"profile_id": "x", "stderr": "token=secret\n" + "x" * 1000})
     assert len(safe["stderr"]) <= 500

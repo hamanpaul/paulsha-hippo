@@ -341,7 +341,15 @@ class CachingAgentClient(AgentClient):
         response_validator: Callable[[str], object] | None = None,
         response_schema: str | None = None,
     ) -> tuple[str, ...]:
-        """Run/cache a complete router session without persisting partial chunks."""
+        """Run/cache a router session, landing each chunk the moment it validates.
+
+        A chunk's cache envelope is written as soon as the router validates it
+        (issue #86 / D3), not only once the whole session succeeds: if every
+        remaining profile subsequently exhausts on a later chunk and the
+        session raises, chunks that already validated earlier in this same
+        call are still on disk when the exception propagates. A chunk that
+        never validates under any profile is never landed.
+        """
         frozen_prompts = tuple(str(prompt) for prompt in prompts)
         if not frozen_prompts:
             self.last_cache_keys = ()
@@ -402,36 +410,76 @@ class CachingAgentClient(AgentClient):
             for key in profile_keys:
                 self.clear_cache_key(key)
 
-        outputs = tuple(
-            self._inner.run_session(
-                frozen_prompts,
-                response_validator=response_validator,
+        landed_keys: list[str] = []
+
+        def _land_validated_chunk(index: int, raw: str, chunk_result: AgentRunResult) -> None:
+            # Fires the instant the router validates a chunk, whether or not
+            # the session as a whole later succeeds. The attempts list is not
+            # final yet at this point, so it lands empty here; a session that
+            # completes normally rewrites the same key below with the full
+            # attempts history once it is known.
+            key = self._profile_cache_key(base_keys[index], chunk_result.profile_id, expected_schema)
+            payload = {
+                "cache_schema": "2",
+                "response_schema": expected_schema,
+                "output": raw,
+                "provenance": asdict(chunk_result),
+                "attempts": [],
+            }
+            self._write_text_atomically(
+                self.cache_path_for_key(key),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             )
-        )
+            landed_keys.append(key)
+
+        try:
+            outputs = tuple(
+                self._inner.run_session(
+                    frozen_prompts,
+                    response_validator=response_validator,
+                    on_chunk_validated=_land_validated_chunk,
+                )
+            )
+        except Exception:
+            # Issue #86 blocking finding: a session that exhausts on a later
+            # chunk still raises *after* on_chunk_validated already landed
+            # earlier chunks on disk. Without exposing those keys here,
+            # last_cache_keys keeps whatever it held before this call, the
+            # caller (LLMPromoter._run_session) has nothing to copy into
+            # _last_chunk_cache_keys, and clear_last_chunk_caches() on the
+            # park path becomes a permanent no-op over a landed envelope.
+            self.last_cache_keys = tuple(landed_keys)
+            raise
         result = self._inner.last_result
         if not isinstance(result, AgentRunResult):
             self.last_cache_keys = base_keys
             return outputs
-        profile_keys = tuple(
-            self._profile_cache_key(key, result.profile_id, expected_schema)
-            for key in base_keys
-        )
+        # A session can be completed by more than one profile (issue #86 /
+        # D3): each chunk lands under the profile that actually produced it,
+        # not the profile that happened to finish the session, so chunks
+        # never cross-pollute another profile's cache namespace.
+        chunk_provenance = tuple(getattr(self._inner, "chunk_provenance", ()))
+        if len(chunk_provenance) != len(outputs):
+            raise RuntimeError(
+                "router chunk_provenance is missing an entry for a produced "
+                "session chunk output"
+            )
         attempts = getattr(self._inner, "attempts", ())
-        payloads = [
-            {
+        serialized_attempts = [
+            asdict(item) for item in attempts if isinstance(item, AgentRunResult)
+        ]
+        profile_keys = tuple(
+            self._profile_cache_key(key, chunk_result.profile_id, expected_schema)
+            for key, chunk_result in zip(base_keys, chunk_provenance)
+        )
+        for key, output, chunk_result in zip(profile_keys, outputs, chunk_provenance):
+            payload = {
                 "cache_schema": "2",
                 "response_schema": expected_schema,
                 "output": output,
-                "provenance": asdict(result),
-                "attempts": [
-                    asdict(item)
-                    for item in attempts
-                    if isinstance(item, AgentRunResult)
-                ],
+                "provenance": asdict(chunk_result),
+                "attempts": serialized_attempts,
             }
-            for output in outputs
-        ]
-        for key, payload in zip(profile_keys, payloads):
             self._write_text_atomically(
                 self.cache_path_for_key(key),
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),

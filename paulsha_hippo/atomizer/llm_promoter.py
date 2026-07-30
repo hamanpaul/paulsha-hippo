@@ -534,16 +534,31 @@ class LLMPromoter(Promoter):
                 responses.append(validator(raw))
             router_result = self._router_result()
             if router_result is not None:
+                # A session can be completed by more than one profile (issue
+                # #86 / D3): chunk_provenance lives on the router itself, not
+                # on a CachingAgentClient wrapper, so it is read via the same
+                # unwrapped `router` this method already resolved above.
+                chunk_provenance = getattr(router, "chunk_provenance", ()) or None
                 self.last_provenance = safe_provenance(
                     provenance_from_result(
                         router_result,
                         config_hash=self._config_hash,
                         skill_hash=sha256_text(self._skill),
                         attempts=self.router_attempts(),
+                        chunk_provenance=chunk_provenance,
                     )
                 )
             return responses, cache_keys
         except (AgentExecError, AgentRunError, llm_output.LlmOutputError) as exc:
+            if isinstance(self._agent, CachingAgentClient):
+                # Issue #86 blocking finding: promote() never reaches its own
+                # `self._last_chunk_cache_keys = tuple(chunk_cache_keys)`
+                # assignment on this exception path, so without this the
+                # attribute stays at its empty __init__ default and the park
+                # path's clear_last_chunk_caches() can never find (let alone
+                # evict) chunks that on_chunk_validated already landed on
+                # disk before the session exhausted on a later chunk.
+                self._last_chunk_cache_keys = tuple(self._agent.last_cache_keys)
             raise PromoteError(
                 f"llm promote failed after session attempt(s): {exc}",
                 category=_failure_category(exc),

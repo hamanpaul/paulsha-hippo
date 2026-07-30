@@ -257,22 +257,54 @@ class LLMPromoterTests(unittest.TestCase):
 
         self.assertEqual(promoter.last_raw_output, "")
 
-    def test_router_session_schema_failure_restarts_all_chunks_and_persists_attempts(self):
-        def profile(profile_id: str, tier: int) -> AgentProfile:
-            return AgentProfile.from_mapping(
-                {
-                    "id": profile_id,
-                    "tier": tier,
-                    "priority": 1,
-                    "traits": ["test"],
-                    "task_classes": ["atomization"],
-                    "model": "test-model",
-                    "effort": "medium",
-                    "supported_efforts": ["medium"],
-                    "argv": [sys.executable, "-c", "pass"],
-                }
-            )
+    @staticmethod
+    def _two_chunk_profile(profile_id: str, tier: int) -> AgentProfile:
+        return AgentProfile.from_mapping(
+            {
+                "id": profile_id,
+                "tier": tier,
+                "priority": 1,
+                "traits": ["test"],
+                "task_classes": ["atomization"],
+                "model": "test-model",
+                "effort": "medium",
+                "supported_efforts": ["medium"],
+                "argv": [sys.executable, "-c", "pass"],
+            }
+        )
 
+    @staticmethod
+    def _two_chunks():
+        parts = []
+        for index in (0, 1):
+            fragment = _frag(index)
+            parts.append(
+                llm_promoter.budget.FragmentPart(
+                    original_fragment_index=index,
+                    part_index=1,
+                    part_count=1,
+                    body=fragment.body,
+                    fragment=fragment,
+                )
+            )
+        return [
+            llm_promoter.budget.PromptChunk(
+                index=index,
+                count=2,
+                prompt=f"chunk-{index}",
+                estimated_tokens=1,
+                parts=(parts[index],),
+            )
+            for index in (0, 1)
+        ]
+
+    def test_router_session_schema_failure_resumes_from_unvalidated_chunk(self):
+        """Issue #86 / D3: a validated prefix survives a profile transition all
+        the way through promote() -- the retained chunk is not re-requested,
+        and the session-level distiller honestly records the mixed profiles
+        that produced it (per-chunk provenance + degraded-success), even
+        though the session-completing ``profile_id`` stays the profile that
+        finished the session."""
         valid_0 = (
             '[{"title":"specific finding zero","artifact_kind":"report",'
             '"project":"paulshaclaw","tags":[],"body":"body a",'
@@ -291,30 +323,9 @@ class LLMPromoterTests(unittest.TestCase):
                 return "not schema", "", 0
             return valid_0 if prompt == "chunk-0" else valid_1, "", 0
 
-        parts = []
-        for index in (0, 1):
-            fragment = _frag(index)
-            parts.append(
-                llm_promoter.budget.FragmentPart(
-                    original_fragment_index=index,
-                    part_index=1,
-                    part_count=1,
-                    body=fragment.body,
-                    fragment=fragment,
-                )
-            )
-        chunks = [
-            llm_promoter.budget.PromptChunk(
-                index=index,
-                count=2,
-                prompt=f"chunk-{index}",
-                estimated_tokens=1,
-                parts=(parts[index],),
-            )
-            for index in (0, 1)
-        ]
+        chunks = self._two_chunks()
         router = ExternalAgentRouter(
-            (profile("first", 1), profile("second", 2)),
+            (self._two_chunk_profile("first", 1), self._two_chunk_profile("second", 2)),
             executor=execute,
         )
         promoter = llm_promoter.LLMPromoter(
@@ -326,15 +337,121 @@ class LLMPromoterTests(unittest.TestCase):
             slices = promoter.promote([_frag(0), _frag(1)], CFG)
 
         self.assertEqual(len(slices), 2)
+        # chunk-0 is retained from "first"; only chunk-1 is re-tried by "second".
         self.assertEqual(calls, [
             ("first", "chunk-0"),
             ("first", "chunk-1"),
-            ("second", "chunk-0"),
             ("second", "chunk-1"),
         ])
         self.assertEqual(promoter.last_provenance["profile_id"], "second")
+        self.assertEqual(promoter.last_provenance["fallback_reason"], "degraded-success")
         self.assertEqual(len(promoter.last_provenance["attempts"]), 2)
         self.assertEqual(promoter.last_provenance["attempts"][0]["failure_category"], "invalid_output")
+        chunk_provenance = promoter.last_provenance["chunk_provenance"]
+        self.assertEqual(
+            [entry["profile_id"] for entry in chunk_provenance],
+            ["first", "second"],
+        )
+        self.assertEqual([entry["chunk_index"] for entry in chunk_provenance], [0, 1])
+
+    def test_router_session_exhaustion_after_partial_retention_raises_and_publishes_nothing(self):
+        """Issue #86 redline: even with a retained validated prefix, exhaustion
+        (no profile can complete the remaining chunk) still fails closed --
+        ``PromoteError`` is raised and no slices are ever produced from the
+        chunks that did validate."""
+        calls: list[tuple[str, str]] = []
+
+        def execute(agent, prompt, attempt):
+            calls.append((agent.id, prompt))
+            if prompt == "chunk-1":
+                return "not schema", "", 0
+            return (
+                '[{"title":"specific finding zero","artifact_kind":"report",'
+                '"project":"paulshaclaw","tags":[],"body":"body a",'
+                '"source_fragment_indices":[0],"relations":[]}]'
+            ), "", 0
+
+        chunks = self._two_chunks()
+        router = ExternalAgentRouter(
+            (self._two_chunk_profile("first", 1), self._two_chunk_profile("second", 2)),
+            executor=execute,
+        )
+        promoter = llm_promoter.LLMPromoter(
+            router,
+            skill_text="SKILL",
+            known_projects=["paulshaclaw"],
+        )
+        with mock.patch.object(llm_promoter.budget, "pack_prompt_chunks", return_value=chunks):
+            with self.assertRaises(llm_promoter.PromoteError) as ctx:
+                promoter.promote([_frag(0), _frag(1)], CFG)
+
+        self.assertEqual(ctx.exception.category, "invalid_output")
+        # chunk-0 validated under both profiles, but chunk-1 never did: no
+        # partial publication -- the exception path never reaches slice
+        # construction.
+        self.assertEqual(calls, [
+            ("first", "chunk-0"),
+            ("first", "chunk-1"),
+            ("second", "chunk-1"),
+        ])
+
+    def test_park_path_clears_landed_chunk_cache_after_real_router_exhaustion(self):
+        """Issue #86 review blocking finding: _park_session's own docstring
+        promises "進 parked 即淘汰 LLM output cache＋retry sidecar" -- but when
+        the real ``ExternalAgentRouter`` (wrapped by ``CachingAgentClient``,
+        not a scripted fake) exhausts every profile on a later chunk,
+        ``_run_session`` re-raises the router's ``AgentRunError`` as
+        ``PromoteError`` *before* ``promote()`` ever reaches
+        ``self._last_chunk_cache_keys = tuple(chunk_cache_keys)``. That leaves
+        ``_last_chunk_cache_keys`` at its empty ``__init__`` default, so
+        ``clear_last_chunk_caches()`` -- called by pipeline._handle_promote_
+        failure right before ``_park_session`` -- is a no-op, and the
+        chunk-0 envelope that ``on_chunk_validated`` already landed on disk
+        survives the park forever (a different hash namespace than
+        ``clear_cache_for_fragments``'s session-level bound key, so that
+        sibling call can't reach it either). This test mirrors
+        ``_handle_promote_failure``'s exact cleanup call order against a
+        real router/CachingAgentClient pair (not the ``ScriptedAgentClient``
+        used by the existing park-recovery tests, which never exercises this
+        interaction at all)."""
+        calls: list[tuple[str, str]] = []
+
+        def execute(agent, prompt, attempt):
+            calls.append((agent.id, prompt))
+            if prompt == "chunk-1":
+                return "not schema", "", 0
+            return (
+                '[{"title":"specific finding zero","artifact_kind":"report",'
+                '"project":"paulshaclaw","tags":[],"body":"body a",'
+                '"source_fragment_indices":[0],"relations":[]}]'
+            ), "", 0
+
+        chunks = self._two_chunks()
+        router = ExternalAgentRouter(
+            (self._two_chunk_profile("first", 1), self._two_chunk_profile("second", 2)),
+            executor=execute,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            cached = agent_exec.CachingAgentClient(router, cache_dir)
+            promoter = llm_promoter.LLMPromoter(
+                cached, skill_text="SKILL", known_projects=["paulshaclaw"],
+            )
+            fragments = [_frag(0), _frag(1)]
+            with mock.patch.object(llm_promoter.budget, "pack_prompt_chunks", return_value=chunks):
+                with self.assertRaises(llm_promoter.PromoteError):
+                    promoter.promote(fragments, CFG)
+
+            # chunk-0 validated under "first" and landed on disk the instant
+            # it did (issue #86 / D3 on_chunk_validated contract), before
+            # chunk-1 exhausted every profile and the session raised.
+            self.assertEqual(len(list(cache_dir.glob("*.json"))), 1)
+
+            # Mirror pipeline._handle_promote_failure's exact cleanup order.
+            promoter.clear_last_chunk_caches()
+            promoter.clear_cache_for_fragments(fragments)
+
+            self.assertEqual(list(cache_dir.glob("*.json")), [])
 
 
 if __name__ == "__main__":

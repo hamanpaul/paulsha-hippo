@@ -173,7 +173,7 @@ def render(slice_: Slice) -> str:
             "requested_model", "requested_effort", "observed_model",
             "model_verification", "command_fingerprint", "fallback_reason",
             "config_hash", "skill_hash", "hippo_version", "build_commit", "response_schema",
-            "attempts",
+            "attempts", "chunk_provenance",
             "elapsed_seconds", "failure_category", "stderr", "exit_code",
         ):
             if key not in distiller:
@@ -181,7 +181,7 @@ def render(slice_: Slice) -> str:
             value = distiller[key]
             if value is None:
                 rendered = "null"
-            elif key == "attempts":
+            elif key in ("attempts", "chunk_provenance"):
                 rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
             elif isinstance(value, (bool, int, float)):
                 rendered = _scalar(value)
