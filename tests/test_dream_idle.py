@@ -89,6 +89,44 @@ class DreamIdleTest(unittest.TestCase):
         from paulsha_hippo.lib import idle
         self.assertTrue(idle.has_mem_headroom(0.20, probe=lambda: {"MemTotal": 0, "MemAvailable": 0}))
 
+    def test_read_load1_returns_value(self):
+        from paulsha_hippo.lib import idle
+        self.assertEqual(idle.read_load1(probe=lambda: (2.5, 1.0, 1.0)), 2.5)
+
+    def test_read_load1_oserror_returns_none(self):
+        from paulsha_hippo.lib import idle
+
+        def bad_probe():
+            raise OSError("no load")
+
+        # 診斷用讀值：跟 is_idle 一樣 fail-safe，但用 None 表示「量不到」，
+        # 不像 is_idle 那樣把失敗折成布林值。
+        self.assertIsNone(idle.read_load1(probe=bad_probe))
+
+    def test_read_load1_attributeerror_returns_none(self):
+        from paulsha_hippo.lib import idle
+
+        def bad_probe():
+            raise AttributeError("no load attribute")
+
+        self.assertIsNone(idle.read_load1(probe=bad_probe))
+
+    def test_read_load1_short_tuple_returns_none(self):
+        from paulsha_hippo.lib import idle
+        self.assertIsNone(idle.read_load1(probe=lambda: ()))
+
+    def test_read_load1_non_tuple_returns_none(self):
+        from paulsha_hippo.lib import idle
+        # is_idle 對非 tuple 探針會 raise TypeError；read_load1 純屬顯示用途，
+        # 不應把顯示失敗變成呼叫端的例外，一律降階為 None。
+        self.assertIsNone(idle.read_load1(probe=lambda: [0.2, 0.3, 0.4]))
+        self.assertIsNone(idle.read_load1(probe=lambda: 0.5))
+
+    def test_read_load1_default_probe_uses_getloadavg(self):
+        from paulsha_hippo.lib import idle
+        value = idle.read_load1()
+        self.assertIsInstance(value, float)
+
 
 if __name__ == "__main__":
     unittest.main()

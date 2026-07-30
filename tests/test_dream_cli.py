@@ -80,6 +80,9 @@ class DreamCliTests(unittest.TestCase):
             ), patch(
                 "paulsha_hippo.dream.cli.idle.is_idle",
                 return_value=False,
+            ), patch(
+                "paulsha_hippo.dream.cli.idle.read_load1",
+                return_value=3.14159,
             ), redirect_stdout(buf):
                 rc = cli.main(["dream",
                         "run",
@@ -94,8 +97,55 @@ class DreamCliTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             payload = json.loads(buf.getvalue())
-            self.assertEqual(payload.get("skipped"), "system busy")
-            self.assertEqual(payload.get("backlog_depth"), 1)
+            self.assertEqual(
+                payload,
+                {
+                    "skipped": "system busy",
+                    "load": 3.14,
+                    "backlog_depth": 1,
+                },
+            )
+            self.assertIsNone(dream.last_run(root))
+
+    def test_require_idle_busy_skips_load_unavailable_is_null(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed(root)
+            buf = io.StringIO()
+            with patch(
+                "paulsha_hippo.atomizer.cli.atomizer_config.load_config",
+                return_value=(SimpleNamespace(default_promoter="identity"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ), patch(
+                "paulsha_hippo.dream.cli.janitor_config.load_config",
+                return_value=(SimpleNamespace(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            ), patch(
+                "paulsha_hippo.dream.cli.idle.is_idle",
+                return_value=False,
+            ), patch(
+                "paulsha_hippo.dream.cli.idle.read_load1",
+                return_value=None,
+            ), redirect_stdout(buf):
+                rc = cli.main(["dream",
+                        "run",
+                        "--memory-root",
+                        str(root),
+                        "--now",
+                        "2026-06-02T05:00:00Z",
+                        "--require-idle",
+                        "--max-load",
+                        "-1",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(
+                payload,
+                {
+                    "skipped": "system busy",
+                    "load": None,
+                    "backlog_depth": 1,
+                },
+            )
             self.assertIsNone(dream.last_run(root))
 
     def test_require_idle_low_memory_skips(self):

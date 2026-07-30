@@ -36,10 +36,12 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     try:
         if args.require_idle and not idle.is_idle(max_load=args.max_load):
+            observed_load = idle.read_load1()
             print(
                 json.dumps(
                     {
                         "skipped": "system busy",
+                        "load": round(observed_load, 2) if observed_load is not None else None,
                         "backlog_depth": dream_ledger.backlog_depth(memory_root),
                     },
                     sort_keys=True,

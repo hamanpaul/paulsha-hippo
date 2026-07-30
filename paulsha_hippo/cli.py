@@ -240,7 +240,13 @@ def _build_parser() -> argparse.ArgumentParser:
     dream_run.add_argument("--now", default=None)
     dream_run.add_argument("--dry-run", action="store_true")
     dream_run.add_argument("--require-idle", action="store_true")
-    dream_run.add_argument("--max-load", type=float, default=1.0)
+    dream_run.add_argument(
+        "--max-load", type=float, default=4.0,
+        help="--require-idle 的 1 分鐘 loadavg 上限（預設 4.0）。舊預設 1.0 在"
+             "多核機器上過嚴——20 核機器上等於只准 5%% 總負載，實測近 5 天內"
+             "29%% 有新進料的時段因此被誤判為忙碌而整輪跳過，閘門專打有工作"
+             "發生的時段，與服務目的相反；cgroup CPUWeight/MemoryHigh 已是"
+             "第二層資源保護。")
     dream_run.add_argument("--min-avail-mem-pct", type=_pct_arg, default=20.0)
     dream_run.add_argument("--promoter", choices=["identity", "llm"], default=None)
     dream_run.add_argument(
@@ -257,7 +263,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dream_supervise.add_argument("--once", action="store_true",
                                  help="只跑一輪就結束（無 systemd 主機的單輪驗收，#10）")
     dream_supervise.add_argument("--max-load", type=float, default=None,
-                                 help="透傳 dream run --max-load（覆蓋內建 1.0）")
+                                 help="透傳 dream run --max-load（覆蓋內建 4.0）")
     dream_supervise.add_argument("--promoter", choices=["identity", "llm"], default=None,
                                  help="透傳 dream run --promoter（覆蓋內建 llm）")
     dream_supervise.set_defaults(func=_dream_supervise)
