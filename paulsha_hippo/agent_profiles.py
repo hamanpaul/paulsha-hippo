@@ -746,6 +746,7 @@ class ExternalAgentRouter:
         prompts: Sequence[str],
         *,
         response_validator: ResponseValidator | None = None,
+        on_chunk_validated: Callable[[int, str, AgentRunResult], None] | None = None,
     ) -> tuple[str, ...]:
         """Run a frozen prompt session, retaining a validated prefix across profiles.
 
@@ -759,6 +760,13 @@ class ExternalAgentRouter:
         reported as the product of a single profile. The deadline and
         agent-call budget remain one session-wide resource shared by every
         profile that is tried; retention never resets or extends them.
+
+        ``on_chunk_validated``, when given, fires synchronously the instant a
+        chunk passes ``_validate_response`` -- once per chunk index, in order,
+        before the rest of the session is attempted. This lets a caller (e.g.
+        ``CachingAgentClient``) persist a validated chunk immediately instead
+        of waiting for the whole session to succeed, so a later exhaustion on
+        a subsequent chunk cannot erase already-validated work.
         """
         frozen_prompts = tuple(str(prompt) for prompt in prompts)
         if not frozen_prompts:
@@ -878,6 +886,8 @@ class ExternalAgentRouter:
                     # Land per-chunk provenance the moment it validates, not
                     # only once the whole session completes.
                     self.chunk_provenance = tuple(chunk_results.values())
+                    if on_chunk_validated is not None:
+                        on_chunk_validated(index, raw, chunk_results[index])
                 result = AgentRunResult(
                     profile.id,
                     profile.revision,

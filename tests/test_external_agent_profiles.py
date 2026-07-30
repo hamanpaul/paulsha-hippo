@@ -744,3 +744,41 @@ def test_session_cache_lands_per_chunk_and_isolates_profiles(tmp_path):
         ("first", "chunk-1"),
         ("second", "chunk-1"),
     ]
+
+
+def test_session_cache_lands_validated_chunk_even_when_session_later_exhausts(tmp_path):
+    """Issue #86 finding: chunk-0 validates and must land on disk the instant
+    it does -- if every remaining profile then fails chunk-1 and the whole
+    session raises AgentRunError (park path), the already-validated chunk-0
+    must not be silently discarded from the cache. This is distinct from
+    ``test_session_cache_lands_per_chunk_and_isolates_profiles`` above, which
+    only covers the case where the session as a whole eventually succeeds."""
+    profiles = (_profile("first", tier=1), _profile("second", tier=2))
+
+    def execute(profile, prompt, attempt):
+        if prompt == "chunk-0":
+            return "valid", "", 0
+        return "bad", "", 0  # every profile fails on chunk-1
+
+    def validate(raw):
+        if raw != "valid":
+            raise ValueError("invalid")
+
+    keys = ("claude:s1__" + "a" * 64, "claude:s1__" + "b" * 64)
+    router = ExternalAgentRouter(profiles, executor=execute)
+    cached = CachingAgentClient(router, tmp_path)
+    with pytest.raises(Exception, match="fallback exhausted"):
+        cached.run_session(
+            ("chunk-0", "chunk-1"),
+            cache_keys=keys,
+            response_validator=validate,
+            response_schema="1",
+        )
+
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in tmp_path.glob("*.json")]
+    # Only the validated chunk-0 landed; chunk-1 never validated under any
+    # profile so nothing was written for it (no partial publication of a
+    # chunk that never actually passed validation).
+    assert len(payloads) == 1
+    assert payloads[0]["output"] == "valid"
+    assert payloads[0]["provenance"]["profile_id"] == "first"

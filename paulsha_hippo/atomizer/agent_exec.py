@@ -341,7 +341,15 @@ class CachingAgentClient(AgentClient):
         response_validator: Callable[[str], object] | None = None,
         response_schema: str | None = None,
     ) -> tuple[str, ...]:
-        """Run/cache a complete router session without persisting partial chunks."""
+        """Run/cache a router session, landing each chunk the moment it validates.
+
+        A chunk's cache envelope is written as soon as the router validates it
+        (issue #86 / D3), not only once the whole session succeeds: if every
+        remaining profile subsequently exhausts on a later chunk and the
+        session raises, chunks that already validated earlier in this same
+        call are still on disk when the exception propagates. A chunk that
+        never validates under any profile is never landed.
+        """
         frozen_prompts = tuple(str(prompt) for prompt in prompts)
         if not frozen_prompts:
             self.last_cache_keys = ()
@@ -402,10 +410,30 @@ class CachingAgentClient(AgentClient):
             for key in profile_keys:
                 self.clear_cache_key(key)
 
+        def _land_validated_chunk(index: int, raw: str, chunk_result: AgentRunResult) -> None:
+            # Fires the instant the router validates a chunk, whether or not
+            # the session as a whole later succeeds. The attempts list is not
+            # final yet at this point, so it lands empty here; a session that
+            # completes normally rewrites the same key below with the full
+            # attempts history once it is known.
+            key = self._profile_cache_key(base_keys[index], chunk_result.profile_id, expected_schema)
+            payload = {
+                "cache_schema": "2",
+                "response_schema": expected_schema,
+                "output": raw,
+                "provenance": asdict(chunk_result),
+                "attempts": [],
+            }
+            self._write_text_atomically(
+                self.cache_path_for_key(key),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+
         outputs = tuple(
             self._inner.run_session(
                 frozen_prompts,
                 response_validator=response_validator,
+                on_chunk_validated=_land_validated_chunk,
             )
         )
         result = self._inner.last_result
