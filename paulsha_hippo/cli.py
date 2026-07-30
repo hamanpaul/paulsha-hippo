@@ -1345,11 +1345,16 @@ def _memory_usage_funnel(args: argparse.Namespace) -> int:
 
 
 def _recall(args: argparse.Namespace) -> int:
-    """跨 CLI consumer API：重用 prompt-time shortlist 管線（best-effort，恆 exit 0）。"""
+    """跨 CLI consumer API：重用 prompt-time shortlist 管線（best-effort，恆 exit 0）。
+
+    bypass_early_stop=True：顯式 recall 是使用者主動操作，意圖明確，不受
+    OFFER_STOP_AFTER_EVENTS 早停（自動 UserPromptSubmit hook 專用的雜訊抑制）影響。
+    """
     from .hooks._shortlist_common import build_shortlist_and_record
 
     block = build_shortlist_and_record(
-        Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt)
+        Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt,
+        bypass_early_stop=True)
     if block:
         print(block)
     return 0

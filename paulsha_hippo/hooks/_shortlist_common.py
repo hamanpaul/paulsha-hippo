@@ -308,29 +308,38 @@ def _session_has_engaged(root: Path, tool: str, session_id: str) -> bool:
       - ``kind == "applied"``（`hippo usage mark-applied` 寫入的顯式採用訊號）
 
     供 OFFER_STOP_AFTER_EVENTS 早停判斷使用：只要 session 證明過在消費記憶，就永不早停
-    （繼續供給）。memory_usage.jsonl 目前檔案小（~220KB 量級），直接逐行讀取，不建索引；
-    這是本次早停功能唯一新增的檔案掃描成本（offered.jsonl 的計數搭在既有掃描路徑上）。
+    （繼續供給）。這是本次早停功能唯一新增的檔案掃描成本，且早停中的 session 每個 prompt
+    都要掃一次——串流逐行讀取（`open()` 逐行 iterate，不 `read_text()` 整檔載入）、命中
+    即提前 return，memory_usage.jsonl 會隨時間持續成長，不應假設整檔能常駐記憶體一次讀完。
     讀不到（不存在／IO／單行壞）一律視為未曾讀取／未曾 applied（fail-open）——與
     `_offered_pairs_from_ledger` 同款式：新 session 本就不存在此檔，這是常態而非例外。
     """
     path = root / "runtime" / "ledger" / "memory_usage.jsonl"
     try:
-        raw = path.read_text(encoding="utf-8")
+        handle = path.open("rb")
     except OSError:
         return False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
-        if ev.get("session_id") != session_id or ev.get("tool") != tool:
-            continue
-        if ev.get("source") == "read" or ev.get("kind") == "applied":
-            return True
-    return False
+    try:
+        for raw_line in handle:
+            try:
+                line = raw_line.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("session_id") != session_id or ev.get("tool") != tool:
+                continue
+            if ev.get("source") == "read" or ev.get("kind") == "applied":
+                return True
+        return False
+    except OSError:
+        return False
+    finally:
+        handle.close()
 
 
 def _applied_hint(root: Path, tool: str, session_id: str) -> str:
@@ -347,8 +356,15 @@ def _applied_hint(root: Path, tool: str, session_id: str) -> str:
 
 
 def build_shortlist_and_record(root: Path, tool: str, session_id: str,
-                               cwd: str | None, prompt: str) -> str:
-    """Resolve project, search by prompt, build shortlist, record offered. Returns '' if nothing."""
+                               cwd: str | None, prompt: str,
+                               *, bypass_early_stop: bool = False) -> str:
+    """Resolve project, search by prompt, build shortlist, record offered. Returns '' if nothing.
+
+    bypass_early_stop：跳過 OFFER_STOP_AFTER_EVENTS 早停判斷（其餘去重／redaction／
+    publish 邏輯不變）。預設 False，供 UserPromptSubmit 自動 hook 使用（維持早停）；
+    `hippo recall` CLI（顯式召回，使用者主動操作）改傳 True——早停是為了抑制「自動、
+    session 沒在讀」的持續 offer 噪音，不應靜默擋掉使用者主動要求的一次召回。
+    """
     try:
         # tool 進入 offered-map 檔名；recall 的 --tool 為外部輸入——非法即整條
         # pipeline fail-closed（不注入、不記 offered），不讓歸因破損的 shortlist 流出。
@@ -381,13 +397,14 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             # 回傳值為本 (tool, session_id) 的歷史 offer 事件筆數——與 reconcile 用的 pairs
             # 出自同一次 ledger 掃描，供下面的 OFFER_STOP_AFTER_EVENTS 早停判斷使用。
             offer_event_count = _reconcile_offered_map(root, tool, session_id, mpath)
-            if (offer_event_count >= OFFER_STOP_AFTER_EVENTS
+            if (not bypass_early_stop
+                    and offer_event_count >= OFFER_STOP_AFTER_EVENTS
                     and not _session_has_engaged(root, tool, session_id)):
                 # 早停（實測依據見 OFFER_STOP_AFTER_EVENTS 常數）：session 已 offer 超過門檻次數
                 # 且全程沒有任何讀取／applied 訊號——持續 offer 是純 context 污染。不建 shortlist、
                 # 不記新 offered ledger 事件；早停狀態不落任何新檔，每次重算（無 schema migration、
                 # 無 reconcile 負擔）。session 只要曾有讀取／applied，_session_has_engaged 恆真，
-                # 永不早停（繼續供給）。
+                # 永不早停（繼續供給）。bypass_early_stop=True（顯式 recall）永遠跳過此判斷。
                 return ""
             seen = _load_offered_ids(root, tool, session_id)
             claim = [h for h in hits

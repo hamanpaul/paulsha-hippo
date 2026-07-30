@@ -15,3 +15,10 @@ type: feat
   的逐行讀取（`_session_has_engaged`）為本次唯一新增 I/O，且只在事件數達門檻時才觸發，未達門檻
   的一般 prompt 完全不受影響。早停狀態不落任何新檔——每次重算，無 schema migration、無 reconcile
   負擔。
+- `build_shortlist_and_record` 新增 `bypass_early_stop: bool = False` 參數：`hippo recall` CLI
+  （`cli.py` `_recall`）傳 `bypass_early_stop=True`——顯式召回是使用者主動操作，意圖明確，不應
+  被自動 UserPromptSubmit hook 專用的早停靜默擋掉；`claude_user_prompt_submit` / `copilot_user_
+  prompt_submit` 兩條自動 hook 路徑不帶參數，維持早停。
+- `_session_has_engaged` 改為串流逐行讀（`open("rb")` 逐行 iterate、命中即提前 return），不再
+  `read_text()` 整檔載入——`memory_usage.jsonl` 會隨時間持續成長，且早停中的 session 每個
+  prompt 都要掃一次；單行 UTF-8 解碼失敗或 JSON 壞行皆略過，不中止掃描。
