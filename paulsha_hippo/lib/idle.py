@@ -1,5 +1,5 @@
 import os
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 
 def is_idle(max_load: float = 1.0, probe: Callable[[], Tuple[float, ...]] = os.getloadavg) -> bool:
@@ -21,6 +21,23 @@ def is_idle(max_load: float = 1.0, probe: Callable[[], Tuple[float, ...]] = os.g
     except (OSError, AttributeError, IndexError):
         # fail-safe: if we can't determine load, allow running
         return True
+
+
+def read_load1(probe: Callable[[], Tuple[float, ...]] = os.getloadavg) -> Optional[float]:
+    """Best-effort 1-minute load average, for diagnostics (e.g. busy-skip JSON).
+
+    Unlike is_idle, this never raises and never fails safe toward a boolean:
+    any problem (OSError, AttributeError, IndexError, or a probe that doesn't
+    return a tuple) yields None so a display-only caller can't crash — or
+    misreport a fabricated number for — the skip path it's annotating.
+    """
+    try:
+        result = probe()
+        if not isinstance(result, tuple):
+            return None
+        return float(result[0])
+    except (OSError, AttributeError, IndexError, TypeError, ValueError):
+        return None
 
 
 def _read_meminfo(path: str = "/proc/meminfo") -> dict[str, int]:
