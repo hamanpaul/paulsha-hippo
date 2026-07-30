@@ -27,7 +27,9 @@ from .project_resolver import resolve_project
 from .sanitizer import SanitizationError, sanitize_session
 
 _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "watcher_final": 2}
-_TERMINAL_STATUSES = {"written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip"}
+_TERMINAL_STATUSES = {
+    "written", "updated", "hash-duplicate", "stale-skip", "empty-skip", "self-skip", "trivial-skip",
+}
 _LEDGER_THREAD_LOCKS: dict[str, threading.Lock] = {}
 _LEDGER_THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -131,6 +133,41 @@ def is_empty_session(session: NormalizedSession) -> bool:
         return False
     return int(session.get("turn_count", 0)) <= 1
 
+
+# trivial-session 治理閘（is_empty_session 的鄰居，決策鏈序在其後）。
+#
+# 判準來源與門檻：tools/validate_trivial_gate.py，2026-07-30 對 memory root 下
+# 23,909 個歷史 written session 回測（archive/queue 的 written queue payload，透過
+# importer 自己的 _extract + sanitize_session 重建 NormalizedSession；ground truth
+# 取 processing ledger 每 session 最終 state）。
+#
+# 發現：no-findings（23,368 個, 97.7% 的 written session）裡 99.8%（23,327 個）的
+# user_prompts 內嵌 title.py 標題生成 prompt 模板（``_PROMPT``/``_ATOM_PROMPT``）本文
+# ——這是與 #7 同類的遞迴自捕捉：title.apply() 呼叫外部 CLI 生成標題時，CLI 子行程
+# 本身又觸發一次 SessionEnd hook，把「生成標題用的 prompt」錯當成新使用者 session
+# 蒸餾進佇列。此簽章在可驗證資料上對 promoted（379 筆可驗證，扣掉已被既有
+# self-skip/empty-skip 攔下的 2 筆後為風險池）與 parked（9 筆）的誤殺數皆為 0，
+# no-findings 捕獲率 99.9%（23,327/23,358）。
+#
+# 探索但拒絕的候選：「turn_count<=1 + 無 touched_files + 短 prompt（<=100 字元）」這類
+# 泛化結構門檻——同一份資料顯示會誤殺至少 18 個真實 promoted session（例：2 字元
+# prompt 的 claude-code session 命中 484 字摘要；codex session user_prompts 為空（其
+# transcript 常規缺失）但 assistant_summary 近 3000 字）。任何要涵蓋這些邊界案例的
+# 門檻都必須放寬到幾乎攔不到雜訊，故不採用；只保留 title 生成 prompt 簽章這一條
+# 高精準判準。保守原則：僅在明確命中簽章時才擋，其餘一律放行（寧漏勿殺）。
+_TITLE_GEN_SIGNATURES = (
+    title._PROMPT.split("{prompt}", 1)[0],
+    title._ATOM_PROMPT.split("{body}", 1)[0],
+)
+
+
+def is_trivial_session(session: NormalizedSession) -> bool:
+    """user prompt 內容即 hippo 自身標題生成 prompt 模板 → 遞迴自捕捉雜訊（無蒸餾價值）。"""
+    for prompt in session.get("user_prompts", []):
+        text = prompt if isinstance(prompt, str) else str(prompt)
+        if any(sig in text for sig in _TITLE_GEN_SIGNATURES):
+            return True
+    return False
 
 
 def _read_tool(queue_path: Path) -> str:
@@ -466,12 +503,14 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     incoming_completeness = completeness(session, result.capture_scope)
     captured_at, day, month = _date_parts(session)
 
-    # #7/#8 短路：不寫 inbox、不入蒸餾佇列，僅 archive+ledger+移除 queue。
+    # #7/#8/trivial-session 短路：不寫 inbox、不入蒸餾佇列，僅 archive+ledger+移除 queue。
     skip_status = None
     if is_self_capture(session):
         skip_status = "self-skip"
     elif is_empty_session(session):
         skip_status = "empty-skip"
+    elif is_trivial_session(session):
+        skip_status = "trivial-skip"
     if skip_status is not None:
         archive_path = _archive_path(root, month, key, skip_status, incoming_hash)
         decision = _decision_entry(

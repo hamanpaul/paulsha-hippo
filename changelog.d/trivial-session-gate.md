@@ -1,0 +1,8 @@
+---
+type: feat
+---
+
+- importer 新增 trivial-session 治理閘 `is_trivial_session`（`paulsha_hippo/importer/pipeline.py`），與既有 `is_empty_session`（#8）並列掛進 `_preview_queue_item_unlocked` 決策鏈（`self-skip` → `empty-skip` → `trivial-skip`，優先序不變）：命中即 `trivial-skip`，行為完全比照 `empty-skip`——archive queue 檔帶 `--trivial-skip--` 狀態、不寫 inbox、不進 LLM 呼叫、不污染 processing ledger。
+- 判準：`user_prompts` 內嵌 `title.py` 標題生成 prompt 模板（`_PROMPT`／`_ATOM_PROMPT`）本文——這是與 #7 同類的遞迴自捕捉：`title.apply()` 呼叫外部 CLI 生成標題時，該 CLI 子行程本身又觸發一次 SessionEnd hook，把「生成標題用的 prompt」錯當成新的使用者 session 蒸餾進佇列。
+- 新增 `tools/validate_trivial_gate.py` 驗證 harness：掃 memory root（預設 `paulsha_hippo.paths.memory_root()`）下 `archive/queue/2026-*/*--written--*.json`，用 importer 自己的 `_extract`＋`sanitize_session` 重建 NormalizedSession（不重寫解析邏輯），以 `processing.jsonl` 每 session 最終 state 當 ground truth，顯式判定 transcript 是否仍可讀（避免把「transcript 已消失、extract 退化成空殼」誤判成「session 本來就空」）。2026-07-30 對 23,909 個歷史 written session 回測：title 生成 prompt 簽章在風險池（transcript 可驗證且未被既有 self-skip／empty-skip 攔下）上對 promoted（377 筆）／parked（9 筆）誤殺數皆為 0，no-findings 捕獲率 99.9%（23,327/23,358），相對全體 written session 的整體捕獲率約 97.6%。曾評估「turn_count<=1 + 無 touched_files + 短 prompt（≤100 字元）」的泛化結構門檻，但同一份資料顯示會誤殺至少 18 個真實 promoted session（例：2 字元 prompt 的 claude-code session 對應 484 字摘要；codex session `user_prompts` 為空——其 transcript 常規缺失——但 `assistant_summary` 近 3000 字），故不採用，只保留簽章判準。
+- `tests/test_self_and_empty_capture.py` 新增 `TrivialSessionSkipTests`：涵蓋單輪微 session（title/atom 生成 prompt 遞迴自捕捉）被擋、帶 `touched_files` 的單輪放行、長 prompt 單輪放行、多輪放行、空 session 仍走 `empty-skip`（優先序不變）、判準對 codex／copilot session 同樣成立（NormalizedSession tool-agnostic）。
