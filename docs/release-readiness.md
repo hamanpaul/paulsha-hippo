@@ -10,10 +10,17 @@ down is kept as historical record of that release's readiness process.
 ## 0.1.2 release candidate readiness
 
 The matrix is currently rebound to the 0.1.2 candidate at commit
-`2f3dc981e6c283fbe3f85ccc9fbd7cb79c8ae809` (main HEAD). `wheel_sha256` is
-`null` because the 0.1.2 wheel has not been built yet.
+`f5df39496de17c8b4fb3aa88dfa698b7c547aaf4` (main HEAD, chosen by the
+maintainer on 2026-07-30). `wheel_sha256` is `null` because the 0.1.2 wheel
+has not been built yet.
 
 **Rebind history.** The candidate was previously
+`2f3dc981e6c283fbe3f85ccc9fbd7cb79c8ae809`; eight merges landed after it
+(#85 chunk-scaled chain budget, #88 `window_older` STAT_KEYS, #90 chunk
+retention/provenance, #91 AR-11 soak window semantics, #92 idle-gate
+`max-load` 4.0, #93 shortlist offer early-stop, #94 importer trivial-session
+gate, plus the #87 issue-close bookkeeping), so that binding — and the AR-01
+evidence attached to it — went stale. Before that, the candidate was
 `c147218353bdc1e06f6a2f1cbc59a3a61130ceb6`; three merges landed after it
 (#75 session budget, #76 policy v1.0.15, #78 tier-1 plan-mode contract fix),
 so that binding — and the AR-01 evidence attached to it — went stale.
@@ -27,9 +34,11 @@ same semantics, then re-validated through `readiness.load_matrix()`.)
 Of the 16 gates, only **AR-01** (full test suite) carries a real `passed`
 verdict, attested from two independent clean environments that agree exactly:
 the candidate commit's own GitHub Actions `Tests` run (conclusion `success`,
-`1646 passed, 4 skipped, 154 subtests passed in 107.61s`), and a local
-non-nested sibling worktree where `python3 -m pytest -q` reported `1646
-passed, 4 skipped, 154 subtests passed, 0 failed in 186.01s`.
+`1700 passed, 4 skipped, 158 subtests passed in 105.69s`), and a local
+non-nested sibling worktree where `python3 -m pytest -q` reported `1700
+passed, 4 skipped, 158 subtests passed in 125.31s, 0 failed`. (The growth
+from the previous binding's 1646 tests is exactly the test surface added by
+this batch of merges.)
 
 Note on measurement environment: running the suite from a worktree nested
 *under* the repo directory (`.claude/worktrees/*`) produces 2 failures in
@@ -51,6 +60,29 @@ has been captured for *this* candidate. Most of the remaining gates are gated
 on one missing artifact rather than on defects: AR-02/AR-03/AR-07/AR-14 all
 wait on a built wheel (`wheel_sha256` is still `null`), and AR-05/AR-06/AR-08/
 IC-01 wait on that wheel being installed into a clean environment.
+
+**AR-11 note (2026-07-30, this rebind) — window semantics codified; 3/3
+achieved on the *previous* deployed build; count restarts for this candidate.**
+PR #91 (`ed1ea37`, in this candidate) codified the soak counting semantics the
+earlier notes below had to leave open: soak counting uses *window semantics* —
+a neutral cycle (idle-gate skip, absent timer slot, zero-ingress or
+zero-accepted-atom executed cycle with `ok` status and no regression-marker
+growth) neither increments nor resets the count; a non-`ok` executed cycle,
+regression-marker growth relative to the previous executed cycle (including
+invalid-checksum backlog), or **a change of the deployed candidate build**
+closes the window and resets the count; a window expires after seven calendar
+days without a new qualifying cycle. Under those semantics the deployed build
+`76edb93…` completed a full **3/3 soak** on 2026-07-30 (window opened
+`03:00:32Z` by the #90 deployment build-change; qualifying cycles `03:00:32Z`
+split=3/slices=47, `10:00:42Z` 1/5, `11:00:42Z` 2/9; nine executed cycles all
+`ok`; parked=9, generic_title=1, unknown_project=6, invalid_checksum=18 static
+throughout; the `02:00Z` idle skip is neutral; no manual runs). That evidence
+lives in the append-only dream ledger and stands for `76edb93…` — **it does
+not transfer to this candidate**: `f5df394…` was deployed at
+`2026-07-30T11:24Z`, which under the same build-change rule opened a fresh
+window (first cycle `12:00:42Z`, `ok`, zero-ingress, neutral). AR-11 for this
+candidate therefore remains `pending` at 0/3, with the path to 3/3 now
+demonstrated rather than conjectured.
 
 **AR-11 note (2026-07-28) — 13 clean timer cycles that do *not* count.**
 From `2026-07-27T13:00:42Z` to `2026-07-28T01:00:42Z` the dream service ran 13
