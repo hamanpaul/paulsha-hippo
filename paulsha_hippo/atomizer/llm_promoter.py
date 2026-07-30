@@ -550,6 +550,15 @@ class LLMPromoter(Promoter):
                 )
             return responses, cache_keys
         except (AgentExecError, AgentRunError, llm_output.LlmOutputError) as exc:
+            if isinstance(self._agent, CachingAgentClient):
+                # Issue #86 blocking finding: promote() never reaches its own
+                # `self._last_chunk_cache_keys = tuple(chunk_cache_keys)`
+                # assignment on this exception path, so without this the
+                # attribute stays at its empty __init__ default and the park
+                # path's clear_last_chunk_caches() can never find (let alone
+                # evict) chunks that on_chunk_validated already landed on
+                # disk before the session exhausted on a later chunk.
+                self._last_chunk_cache_keys = tuple(self._agent.last_cache_keys)
             raise PromoteError(
                 f"llm promote failed after session attempt(s): {exc}",
                 category=_failure_category(exc),

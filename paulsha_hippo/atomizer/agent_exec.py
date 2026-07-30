@@ -410,6 +410,8 @@ class CachingAgentClient(AgentClient):
             for key in profile_keys:
                 self.clear_cache_key(key)
 
+        landed_keys: list[str] = []
+
         def _land_validated_chunk(index: int, raw: str, chunk_result: AgentRunResult) -> None:
             # Fires the instant the router validates a chunk, whether or not
             # the session as a whole later succeeds. The attempts list is not
@@ -428,14 +430,26 @@ class CachingAgentClient(AgentClient):
                 self.cache_path_for_key(key),
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             )
+            landed_keys.append(key)
 
-        outputs = tuple(
-            self._inner.run_session(
-                frozen_prompts,
-                response_validator=response_validator,
-                on_chunk_validated=_land_validated_chunk,
+        try:
+            outputs = tuple(
+                self._inner.run_session(
+                    frozen_prompts,
+                    response_validator=response_validator,
+                    on_chunk_validated=_land_validated_chunk,
+                )
             )
-        )
+        except Exception:
+            # Issue #86 blocking finding: a session that exhausts on a later
+            # chunk still raises *after* on_chunk_validated already landed
+            # earlier chunks on disk. Without exposing those keys here,
+            # last_cache_keys keeps whatever it held before this call, the
+            # caller (LLMPromoter._run_session) has nothing to copy into
+            # _last_chunk_cache_keys, and clear_last_chunk_caches() on the
+            # park path becomes a permanent no-op over a landed envelope.
+            self.last_cache_keys = tuple(landed_keys)
+            raise
         result = self._inner.last_result
         if not isinstance(result, AgentRunResult):
             self.last_cache_keys = base_keys

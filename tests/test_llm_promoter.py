@@ -395,6 +395,64 @@ class LLMPromoterTests(unittest.TestCase):
             ("second", "chunk-1"),
         ])
 
+    def test_park_path_clears_landed_chunk_cache_after_real_router_exhaustion(self):
+        """Issue #86 review blocking finding: _park_session's own docstring
+        promises "進 parked 即淘汰 LLM output cache＋retry sidecar" -- but when
+        the real ``ExternalAgentRouter`` (wrapped by ``CachingAgentClient``,
+        not a scripted fake) exhausts every profile on a later chunk,
+        ``_run_session`` re-raises the router's ``AgentRunError`` as
+        ``PromoteError`` *before* ``promote()`` ever reaches
+        ``self._last_chunk_cache_keys = tuple(chunk_cache_keys)``. That leaves
+        ``_last_chunk_cache_keys`` at its empty ``__init__`` default, so
+        ``clear_last_chunk_caches()`` -- called by pipeline._handle_promote_
+        failure right before ``_park_session`` -- is a no-op, and the
+        chunk-0 envelope that ``on_chunk_validated`` already landed on disk
+        survives the park forever (a different hash namespace than
+        ``clear_cache_for_fragments``'s session-level bound key, so that
+        sibling call can't reach it either). This test mirrors
+        ``_handle_promote_failure``'s exact cleanup call order against a
+        real router/CachingAgentClient pair (not the ``ScriptedAgentClient``
+        used by the existing park-recovery tests, which never exercises this
+        interaction at all)."""
+        calls: list[tuple[str, str]] = []
+
+        def execute(agent, prompt, attempt):
+            calls.append((agent.id, prompt))
+            if prompt == "chunk-1":
+                return "not schema", "", 0
+            return (
+                '[{"title":"specific finding zero","artifact_kind":"report",'
+                '"project":"paulshaclaw","tags":[],"body":"body a",'
+                '"source_fragment_indices":[0],"relations":[]}]'
+            ), "", 0
+
+        chunks = self._two_chunks()
+        router = ExternalAgentRouter(
+            (self._two_chunk_profile("first", 1), self._two_chunk_profile("second", 2)),
+            executor=execute,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            cached = agent_exec.CachingAgentClient(router, cache_dir)
+            promoter = llm_promoter.LLMPromoter(
+                cached, skill_text="SKILL", known_projects=["paulshaclaw"],
+            )
+            fragments = [_frag(0), _frag(1)]
+            with mock.patch.object(llm_promoter.budget, "pack_prompt_chunks", return_value=chunks):
+                with self.assertRaises(llm_promoter.PromoteError):
+                    promoter.promote(fragments, CFG)
+
+            # chunk-0 validated under "first" and landed on disk the instant
+            # it did (issue #86 / D3 on_chunk_validated contract), before
+            # chunk-1 exhausted every profile and the session raised.
+            self.assertEqual(len(list(cache_dir.glob("*.json"))), 1)
+
+            # Mirror pipeline._handle_promote_failure's exact cleanup order.
+            promoter.clear_last_chunk_caches()
+            promoter.clear_cache_for_fragments(fragments)
+
+            self.assertEqual(list(cache_dir.glob("*.json")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
