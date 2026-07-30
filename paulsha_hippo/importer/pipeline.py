@@ -155,15 +155,47 @@ def is_empty_session(session: NormalizedSession) -> bool:
 # transcript 常規缺失）但 assistant_summary 近 3000 字）。任何要涵蓋這些邊界案例的
 # 門檻都必須放寬到幾乎攔不到雜訊，故不採用；只保留 title 生成 prompt 簽章這一條
 # 高精準判準。保守原則：僅在明確命中簽章時才擋，其餘一律放行（寧漏勿殺）。
+
+
+def _build_title_gen_signature(template: str, placeholder: str) -> str:
+    """從 title.py 的 prompt 模板切出簽章固定字首，並 fail-fast 防止靜默失效。
+
+    ``str.split`` 在 placeholder 消失時會回退成「整條模板當一段」，簽章就變成
+    含字面 ``"{prompt}"``／``"{body}"`` 的完整模板——這種字串對「佔位符已被實際
+    內容取代」的 rendered 文字（真實遞迴自捕捉的 user_prompts）永遠比不中，
+    trivial-skip 從此形同虛設，卻不會有任何例外或測試失敗指出來。三個結構斷言
+    把這種未來的模板改動變成 import 當下就炸的錯誤，而不是悄悄失去保護：
+    (a) placeholder 確實存在（split 後必為兩段）、(b) 簽章長度 >= 20 字元（太短
+    不足以當高精準簽章、容易誤命中無關文字）、(c) 簽章本身不含未解析的 ``"{"``
+    （代表 placeholder 抓錯或模板裡還有其他佔位符夾在字首內）。
+    """
+    parts = template.split(placeholder, 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"title-gen template no longer contains placeholder {placeholder!r}; "
+            "trivial-session signature would silently stop matching rendered text"
+        )
+    prefix = parts[0]
+    if len(prefix) < 20:
+        raise ValueError(
+            f"title-gen template prefix too short ({len(prefix)} chars) to be a safe signature"
+        )
+    if "{" in prefix:
+        raise ValueError(
+            "title-gen template prefix still contains an unresolved placeholder"
+        )
+    return prefix
+
+
 _TITLE_GEN_SIGNATURES = (
-    title._PROMPT.split("{prompt}", 1)[0],
-    title._ATOM_PROMPT.split("{body}", 1)[0],
+    _build_title_gen_signature(title._PROMPT, "{prompt}"),
+    _build_title_gen_signature(title._ATOM_PROMPT, "{body}"),
 )
 
 
 def is_trivial_session(session: NormalizedSession) -> bool:
     """user prompt 內容即 hippo 自身標題生成 prompt 模板 → 遞迴自捕捉雜訊（無蒸餾價值）。"""
-    for prompt in session.get("user_prompts", []):
+    for prompt in session.get("user_prompts") or []:
         text = prompt if isinstance(prompt, str) else str(prompt)
         if any(sig in text for sig in _TITLE_GEN_SIGNATURES):
             return True

@@ -211,6 +211,9 @@ class TrivialSessionSkipTests(unittest.TestCase):
             "trivial-skip 不應寫 inbox",
         )
         self.assertFalse(list(self.queue.glob("*.json")), "queue 應被移除")
+        archive_path = Path(decision["archive_path"])
+        self.assertIn("--trivial-skip--", archive_path.name)
+        self.assertTrue(archive_path.is_file(), "trivial-skip 應照 empty-skip 慣例歸檔 queue 副本")
 
     def test_atom_title_gen_recursive_prompt_is_skipped(self):
         from paulsha_hippo.importer import title
@@ -284,6 +287,80 @@ class TrivialSessionSkipTests(unittest.TestCase):
         for tool in ("codex", "copilot-cli"):
             with self.subTest(tool=tool):
                 self.assertTrue(is_trivial_session({"tool": tool, "user_prompts": [recursive_prompt]}))
+
+    def test_predicate_handles_malformed_user_prompts(self):
+        """review 補強：非預期形狀的 user_prompts 不可讓 gate 崩潰，一律安全回 False。"""
+        self.assertFalse(is_trivial_session({"user_prompts": None}))
+        self.assertFalse(is_trivial_session({}))
+        self.assertFalse(is_trivial_session({"user_prompts": [None, 42]}))
+
+
+class TitleGenSignatureGuardTests(unittest.TestCase):
+    """review BLOCKING 1：title 生成模板若失去佔位符必須 fail-fast，不能靜默失效。
+
+    ``_build_title_gen_signature`` 是 ``_TITLE_GEN_SIGNATURES``（is_trivial_session
+    的判準來源）唯一的建構路徑；若 title.py 未來改了 ``_PROMPT``/``_ATOM_PROMPT``
+    模板卻不小心弄丟佔位符，``str.split`` 會靜默回退成整條模板，簽章從此對真實
+    rendered 文字永遠比不中——這裡直接測試該建構函式的三個結構斷言，並額外驗證
+    「模板真的丟失佔位符時，重新載入 pipeline 模組本身會炸」這個 fail-fast 路徑。
+    """
+
+    def test_rejects_template_missing_placeholder(self):
+        from paulsha_hippo.importer.pipeline import _build_title_gen_signature
+
+        with self.assertRaises(ValueError):
+            _build_title_gen_signature("這段模板完全沒有任何佔位符可言，字數也夠長了", "{prompt}")
+
+    def test_rejects_prefix_too_short(self):
+        from paulsha_hippo.importer.pipeline import _build_title_gen_signature
+
+        with self.assertRaises(ValueError):
+            _build_title_gen_signature("short{prompt}", "{prompt}")
+
+    def test_rejects_prefix_with_unresolved_placeholder(self):
+        from paulsha_hippo.importer.pipeline import _build_title_gen_signature
+
+        # 字首本身超過 20 字元、但字首裡還夾了另一個未解析的佔位符。
+        template = "A" * 25 + "{other}" + "{prompt}"
+        with self.assertRaises(ValueError):
+            _build_title_gen_signature(template, "{prompt}")
+
+    def test_accepts_current_real_templates(self):
+        from paulsha_hippo.importer import title
+        from paulsha_hippo.importer.pipeline import _build_title_gen_signature
+
+        for template, placeholder in ((title._PROMPT, "{prompt}"), (title._ATOM_PROMPT, "{body}")):
+            with self.subTest(placeholder=placeholder):
+                sig = _build_title_gen_signature(template, placeholder)
+                self.assertGreaterEqual(len(sig), 20)
+                self.assertNotIn("{", sig)
+
+    def test_module_import_fails_fast_when_template_loses_placeholder(self):
+        """端到端 fail-fast：模板真的丟了佔位符時，reload pipeline 模組本身要炸。
+
+        故意在**子行程**裡做這個 monkeypatch+reload，而不是原地改當前行程的
+        ``paulsha_hippo.importer.title``——importlib.reload 會就地重建
+        ``pipeline`` 模組的 class／function 物件（如 ``PipelineError``），若在
+        本行程操作，其他已經 ``from paulsha_hippo.importer.pipeline import
+        PipelineError`` 綁定舊物件的模組（如 ``paulsha_hippo/importer/cli.py``）
+        之後的 ``except PipelineError`` 就可能因物件不同而比對不上，汙染同一個
+        pytest 行程裡其他測試檔案。子行程執行完即整個銷毀，不會外洩任何汙染。
+        """
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+            "from paulsha_hippo.importer import title\n"
+            "title._PROMPT = '此模板已經改壞，不再含有任何佔位符，長度也刻意留夠'\n"
+            "import importlib\n"
+            "from paulsha_hippo.importer import pipeline\n"
+            "importlib.reload(pipeline)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
+        self.assertIn("ValueError", result.stderr)
+        self.assertIn("placeholder", result.stderr)
 
 
 if __name__ == "__main__":

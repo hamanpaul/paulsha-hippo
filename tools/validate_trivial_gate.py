@@ -51,12 +51,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from paulsha_hippo import paths  # noqa: E402
-from paulsha_hippo.importer import title  # noqa: E402
 from paulsha_hippo.importer.adapters.base import NormalizedSession  # noqa: E402
 from paulsha_hippo.importer.pipeline import (  # noqa: E402
     _extract,
     is_empty_session,
     is_self_capture,
+    is_trivial_session,
     logical_session_key,
 )
 from paulsha_hippo.importer.sanitizer import SanitizationError, sanitize_session  # noqa: E402
@@ -73,12 +73,6 @@ IDENTITY_PROMOTER_NOTE = (
     "與本次新 gate 無關。本 harness 仍將全部 identity-promoter 列計入 promoted 分母"
     "（不做排除，維持『0 誤殺』對全體 promoted 生效），只在報表加註哪些命中屬於這批。"
 )
-
-TITLE_GEN_SIGNATURES: tuple[str, ...] = (
-    title._PROMPT.split("{prompt}", 1)[0],
-    title._ATOM_PROMPT.split("{body}", 1)[0],
-)
-
 
 def _norm_tool(value: object) -> str:
     text = str(value or "").lower().replace("_", "-")
@@ -120,16 +114,13 @@ def _transcript_available(payload: dict) -> bool:
 
 # --------------------------------------------------------------------------
 # 候選判準：is_trivial_session 的競爭方案。每個候選是 NormalizedSession -> bool。
+#
+# BLOCKING（review）：勝出候選必須直接呼叫 pipeline.is_trivial_session ——出貨的
+# gate 邏輯是什麼，harness 驗證的就必須是同一份函式呼叫，不得在這裡重新實作一份
+# 內容相同但物件不同的判準（會漂移：往後改了 pipeline.py 卻忘了同步改這裡，回測
+# 數字就不再反映真實行為）。只有「探索但拒絕」的候選（用來對照、佐證勝出候選為何
+# 更安全）才允許 local 定義，因為那些從未打算出貨。
 # --------------------------------------------------------------------------
-
-def candidate_title_gen_signature(session: NormalizedSession) -> bool:
-    """勝出候選：user_prompts 內嵌 title.py 標題生成 prompt 模板固定字首。"""
-    for prompt in session.get("user_prompts") or []:
-        text = prompt if isinstance(prompt, str) else str(prompt)
-        if any(sig in text for sig in TITLE_GEN_SIGNATURES):
-            return True
-    return False
-
 
 def _max_prompt_len(session: NormalizedSession) -> int:
     prompts = session.get("user_prompts") or []
@@ -146,11 +137,11 @@ def candidate_generic_short_single_turn(session: NormalizedSession, *, max_len: 
 
 
 def candidate_combined(session: NormalizedSession) -> bool:
-    return candidate_title_gen_signature(session) or candidate_generic_short_single_turn(session)
+    return is_trivial_session(session) or candidate_generic_short_single_turn(session)
 
 
 CANDIDATES: dict[str, Callable[[NormalizedSession], bool]] = {
-    "title_gen_signature": candidate_title_gen_signature,
+    "title_gen_signature (pipeline.is_trivial_session)": is_trivial_session,
     "generic_short_single_turn<=100": candidate_generic_short_single_turn,
     "combined(signature OR generic)": candidate_combined,
 }
