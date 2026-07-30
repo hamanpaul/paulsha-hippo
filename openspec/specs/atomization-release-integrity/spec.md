@@ -175,6 +175,8 @@ Release acceptance SHALL test a built wheel in clean-install, force-reinstall, a
 
 The release SHALL pass clean install, both supported upgrade profiles, rollback drill, complete production recovery, and a canary/soak of at least three consecutive systemd-timer-triggered scheduled cycles, each with a unique new ingress session and at least one accepted atom. Direct service invocation, manual pipeline execution, and isolated canaries MUST NOT count as scheduled cycles. A skipped, zero-ingress, or zero-accepted-atom cycle MUST NOT count toward the soak. Canary SHALL show no new legacy locks, no unexpected generic-title or `_unknown` atoms, no parked/split growth, complete index coverage, and an `ok` pipeline status.
 
+Soak counting SHALL use window semantics. A soak window is a maximal unbroken run of systemd-timer-triggered scheduled cycles executed on one deployed candidate build in which every executed cycle reports an `ok` pipeline status and shows no regression marker. Regression markers — new legacy locks, growth of generic-title or `_unknown` atoms, growth of parked or split backlog, and incomplete index coverage — SHALL be judged relative to the previous executed cycle's baseline, not as absolute zero. Within a window, a cycle skipped by the idle gate, a scheduled slot where the timer did not fire, and an executed cycle with zero ingress or zero accepted atoms are neutral: they MUST NOT increment and MUST NOT reset the soak count. The soak passes when one window contains at least three qualifying cycles, each timer-triggered with a unique new ingress session and at least one accepted atom. An executed cycle with a non-`ok` status or a regression marker ends the window and resets the count to zero; a change of the deployed candidate build likewise starts a new window.
+
 The production recovery manifest SHALL enumerate every remaining batch and assign every member of the audited high-risk cohort (53 sessions at the PR #35 baseline) an evidence-backed `recovered`, `retained`, `quarantined`, `parked`, or `manual-review` disposition. It MUST NOT leave unexplained unknowns. Producer-correctness release MAY proceed with an explicit automatic-consumption capability downgrade, but Issue #34 MUST remain open until its nine-item traceability matrix points to committed implementation and attached release evidence, including a real offered-to-Read consumer trace.
 
 #### Scenario: Canary regression blocks release
@@ -184,6 +186,18 @@ The production recovery manifest SHALL enumerate every remaining batch and assig
 #### Scenario: Isolated or manual canary does not count toward soak
 - **WHEN** a canary is started directly rather than by the enabled systemd timer
 - **THEN** it MAY serve as diagnostic evidence but SHALL NOT increment the three-cycle scheduled soak count
+
+#### Scenario: Neutral cycle does not reset the soak window
+- **WHEN** a scheduled cycle is skipped by the idle gate, absent because the timer did not fire, or executes with zero ingress or zero accepted atoms while reporting an `ok` status and no regression marker
+- **THEN** the soak count SHALL remain unchanged and the window SHALL remain open
+
+#### Scenario: Regression or redeploy resets the soak window
+- **WHEN** an executed scheduled cycle reports a non-`ok` status or a regression marker, or the deployed candidate build changes
+- **THEN** the soak count SHALL reset to zero and a new window SHALL begin at the next clean executed cycle
+
+#### Scenario: Static backlog does not disqualify a cycle
+- **WHEN** pre-existing generic-title, `_unknown`, parked, or invalid-checksum backlog is unchanged from the previous executed cycle
+- **THEN** that static baseline SHALL NOT count as a regression marker for the cycle under evaluation
 
 #### Scenario: High-risk recovery cohort is fully dispositioned
 - **WHEN** production recovery is proposed as complete
