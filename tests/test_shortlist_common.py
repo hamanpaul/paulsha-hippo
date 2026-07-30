@@ -374,6 +374,105 @@ def test_build_shortlist_concurrent_same_session_claims_slice_once(tmp_path, mon
     assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRACE")
 
 
+def _seed_offer_events(mr: Path, tool: str, session_id: str, n: int) -> None:
+    """直接向 offered ledger 寫入 n 筆歷史 offer 事件（略過完整 pipeline，加速測試）。
+
+    事件間彼此互斥的假 slice_id/path——不與 `_seed()` 的真實命中 sl-aaaaaaaaaaaaaaaa
+    重疊，故測試中對「SerialWrap 執行」的真實搜尋命中不會被這些歷史雜訊去重擋掉。
+    """
+    for i in range(n):
+        SC._append_offered_ledger(
+            mr, tool, session_id, "proj",
+            [(f"sl-hist{i:012d}", str(mr / "knowledge" / "proj" / f"hist{i}.md"))])
+
+
+def _append_memory_usage_event(mr: Path, ev: dict) -> None:
+    led = mr / "runtime" / "ledger"
+    led.mkdir(parents=True, exist_ok=True)
+    with (led / "memory_usage.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+def test_offer_early_stop_after_threshold_events_with_no_reads(tmp_path, monkeypatch):
+    # 實測依據（見 OFFER_STOP_AFTER_EVENTS 常數註解）：讀取全部發生在第 7 個 offer 事件
+    # 之前，第 8 個事件之後零讀取。歷史事件數達門檻且本 session 全程無讀取/applied
+    # 訊號時，第 9 次呼叫必須早停：不注入 shortlist、不記新 offered ledger 行。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidStop", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidStop", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out == ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+
+def test_offer_continues_below_threshold_events(tmp_path, monkeypatch):
+    # 事件數未達門檻（差一次）——早停不生效，照常 offer（第 8 筆寫入 ledger）。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidBelow", SC.OFFER_STOP_AFTER_EVENTS - 1)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidBelow", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+
+def test_offer_does_not_stop_when_session_has_direct_read(tmp_path, monkeypatch):
+    # 事件數達門檻，但 session 曾有一筆直讀（offered=False 亦算——直讀證明使用者
+    # 主動在看記憶檔）：永不早停，照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidRead", SC.OFFER_STOP_AFTER_EVENTS)
+    _append_memory_usage_event(tmp_path, {
+        "ts": "2026-07-01T00:00:00Z", "session_id": "sidRead", "tool": "claude-code",
+        "project": "proj", "sl_id": "", "path": str(tmp_path / "knowledge" / "proj" / "z.md"),
+        "source": "read", "offered": False,
+    })
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidRead", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
+def test_offer_does_not_stop_when_session_has_applied(tmp_path, monkeypatch):
+    # 事件數達門檻，但 session 曾有一筆 applied（顯式採用訊號）：永不早停，照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidApplied", SC.OFFER_STOP_AFTER_EVENTS)
+    _append_memory_usage_event(tmp_path, {
+        "kind": "applied", "session_id": "sidApplied", "slice_id": "sl-x",
+        "tool": "claude-code", "ts": "2026-07-01T00:00:00Z",
+    })
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidApplied", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
+def test_offer_early_stop_scoped_to_session(tmp_path, monkeypatch):
+    # 早停判斷以 (tool, session_id) 為界——另一個 session 的歷史事件數與讀取狀態
+    # 不得互相污染。sidOther 事件數達門檻且無讀取；sidFresh 全新 session 照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidOther", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidFresh", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    events = _offered_events(tmp_path)
+    assert len(events) == SC.OFFER_STOP_AFTER_EVENTS + 1
+    assert events[-1]["session_id"] == "sidFresh"
+
+
 def _boom_oserror(*a, **k):
     raise OSError("disk full")
 

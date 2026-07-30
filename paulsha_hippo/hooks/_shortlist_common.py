@@ -21,6 +21,13 @@ from paulsha_hippo.hooks._wakeup_common import (
 SHORTLIST_K = 3
 SHORTLIST_FETCH_K = 12
 
+# Offer 早停門檻（issue：shortlist offer 訊噪比）。實測：每個 user prompt 觸發一次
+# offer、長 session 累積 p90=39、max=127 個唯一 offered slice，但 9 次 offered→read
+# 中 7 次發生在第 0-1 個 offer 事件、2 次在第 6 個，第 7 個事件之後零讀取——對「一直
+# 沒在讀的 session」持續 offer 是純 context 污染。8 保留完整安全邊際（比實測讀取發生
+# 的最後一個事件序號 6 多兩個事件）。
+OFFER_STOP_AFTER_EVENTS = 8
+
 
 def _norm_title_key(s: str) -> str:
     return re.sub(r"[\W_]+", "", s).lower()
@@ -70,19 +77,21 @@ def _redact(root: Path, tool: str, project: str, session_ref: str, text: str) ->
         return ""
 
 
-def _offered_pairs_from_ledger(root: Path, tool: str, session_id: str) -> list[tuple[str, str]]:
-    """從 append-only offered ledger 還原本 (tool, session_id) 曾 offer 的 (sl_id, path) 清單。
+def _scan_offered_ledger(root: Path, tool: str, session_id: str) -> tuple[list[tuple[str, str]], int]:
+    """單一 pass 掃描 offered ledger：回傳（本 (tool, session_id) 的 (sl_id, path) 清單，事件筆數）。
 
-    ledger 是 offered 的**單一真值**、跨 session 共用（同一 offered.jsonl）；依 session_id＋tool
-    過濾出本 session 的事件。per-session map 為此清單的衍生 cache——硬中止或 cache 寫入失敗
-    落在「ledger 有、map 無」時，這裡是重建 map／判定 offered 的權威來源。讀不到（不存在／IO／
-    單行壞）一律略過該來源（fail-open），不讓恢復路徑因殘缺 ledger 崩掉。
+    事件筆數＝符合 session_id＋tool 的 ledger 行數（同一行＝同一次 offer 事件，不論該行
+    內含幾個 (sl_id, path)）——OFFER_STOP_AFTER_EVENTS 早停判斷即以此為準。與
+    `_offered_pairs_from_ledger`（見下）共用同一次檔案讀取／逐行 parse，讓事件計數
+    「近乎免費」地搭在既有掃描路徑上，不需為早停判斷再多掃一遍 offered.jsonl。
+    讀不到（不存在／IO／單行壞）一律略過該來源（fail-open），不讓恢復路徑因殘缺 ledger 崩掉。
     """
     pairs: list[tuple[str, str]] = []
+    event_count = 0
     try:
         raw = (root / "runtime" / "ledger" / "offered.jsonl").read_text(encoding="utf-8")
     except OSError:
-        return pairs
+        return pairs, event_count
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -93,11 +102,24 @@ def _offered_pairs_from_ledger(root: Path, tool: str, session_id: str) -> list[t
             continue
         if ev.get("session_id") != session_id or ev.get("tool") != tool:
             continue
+        event_count += 1
         for item in ev.get("offered") or []:
             sid = item.get("sl_id") if isinstance(item, dict) else None
             p = item.get("path") if isinstance(item, dict) else None
             if sid and p:
                 pairs.append((str(sid), str(p)))
+    return pairs, event_count
+
+
+def _offered_pairs_from_ledger(root: Path, tool: str, session_id: str) -> list[tuple[str, str]]:
+    """從 append-only offered ledger 還原本 (tool, session_id) 曾 offer 的 (sl_id, path) 清單。
+
+    ledger 是 offered 的**單一真值**、跨 session 共用（同一 offered.jsonl）；依 session_id＋tool
+    過濾出本 session 的事件。per-session map 為此清單的衍生 cache——硬中止或 cache 寫入失敗
+    落在「ledger 有、map 無」時，這裡是重建 map／判定 offered 的權威來源。讀不到（不存在／IO／
+    單行壞）一律略過該來源（fail-open），不讓恢復路徑因殘缺 ledger 崩掉。
+    """
+    pairs, _ = _scan_offered_ledger(root, tool, session_id)
     return pairs
 
 
@@ -191,7 +213,7 @@ def _commit_offered_map(mpath: Path, offered: list[tuple[str, str]]) -> None:
         raise
 
 
-def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) -> None:
+def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) -> int:
     """以 offered ledger（單一真值）補齊 per-session map——ledger 有但 map 無的 slice 寫回 map。呼叫端持 flock。
 
     map 是 ledger 的衍生 cache。反轉發布順序（先 ledger 後 map）後，硬中止或 map cache 寫入
@@ -204,10 +226,14 @@ def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) 
     條件聯集 ledger sl_id，去重正確性不依賴這次快取健化是否成功。補寫失敗（磁碟滿／權限／IO——
     正是 _publish_offered 明文容忍的同一類故障）僅 log_warn、不 raise，避免無關的儲存層故障讓整輪
     claim/redact/publish fail-closed 而吞掉全新、從未 offer 過的命中 slice；下一輪仍會以 ledger 重試。
+
+    回傳本 (tool, session_id) 的歷史 offer 事件筆數——與上面 reconcile 用的 pairs 出自同一次
+    `_scan_offered_ledger` 掃描，供呼叫端做 OFFER_STOP_AFTER_EVENTS 早停判斷，不需為此再多掃
+    一遍 offered.jsonl（見該常數與 build_shortlist_and_record 的早停分支）。
     """
-    pairs = _offered_pairs_from_ledger(root, tool, session_id)
+    pairs, event_count = _scan_offered_ledger(root, tool, session_id)
     if not pairs:
-        return
+        return event_count
     by_id: dict = {}
     try:
         payload = json.loads(mpath.read_text(encoding="utf-8"))
@@ -226,6 +252,7 @@ def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) 
             log_warn(root, tool,
                      f"offered map reconcile write failed; ledger remains authoritative "
                      f"and map will be retried from ledger next round: {exc}")
+    return event_count
 
 
 def _publish_offered(root: Path, tool: str, session_id: str, project: str,
@@ -273,6 +300,39 @@ def _record_offered(root: Path, tool: str, session_id: str, project: str,
         log_warn(root, tool, f"failed to record offered: {exc}")
 
 
+def _session_has_engaged(root: Path, tool: str, session_id: str) -> bool:
+    """本 (tool, session_id) 在 memory_usage.jsonl 中是否曾有讀取／applied 事件。
+
+    判定依據（不分 offered true/false 的直讀也算——直讀一樣證明使用者主動在看記憶檔）：
+      - ``source == "read"``（claude/copilot post-tool-use hook 對 Read 記下的事件）
+      - ``kind == "applied"``（`hippo usage mark-applied` 寫入的顯式採用訊號）
+
+    供 OFFER_STOP_AFTER_EVENTS 早停判斷使用：只要 session 證明過在消費記憶，就永不早停
+    （繼續供給）。memory_usage.jsonl 目前檔案小（~220KB 量級），直接逐行讀取，不建索引；
+    這是本次早停功能唯一新增的檔案掃描成本（offered.jsonl 的計數搭在既有掃描路徑上）。
+    讀不到（不存在／IO／單行壞）一律視為未曾讀取／未曾 applied（fail-open）——與
+    `_offered_pairs_from_ledger` 同款式：新 session 本就不存在此檔，這是常態而非例外。
+    """
+    path = root / "runtime" / "ledger" / "memory_usage.jsonl"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if ev.get("session_id") != session_id or ev.get("tool") != tool:
+            continue
+        if ev.get("source") == "read" or ev.get("kind") == "applied":
+            return True
+    return False
+
+
 def _applied_hint(root: Path, tool: str, session_id: str) -> str:
     """applied 顯式訊號回報指引（契約 8）：附完整可貼命令（session 歸因已填）。"""
     argv = hippo_invocation(root) + [
@@ -318,7 +378,17 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             # map 為 offered ledger 的衍生 cache：claim 去重前先以 ledger（單一真值）reconcile，
             # 補齊硬中止／前次 cache 寫入失敗殘留的「ledger 有、map 無」，使去重判定與 post-tool
             # 讀取端皆回到 ledger 可重建的真值（seen 亦已聯集 ledger，reconcile 另把真值落回 map）。
-            _reconcile_offered_map(root, tool, session_id, mpath)
+            # 回傳值為本 (tool, session_id) 的歷史 offer 事件筆數——與 reconcile 用的 pairs
+            # 出自同一次 ledger 掃描，供下面的 OFFER_STOP_AFTER_EVENTS 早停判斷使用。
+            offer_event_count = _reconcile_offered_map(root, tool, session_id, mpath)
+            if (offer_event_count >= OFFER_STOP_AFTER_EVENTS
+                    and not _session_has_engaged(root, tool, session_id)):
+                # 早停（實測依據見 OFFER_STOP_AFTER_EVENTS 常數）：session 已 offer 超過門檻次數
+                # 且全程沒有任何讀取／applied 訊號——持續 offer 是純 context 污染。不建 shortlist、
+                # 不記新 offered ledger 事件；早停狀態不落任何新檔，每次重算（無 schema migration、
+                # 無 reconcile 負擔）。session 只要曾有讀取／applied，_session_has_engaged 恆真，
+                # 永不早停（繼續供給）。
+                return ""
             seen = _load_offered_ids(root, tool, session_id)
             claim = [h for h in hits
                      if h.get("slice_id") and h["slice_id"] not in seen][:SHORTLIST_K]

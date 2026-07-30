@@ -8,6 +8,12 @@
 ## [Unreleased]
 
 ### Added
+- Prompt-time shortlist 新增 offer 早停機制：同一 `(tool, session_id)` 歷史 offer 事件數達
+  `OFFER_STOP_AFTER_EVENTS`（8）門檻、且 session 從未出現讀取或 applied 訊號時，
+  `build_shortlist_and_record` 提前回傳空字串，不再注入 shortlist、不記新 offered ledger
+  事件。實測：9 次 offered→read 中 7 次發生在第 0-1 個 offer 事件、第 7 個事件之後零讀取，
+  對長期不讀的 session 持續 offer 是純 context 污染；曾有讀取／applied 的 session 永不早停。
+  事件計數搭在既有 offered ledger 掃描路徑上，無新增 ledger 掃描成本。
 - `moc.search` 新增可注入 UTC `usage_now`／`usage_window_days` 的 usage-boost index metadata；預設窗口 30 天，`usage_boost = min(0.04, 0.01*log2(1+read_count))`，`base_score` 間距 > `0.04` 不被反轉。
 - janitor retention base 改為 `max(captured_at, active_since_ts, valid last_read_at)`；future read 不得延長 TTL，`superseded`／`source_invalid` 優先序與 read 不 reactivation 維持不變。CLI usage/funnel 以 one-shot raw iterators 折疊 compact per-session/per-slice state，不再保留 ledger-wide raw row lists。
 - `hippo usage funnel`：新增 session 層級漏斗報表，以收到非空記憶 brief 的 session 為分母，統計 offered → read → applied 的轉換率，並提供 per-tool 與被讀取 slice 的 top-N 特徵；支援 `--since`、`--json` 及既有／新版 offered ledger 格式（#18）。
