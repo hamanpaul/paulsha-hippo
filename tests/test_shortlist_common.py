@@ -374,6 +374,197 @@ def test_build_shortlist_concurrent_same_session_claims_slice_once(tmp_path, mon
     assert "sl-aaaaaaaaaaaaaaaa" in SC._load_offered_ids(tmp_path, "claude-code", "sidRACE")
 
 
+def _seed_offer_events(mr: Path, tool: str, session_id: str, n: int) -> None:
+    """直接向 offered ledger 寫入 n 筆歷史 offer 事件（略過完整 pipeline，加速測試）。
+
+    事件間彼此互斥的假 slice_id/path——不與 `_seed()` 的真實命中 sl-aaaaaaaaaaaaaaaa
+    重疊，故測試中對「SerialWrap 執行」的真實搜尋命中不會被這些歷史雜訊去重擋掉。
+    """
+    for i in range(n):
+        SC._append_offered_ledger(
+            mr, tool, session_id, "proj",
+            [(f"sl-hist{i:012d}", str(mr / "knowledge" / "proj" / f"hist{i}.md"))])
+
+
+def _append_memory_usage_event(mr: Path, ev: dict) -> None:
+    led = mr / "runtime" / "ledger"
+    led.mkdir(parents=True, exist_ok=True)
+    with (led / "memory_usage.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+def test_offer_early_stop_after_threshold_events_with_no_reads(tmp_path, monkeypatch):
+    # 實測依據（見 OFFER_STOP_AFTER_EVENTS 常數註解）：讀取全部發生在第 7 個 offer 事件
+    # 之前，第 8 個事件之後零讀取。歷史事件數達門檻且本 session 全程無讀取/applied
+    # 訊號時，第 9 次呼叫必須早停：不注入 shortlist、不記新 offered ledger 行。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidStop", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidStop", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out == ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+
+def test_offer_continues_below_threshold_events(tmp_path, monkeypatch):
+    # 事件數未達門檻（差一次）——早停不生效，照常 offer（第 8 筆寫入 ledger）。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidBelow", SC.OFFER_STOP_AFTER_EVENTS - 1)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidBelow", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+
+def test_offer_does_not_stop_when_session_has_direct_read(tmp_path, monkeypatch):
+    # 事件數達門檻，但 session 曾有一筆直讀（offered=False 亦算——直讀證明使用者
+    # 主動在看記憶檔）：永不早停，照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidRead", SC.OFFER_STOP_AFTER_EVENTS)
+    _append_memory_usage_event(tmp_path, {
+        "ts": "2026-07-01T00:00:00Z", "session_id": "sidRead", "tool": "claude-code",
+        "project": "proj", "sl_id": "", "path": str(tmp_path / "knowledge" / "proj" / "z.md"),
+        "source": "read", "offered": False,
+    })
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidRead", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
+def test_offer_does_not_stop_when_session_has_applied(tmp_path, monkeypatch):
+    # 事件數達門檻，但 session 曾有一筆 applied（顯式採用訊號）：永不早停，照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidApplied", SC.OFFER_STOP_AFTER_EVENTS)
+    _append_memory_usage_event(tmp_path, {
+        "kind": "applied", "session_id": "sidApplied", "slice_id": "sl-x",
+        "tool": "claude-code", "ts": "2026-07-01T00:00:00Z",
+    })
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidApplied", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
+def test_offer_early_stop_scoped_to_session(tmp_path, monkeypatch):
+    # 早停判斷以 (tool, session_id) 為界——另一個 session 的歷史事件數與讀取狀態
+    # 不得互相污染。sidOther 事件數達門檻且無讀取；sidFresh 全新 session 照常 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidOther", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidFresh", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    events = _offered_events(tmp_path)
+    assert len(events) == SC.OFFER_STOP_AFTER_EVENTS + 1
+    assert events[-1]["session_id"] == "sidFresh"
+
+
+def test_offer_early_stop_isolated_by_tool(tmp_path, monkeypatch):
+    # 早停判斷以 (tool, session_id) 為界——同一 session_id 但不同 tool 的歷史事件數
+    # 與讀取狀態不得互相污染（例如同一 CLI session_id 同時被 claude-code 與 codex 使用）。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidShared", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out = SC.build_shortlist_and_record(
+        tmp_path, "codex", "sidShared", cwd="/x", prompt="SerialWrap 執行")
+
+    assert out != ""
+    events = _offered_events(tmp_path)
+    assert len(events) == SC.OFFER_STOP_AFTER_EVENTS + 1
+    assert events[-1]["tool"] == "codex"
+    assert events[-1]["session_id"] == "sidShared"
+
+
+def test_offer_resumes_after_read_event_following_early_stop(tmp_path, monkeypatch):
+    # 早停不是永久狀態——它每次重算，不落任何新檔。session 早停期間出現一筆讀取後，
+    # 下一次 prompt 必須立即解封、恢復 offer。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidResume", SC.OFFER_STOP_AFTER_EVENTS)
+
+    out1 = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidResume", cwd="/x", prompt="SerialWrap 執行")
+    assert out1 == ""  # 早停中（前提檢查）
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+    _append_memory_usage_event(tmp_path, {
+        "ts": "2026-07-01T00:00:00Z", "session_id": "sidResume", "tool": "claude-code",
+        "project": "proj", "sl_id": "", "path": str(tmp_path / "knowledge" / "proj" / "z.md"),
+        "source": "read", "offered": False,
+    })
+
+    out2 = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidResume", cwd="/x", prompt="SerialWrap 執行")
+    assert out2 != ""  # 解封
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
+def test_offer_event_count_counts_ledger_lines_not_pairs(tmp_path):
+    # 單一 ledger 行（一次 offer 事件）內含多個 (sl_id, path) pairs 時，
+    # OFFER_STOP_AFTER_EVENTS 早停判斷的事件筆數必須算 1（同一行＝同一次事件），
+    # 不能誤算成 pairs 數量（3）——否則早停會遠早於實際門檻觸發。
+    mpath = tmp_path / "runtime" / "wakeup" / "claude-code__sidMulti.offered.json"
+    SC._append_offered_ledger(
+        tmp_path, "claude-code", "sidMulti", "proj",
+        [(f"sl-multi{i:03d}", str(tmp_path / "knowledge" / "proj" / f"multi{i}.md"))
+         for i in range(3)])
+
+    count = SC._reconcile_offered_map(tmp_path, "claude-code", "sidMulti", mpath)
+
+    assert count == 1
+
+
+def test_session_has_engaged_skips_corrupt_line_then_detects_valid_one(tmp_path):
+    # memory_usage.jsonl 逐行掃描須對壞行 fail-soft（略過），且不能因為壞行中止
+    # 掃描——後續合法的 read/applied 行仍要被辨識到。
+    led = tmp_path / "runtime" / "ledger"
+    led.mkdir(parents=True)
+    lines = [
+        "{not valid json",
+        json.dumps({"session_id": "sidCorrupt", "tool": "claude-code", "source": "read"}),
+    ]
+    (led / "memory_usage.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert SC._session_has_engaged(tmp_path, "claude-code", "sidCorrupt") is True
+
+
+def test_offer_bypass_early_stop_for_explicit_recall(tmp_path, monkeypatch):
+    # BLOCKING（review）：hippo recall 為使用者主動操作，不應被 UserPromptSubmit 自動
+    # hook 專用的 OFFER_STOP_AFTER_EVENTS 早停靜默擋掉。bypass_early_stop=True 時，
+    # 即使 session 已達門檻且全程無讀取，仍照常回傳 shortlist 並記錄 offered；其餘
+    # 去重／redaction／publish 邏輯不變。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    _seed_offer_events(tmp_path, "claude-code", "sidBypass", SC.OFFER_STOP_AFTER_EVENTS)
+
+    # 前提檢查：不帶 bypass 時維持早停
+    out_default = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidBypass", cwd="/x", prompt="SerialWrap 執行")
+    assert out_default == ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS
+
+    out_bypass = SC.build_shortlist_and_record(
+        tmp_path, "claude-code", "sidBypass", cwd="/x", prompt="SerialWrap 執行",
+        bypass_early_stop=True)
+    assert out_bypass != ""
+    assert len(_offered_events(tmp_path)) == SC.OFFER_STOP_AFTER_EVENTS + 1
+
+
 def _boom_oserror(*a, **k):
     raise OSError("disk full")
 

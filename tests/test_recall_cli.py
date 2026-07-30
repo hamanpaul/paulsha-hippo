@@ -50,6 +50,27 @@ def test_recall_missing_required_flags_exit2(capsys):
     assert cli.main(["recall"]) == 2
 
 
+def test_recall_bypasses_offer_early_stop(tmp_path, monkeypatch, capsys):
+    # BLOCKING（review）：hippo recall 是使用者主動操作，不應被 UserPromptSubmit 自動
+    # hook 專用的 OFFER_STOP_AFTER_EVENTS 早停靜默擋掉。即使 session 已 offer 超過門檻
+    # 次數且全程無讀取，`hippo recall` 仍必須照常回傳 shortlist。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _seed(tmp_path)
+    for i in range(SC.OFFER_STOP_AFTER_EVENTS):
+        SC._append_offered_ledger(
+            tmp_path, "codex", "sidCliBypass", "proj",
+            [(f"sl-hist{i:012d}", str(tmp_path / "knowledge" / "proj" / f"hist{i}.md"))])
+
+    rc = cli.main(["recall", "--memory-root", str(tmp_path), "--cwd", "/x",
+                   "--tool", "codex", "--session-id", "sidCliBypass",
+                   "--prompt", "SerialWrap 執行"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    note = str(tmp_path / "knowledge" / "proj" / "a.md")
+    assert note in out
+
+
 def test_recall_traversal_tool_rejected_exit2(tmp_path, capsys):
     # 迴歸（#17 review [high]）：--tool 夾帶路徑分隔符時，過去會把 offered map
     # 原子 replace 到 memory root 之外——argparse 層直接拒絕（exit 2），零落檔。
