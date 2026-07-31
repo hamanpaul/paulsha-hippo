@@ -41,6 +41,42 @@ def _slice_id(fragment: Fragment) -> str:
     return "sl-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
+def normalize_tags(value: object) -> list[str]:
+    """正規化任意來源的 tags 值成 MOC index 要求的 list[str]（issue #101）。
+
+    生產實證：cg 蒸餾 70-slice 大 session 產出未引號 issue 編號 tag（``264``），
+    寫入 YAML frontmatter 後成為 int；``moc/search.py::_tags_fts_text`` 與
+    ``moc/census.py::_census_tags_invalid`` 對 tags 型別做嚴格 list[str] 驗證
+    （這是刻意的最後防線，見兩者 docstring），一旦命中非字串元素就整個 slice
+    判 invalid_frontmatter 排除——`build_index()` 的 warning 因此讓
+    orchestrator 的 ``clean = not warnings`` 每輪誤判 partial。
+
+    規則（元素層級，遇非 list 整體視為空 list）：
+    - ``str``：保留原樣，但 ``strip()`` 後為空（含純空白）則丟棄。
+    - ``bool`` / ``int`` / ``float``：以 ``str()`` 字串化保留。
+    - 其他型別（``None``、``dict``、嵌套 ``list``/``tuple`` 等非 scalar）：丟棄。
+    正規化後保序去重（字串化後的值相同即視為同一 tag，例如 ``264`` 與
+    ``"264"``）。
+    """
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in value:
+        text: str | None
+        if isinstance(item, str):
+            text = item if item.strip() else None
+        elif isinstance(item, (bool, int, float)):
+            text = str(item)
+        else:
+            text = None
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
 def build(fragment: Fragment, config: AtomizerConfig) -> Slice:
     body = fragment.body
     artifact_kind = config.artifact_kind_map.get(fragment.source_artifact, config.default_artifact_kind)
@@ -116,7 +152,7 @@ def build_from_proposal(proposal: "SliceProposal", session_meta: dict[str, objec
         "session_title": str(session_meta.get("session_title", "")),
         "title": proposal.title,
         "atom_title": proposal.title,
-        "tags": list(proposal.tags),
+        "tags": normalize_tags(list(proposal.tags)),
         "source_fragments": list(proposal.source_fragment_indices),
     }
     return Slice(
