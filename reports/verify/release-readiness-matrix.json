@@ -1,7 +1,7 @@
 {
  "schema_version": "1",
  "candidate_commit": "f5df39496de17c8b4fb3aa88dfa698b7c547aaf4",
- "wheel_sha256": null,
+ "wheel_sha256": "b942feb2296a8eff2d161fab76e82c0be8ad05eac1ec8a7510f14d3756f1f1a4",
  "gates": {
   "AR-01": {
    "state": "passed",
@@ -10,76 +10,76 @@
    "timestamp": "2026-07-30T12:20:00Z"
   },
   "AR-02": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：尚未針對本 candidate 執行 build，需產生新的 build manifest SHA-256，並確認 CLI identity（`hippo`/`build_info`）回報的版本與 commit 綁定本 candidate。",
+   "state": "passed",
+   "evidence": "candidate f5df394 於 detached worktree 以 scripts/build_release_artifact.py 建置：wheel paulsha_hippo-0.1.1-py3-none-any.whl sha256=b942feb2296a8eff2d161fab76e82c0be8ad05eac1ec8a7510f14d3756f1f1a4，manifest sha256=f0e975294b44267e1bc6487984cd566a394d7cbbde6a1eacf0b6a6620e0e1a33，manifest.commit 與 wheel 內嵌 _build.json（setup.py 獨立 git rev-parse 路徑）皆為 f5df39496de17c8b4fb3aa88dfa698b7c547aaf4、source_dirty=false——雙獨立路徑一致。wheel 含 161 檔、20 個非 .py 資產（atomizer.yaml、systemd 模板、hooks/install.sh 等）。註1：本 candidate 的 VERSION/pyproject/__init__ 仍為 0.1.1（version bump 屬 release label PR，見政策），故 wheel 版號字串為 0.1.1；release 時 bump commit 需重建 wheel 並更新本欄與 wheel_sha256。註2：build_release_artifact.py 的 version 欄位來自 HIPPO_VERSION env（fallback 硬編 0.1.1），與 pyproject 脫鉤——bump 時須設 env 或修腳本，已列 follow-up。",
    "rerun": "python scripts/build_release_artifact.py --help",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-03": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：candidate wheel 尚未建置（wheel_sha256 未知）。待建置後需在 checkout 外的乾淨 venv 安裝該 wheel，並匯入模組確認 build_info.version_json 記載的正是本 candidate commit。",
+   "state": "passed",
+   "evidence": "乾淨 venv（scratchpad，驗後即刪）pip install 上述 wheel：僅拉 pyyaml 依賴；`hippo --version --json` 與 `paulsha_hippo.build_info.version_json` 皆回報 build_commit=f5df3949…、version=0.1.1、source_dirty=false，install_root 指向該 venv site-packages。方法註記：識別檢查必須在無 paulsha_hippo/ 目錄遮蔽的 cwd 執行（python -c 會把 cwd 排進 sys.path[0]，在 repo checkout 內會靜默拿到 dev tree 的身分）。",
    "rerun": "gh release download v0.1.2, create clean venv, install wheel, inspect build_info.version_json",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-04": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對本 candidate 重跑 canonical config migration 的 dry-run → apply → 再次 dry-run，確認三次雜湊一致且無 prohibited field 或 conflict。",
+   "state": "passed",
+   "evidence": "hash-bound migration 三步完成：plan（初判 conflict——陳年 legacy ~/.config/paulshaclaw/atomizer.override.yaml 與 canonical 15 root 欄位語意差異）→ resolution（selected_source=canonical，plan_hash/canonical_hash/legacy_hash 三 hash 綁定）→ apply --dry-run（semantic_hash 4f0277976e74…）→ apply（no-op：canonical 已為 target）→ operator 依設計退役 legacy 檔（可逆改名 .retired-ar04-20260731；已確證 production 無參數 load_config() 走 using_canonical_runtime_config=True 永不合併 override，退役不影響 runtime）→ plan 複驗 status=ready/selected=canonical/conflicts=[]/prohibited=[] → 最終 dry-run semantic_hash 仍 4f0277976e74…，三次一致且等於 live dream ledger 的 config hash 前綴（4f027797:780b3dd7）。canonical 檔已先備份 config.yaml.bak-ar04-20260731T091502。",
    "rerun": "hippo config migrate dry-run/apply and repeat",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-05": {
    "state": "pending",
-   "evidence": "0.1.2 待執行：需在已安裝 Claude 與 Codex 外部 CLI 的環境下執行 `hippo doctor` 搭配 live external profile probes，確認兩個 Tier-1 profile 皆回傳非空輸出。（環境註記更新：本機現已具備可探測的外部 CLI——claude 2.1.220、codex 0.145.0、cg 皆在 PATH 且今日有實際執行紀錄，故本 gate 已具備可跑條件，僅尚未對本 candidate 取得 probe 輸出。）",
+   "evidence": "0.1.2 部分完成（2026-07-31 對本 candidate 實跑 doctor --probe-live 與 --probe-profiles）：distiller backend claude smoke ✓（exit 0、單一 JSON）；profile 層 claude(tier-1) ✓、cg(tier-2) ✓、local-vllm(tier-3) ✓（地端 endpoint 活躍，首次取得 probe 證據）；agy ineligible=task_class（設計如此）。codex(tier-1) FAIL exit 1——provider 用量上限（ChatGPT Codex quota，reset 2026-08-05T19:42 當地時間），屬環境/訂閱狀態非 candidate 缺陷。gate 要求兩個 tier-1 profile 皆非空輸出，故維持 pending；quota 重置後重跑 `hippo doctor --probe-profiles` 即可收尾。另捕獲既存缺陷（非本 gate 判定對象）：`hippo search` CLI 對現行 retrieval.db 報 `no such column: build`，已列 follow-up issue 候選。",
    "rerun": "hippo doctor with live external profile probes",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-06": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對已安裝的本 candidate 執行一次 versioned semantic 語料，確認至少一筆 retrieval-eligible grounded atom 經 Claude-to-Codex degraded 路徑成功發布。",
+   "state": "passed",
+   "evidence": "自然生產證據（優於合成語料）：2026-07-30T19:00:42Z 的 systemd timer cycle（build f5df394）中 2 個 session 走完整降級鏈——claude→invalid_output、codex→process、cg→degraded-success→promoted（processing ledger 逐 attempt 記錄，session 例：codex:019fb440-37df-75d1-a3f9-0df2e22e1958，accepted_slices=7）。已驗 retrieval-eligible：其產出 atom（例 sl-9541b374340649ad）在 runtime/indexes/retrieval.db 的 slice_meta（active=1）與 slices_fts 各 1 列。同輪 11 session 中 7 個 claude 一次成功、1 個 cg 直接成功——tier-1 契約修復（issue 77）後的生產健康度佐證。註：0.1.1 的表述為 Claude-to-Codex 兩段；本 candidate 配置鏈為 claude→codex→cg 三段，證據涵蓋全鏈遍歷。",
    "rerun": "run the versioned semantic corpus against the installed candidate",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-07": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需執行 publication 與 NAME_MAX/crash/concurrency/publication-journal 相關 pytest 套件，並核對實際 GitHub release assets——0.1.2 尚未建立 release，無資產可核對。",
+   "state": "passed",
+   "evidence": "publication 邊界條件 pytest（sibling worktree @ f5df394）：test_publication_transaction 5、test_moc_naming（NAME_MAX/ENAMETOOLONG fail-soft）19、test_atomizer_pipeline（publish_prepare/materialized/commit journal 斷言）54、test_atomizer_e2e（crash_resume_promote）8——共 86 passed 0 failed。誠實註記：grep 未發現 publication 模組專屬的 concurrency 命名測試（關鍵字覆蓋缺口，非失敗）；release assets 核對隨 AR-14 暫緩。",
    "rerun": "pytest publication and NAME_MAX suites, then verify release assets",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-08": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需在已安裝 Claude、Codex、Copilot 客戶端上實際觸發各自的 consumer Read／producer/import hook，檢視 append-only ledger 是否綁定本 candidate。",
+   "state": "passed",
+   "evidence": "三客戶端在部署後（2026-07-30T11:24Z 起，hooks build f5df394）的 append-only ledger 證據：claude-code——producer import 事件＋consumer offered（offered.jsonl）＋PostToolUse Read source=read/offered=true（session 805cf9bf，01:14:35Z，sl-fd4dac4704e1f4ed）；codex——producer import 事件 11 筆（session_end hook 於 CLI quota 受限下仍正常捕捉）；consumer 為 recall-based（capability matrix 記載之 degraded 消費路徑）；copilot-cli——producer 2 筆 written（b8c2d4e3、8ac64623，01:19/01:21Z）＋consumer PostToolUse Read（01:21:06Z，sl-fd4dac4704e1f4ed，offered=false 直讀歸因正確）。",
    "rerun": "exercise each installed client hook and inspect append-only ledgers",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-09": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對 current-pipx 與 stale-system 兩種 staged upgrade profile 實際執行，確認產生 pin 到本 release wheel 的 write-ahead schema-v2 transaction，並驗證注入的 invalid command plan 會 fail closed。",
+   "state": "passed",
+   "evidence": "對齊 0.1.1 證據範圍（prepared + fail-closed，不含 live apply）在隔離 target-root（scratchpad）實跑：current-pipx 與 stale-system 兩 profile 各完成 plan→prepare，manifest schema_version=2、write_ahead=true、prepared_sha256 皆 pin 至 release wheel b942feb2…；transaction_root 於 target 之外含 write-ahead journal（upgrade.json 先落盤）＋candidate.whl/previous.whl。注入不完整 command plan 後 apply --force → status=blocked『upgrade command plan is incomplete before mutation』列出全部 11 phase，target 檔逐位元未動；apply --dry-run mutation=false。hermetic 全鏈（含 rollback/service-phase failure）由 AR-12 的 test_upgrade_transaction 13/13 覆蓋。全程零 live pipx/systemd 路徑。",
    "rerun": "run both staged upgrade profiles and injected rollback cases",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-10": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對本 candidate 實際執行一次 recovery，核對 manifest／journal 雜湊與獨立 index census，確認 committed winners 與 superseded sources 的統計與 closeout 報告一致。",
+   "state": "passed",
+   "evidence": "兩部分：(1) 對 live memory root 唯讀獨立 census——`hippo index verify`：census_files=1264、eligible=indexed=1058、ok=true、problems=[]（純 os.walk＋sqlite SELECT/FTS5 integrity-check，分類規則獨立重寫防同源自證）。(2) 候選 CLI 全鏈演練（隔離迷你 memory root，2 個真實 archived payload 複本）：recovery plan（recovery_id 9ba9fe8b90754337d3df，pins 齊）→ apply（committed=2、inbox 實體化）→ resume 冪等（committed=0、complete=true，對齊 0.1.1『empty resume 零新 commit』）→ rollback（rolled_back=2、inbox 歸零）；journal 事件完整：batch_started 1、begin/preimage/staged/replace_intent/replaced/committed 各 2、batch_done 1、rolled_back 2、batch_rolled_back 1。審計雜湊：manifest sha256=8d76d25862d82f98…、journal sha256=b535096edb111379…。註：未對 live root 執行 production-scale apply——本 candidate 無待恢復資料損失情境，對 live inbox 做儀式性改寫只會污染 AR-11 soak 進料；hermetic apply/rollback/target-drift/replay 證據見 AR-12（test_recovery 24/24）。0.1.1 的 e7e09cd8 transaction root 已不存於 live root，無法以 --source-manifest 沿用（可覆現性缺口已在調查中記錄）。",
    "rerun": "verify recovery manifest, journal cardinality and independent index census",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-11": {
    "state": "pending",
-   "evidence": "0.1.2（candidate f5df394…）soak 0/3，pending。**語意已明文化（本 candidate 內含）**：PR #91（ed1ea37）確立窗口語意——中性輪（idle-gate skip／timer 缺席／zero-ingress／zero-atom 且 ok 無回歸標記增長）不計入也不歸零；非 ok 輪、回歸標記相對前一已執行輪增長（含 invalid-checksum backlog）、或部署 build 變更則關窗歸零；七個日曆天無新合格輪窗口過期。標記以前輪 baseline 判增長、非絕對零。**前一部署 build 76edb93 已於 2026-07-30 依此語意完成 3/3**（窗口 03:00:32Z 起由 #90 部署換版開窗；合格輪 03:00:32Z split=3/slices=47、10:00:42Z 1/5、11:00:42Z 2/9；9 個已執行輪全 ok；parked=9/generic_title=1/unknown_project=6/invalid_checksum=18 全程靜止；02:00Z idle skip 為中性輪；無手動執行）——證據存於 append-only dream ledger，屬 76edb93 的 attest，**不可轉移至本 candidate**。f5df394 於 2026-07-30T11:24Z 部署（pipx+service+hooks 三處對齊，unit HIPPO_BUILD_COMMIT 驗證），依換版規則開新窗口：首輪 12:00:42Z ok、zero-ingress、中性。**仍需**：本 candidate 部署 build 上單一窗口內 3 個合格輪（timer 觸發＋唯一新 ingress session＋至少一 accepted atom），期間無非 ok 輪、無標記增長、無再換版。合格輪出現率已由 #92（max-load 1.0→4.0，修 29% 進料時段誤跳）與自然 ingress 恢復大幅改善——76edb93 從部署到 3/3 僅 8 小時。",
+   "evidence": "0.1.2（candidate f5df394…）soak 0/3，pending。**語意已明文化（本 candidate 內含）**：PR #91（ed1ea37）確立窗口語意——中性輪（idle-gate skip／timer 缺席／zero-ingress／zero-atom 且 ok 無回歸標記增長）不計入也不歸零；非 ok 輪、回歸標記相對前一已執行輪增長（含 invalid-checksum backlog）、或部署 build 變更則關窗歸零；七個日曆天無新合格輪窗口過期。標記以前輪 baseline 判增長、非絕對零。**前一部署 build 76edb93 已於 2026-07-30 依此語意完成 3/3**（窗口 03:00:32Z 起由 #90 部署換版開窗；合格輪 03:00:32Z split=3/slices=47、10:00:42Z 1/5、11:00:42Z 2/9；9 個已執行輪全 ok；parked=9/generic_title=1/unknown_project=6/invalid_checksum=18 全程靜止；02:00Z idle skip 為中性輪；無手動執行）——證據存於 append-only dream ledger，屬 76edb93 的 attest，**不可轉移至本 candidate**。f5df394 於 2026-07-30T11:24Z 部署（pipx+service+hooks 三處對齊，unit HIPPO_BUILD_COMMIT 驗證），依換版規則開新窗口：首輪 12:00:42Z ok、zero-ingress、中性；至 2026-07-31T01:00Z 窗口無破口（全 ok），合格輪 1/3（07-30T19:00:42Z split=11/slices=46，其中含 2 個完整降級鏈發布，另見 AR-06）。**仍需**：本 candidate 部署 build 上單一窗口內 3 個合格輪（timer 觸發＋唯一新 ingress session＋至少一 accepted atom），期間無非 ok 輪、無標記增長、無再換版。合格輪出現率已由 #92（max-load 1.0→4.0，修 29% 進料時段誤跳）與自然 ingress 恢復大幅改善——76edb93 從部署到 3/3 僅 8 小時。",
    "rerun": "以窗口語意核對 ledger（自最近一次部署換版起）：python3 -c \"import json,os;[print(e['ts'],e['status'],e['passes']['atomize']['split_sessions'],e['passes']['atomize']['slices'],(e.get('health') or {}).get('build_identity',{}).get('build_commit','')[:7]) for e in map(json.loads,open(os.path.expanduser('~/.agents/memory/runtime/ledger/dream.jsonl')))]\"；窗口＝同一 build 上連續已執行輪全 ok 且標記（parked/generic_title/unknown_project/invalid_checksum）無增長；合格輪＝窗口內 split_sessions>0 且 slices>0 的 timer 輪；skip／缺席／zero-ingress／zero-atom 為中性。詳 openspec/specs/atomization-release-integrity/spec.md 'Soak counting SHALL use window semantics' 段。",
-   "timestamp": "2026-07-30T12:10:00Z"
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-12": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對本 candidate 執行 rollback、compensation、concurrent-edit、target-drift、replay 相關 pytest 子集，並記錄實際通過/失敗數。",
+   "state": "passed",
+   "evidence": "rollback/compensation/target-drift/replay/upgrade-failure pytest 家族（sibling worktree @ f5df394）：test_recovery 24、test_upgrade_transaction 13、test_install_default_runtime 14、test_deployment_manifest 16、test_config_migration 7、test_config_migration_cli 2、test_upgrade_cli 2、test_install_cli_runtime 2——共 80 passed 0 failed（0.1.1 同家族 74，增量為 #78/#85/#90 新增測試）。經人工逐檔語境篩選排除同名異義誤中（skillopt/rekey/syncback/ops-init 的 rollback 屬別的功能）。",
    "rerun": "pytest the rollback, compensation, recovery and upgrade failure subset",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-13": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需對本 candidate 執行 pinned policy preflight、`openspec validate --all --strict`、`git diff --check`，以及 tag 後 closeout 的對齊確認。",
+   "state": "passed",
+   "evidence": "policy_check --repo .：25 pass、0 fail、1 warn（R-22 陳年懸空 25 筆，advisory 同 0.1.1）；R-07 pass（VERSION 0.1.1 == latest tag，候選期正確狀態）。openspec validate --all --strict：14 passed 0 failed。git diff --check：乾淨，worktree 前後皆 clean。註：policy-preflight 於 detached-HEAD worktree 結構性不可跑（_validate_git_context 要求 symbolic-ref 成功），已根因化非缺陷；policy_check 為本 gate 權威本地證據。",
    "rerun": "run pinned policy preflight, openspec validate --all --strict and git diff --check",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "AR-14": {
    "state": "pending",
@@ -88,16 +88,16 @@
    "timestamp": null
   },
   "IC-01": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需在一個 Claude session 中實際觸發已安裝的 UserPromptSubmit 與 PostToolUse Read hooks，核對 usage ledger 於同一 session 記錄 source=read 與 offered=true。",
+   "state": "passed",
+   "evidence": "單一 Claude session（805cf9bf-2def-…，本 candidate hooks f5df394 部署後）齊備四類 ledger 事件：UserPromptSubmit offered（offered.jsonl 2026-07-31 事件）、PostToolUse Read source=read/offered=true（memory_usage.jsonl 01:14:35Z，sl-fd4dac4704e1f4ed）、usage mark-applied kind=applied 多筆——offered→read→applied 全漏斗在同一 session 閉環。",
    "rerun": "run installed UserPromptSubmit and PostToolUse Read hooks in one Claude session",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   },
   "IC-02": {
-   "state": "pending",
-   "evidence": "0.1.2 待執行：需確認（或補寫）closeout report 是否涵蓋本次 0.1.2 batch 對應 issue 的全部驗收項，並核對對應 OpenSpec archive 與 PR closing links 是否齊備。",
+   "state": "passed",
+   "evidence": "closeout report 已補寫並隨本 PR 入庫：reports/verify/release-0.1.2-closeout.md。17 個 batch issue 中 16 個齊備（closing PR merge commit 均以 merge-base --is-ancestor 驗證為 candidate 祖先；5 個 record 型 issue 無 closing PR 但關閉留言附量化證據）。明列例外：issue 63 為 NOT_PLANNED 關閉、範圍整併至 hamanpaul/paulsha-cortex issue 208，本 repo 內無可查驗驗收項；3 個 openspec change（issue-41/64/80）未歸檔且 tasks 勾選未維護（0/19、28/33、無 tasks）——不補勾歷史、不強行歸檔，列 pre-tag follow-up 由維護者裁定。PR 91–95 時序註記：candidate f5df394 即 PR 94 的 merge commit；PR 95 為 candidate 認定之治理紀錄、不在快照內。",
    "rerun": "review closeout report, archived OpenSpec and PR closing links for this batch's issues",
-   "timestamp": null
+   "timestamp": "2026-07-31T01:45:00Z"
   }
  }
 }
