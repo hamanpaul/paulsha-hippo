@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import os
 import tempfile
 from pathlib import Path
@@ -56,6 +57,7 @@ def _emit(value: Any, indent: int = 0) -> list[str]:
     return [f"{pad}{_scalar(value)}"]
 
 
+@functools.lru_cache(maxsize=1024)
 def _needs_quoting_for_type_fidelity(s: str) -> bool:
     """True 若裸字串 ``s`` 在 YAML round-trip 後型別不再是 ``str``（issue #102）。
 
@@ -63,6 +65,9 @@ def _needs_quoting_for_type_fidelity(s: str) -> bool:
     打盡數字樣（``264``/``1.5``/``1e3``）、布林樣（``true``/``no``/``off``）、
     null 樣（``null``/``~``）、空字串等所有 YAML 隱式型別轉換，勝過手寫
     regex 清單且不必隨 YAML 1.1 bool/null 詞彙表增修而補洞。
+
+    lru_cache：janitor/moc 每輪 rewrite 上千檔、大量重複值（tags/project 等），
+    快取避免同字串重複 probe（reviewer 建議）。
     """
     try:
         import yaml
@@ -72,8 +77,9 @@ def _needs_quoting_for_type_fidelity(s: str) -> bool:
         return False
     try:
         parsed = yaml.safe_load(s)
-    except yaml.YAMLError:
-        # Unparsable as bare YAML -> must be quoted regardless of type.
+    except Exception:
+        # Unparsable as bare YAML（含 YAMLError 之外的解析器極端例外）
+        # -> fail toward quoting：加引號恆安全，漏引號才是本 issue 的病灶。
         return True
     return not isinstance(parsed, str)
 
