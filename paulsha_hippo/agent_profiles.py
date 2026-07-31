@@ -48,7 +48,20 @@ FIXED_MAX_AGENT_CALLS = 6
 # time remaining still hit the fixed call ceiling on its 7th chunk and was
 # parked (issue #89). FIXED_MAX_AGENT_CALLS_CAP bounds how far
 # ``effective_max_agent_calls`` may scale that budget up.
-FIXED_MAX_AGENT_CALLS_CAP = 12
+#
+# The call cap's defensive purpose is to stop *runaway retries*, not to
+# out-race the 1800s time budget (#85) on ordinary linear progress:
+# ``chunk_count + 2`` is already a linear upper bound (one chunk per call plus
+# one fallback transition's worth of margin), so the cap should sit above the
+# largest chunk_count the time budget can plausibly reach, not below it. An
+# earlier value of 12 made every session >=13 chunks mathematically unparkable
+# on zero failures (chunk_count + 2 > 12 for chunk_count >= 11), which
+# defeated the whole fix for exactly the large sessions it targeted. 20 covers
+# up to 18 chunks plus one fallback transition's margin before saturating;
+# beyond that a session is pathologically over-split, and hitting the cap
+# there is a reasonable defensive stop that still leaves budget-park evidence
+# behind (rather than an unbounded call count).
+FIXED_MAX_AGENT_CALLS_CAP = 20
 FALLBACK_ON = (
     "ineligible",
     "auth",
@@ -117,10 +130,28 @@ def effective_max_agent_calls(chunk_count: int) -> int:
     a mid-session fallback transition only needs to redo the chunks the
     outgoing profile left unvalidated, not the whole prompt sequence, so 2
     extra calls cover one fallback transition's wasted call without
-    unbounding the budget. ``FIXED_MAX_AGENT_CALLS_CAP`` (12) aligns with
-    #85's 1800s session-deadline cap: 1800s / 240s-per-chunk ~= 7.5 chunks, so
-    12 calls leaves one fallback transition's worth of headroom above that
-    ceiling instead of scaling without limit.
+    unbounding the budget.
+
+    ``FIXED_MAX_AGENT_CALLS_CAP`` (20) exists to stop *runaway retries*, not
+    to out-race ordinary linear progress: ``chunk_count + 2`` is itself a
+    linear upper bound on the calls a session with at most one fallback
+    transition can need, so the cap must sit above the largest chunk_count
+    the #85 time budget (1800s cap / 240s-per-chunk ~= 7.5 chunks) can
+    plausibly reach, or every large session the fix targets becomes
+    mathematically unparkable-free again. A prior cap of 12 made every
+    session >=13 chunks hit the ceiling on zero failures (``chunk_count + 2
+    > 12`` once chunk_count >= 11), which reintroduced issue #89's park for
+    exactly the sessions this function exists to unblock. 20 covers up to 18
+    chunks plus one fallback transition before saturating; a session needing
+    more than that is pathologically over-split, and parking there (with
+    budget-park evidence) is a reasonable defensive stop rather than an
+    unbounded call count.
+
+    This function is called from ``ExternalAgentRouter.run_session`` only
+    when the router was constructed with the *unmodified default*
+    (``self.max_agent_calls == FIXED_MAX_AGENT_CALLS``); see the call site
+    for why an explicit value of exactly 6 is indistinguishable from -- and
+    therefore still scales like -- accepting the default.
     """
     if chunk_count <= 0:
         return FIXED_MAX_AGENT_CALLS
@@ -824,6 +855,22 @@ class ExternalAgentRouter:
         # ``self.deadline_seconds``, an explicit call-budget override is not a
         # silently-ignored knob: it still bounds every call the session makes,
         # it just does not additionally scale.
+        #
+        # This equality check cannot distinguish "the caller passed nothing
+        # and got the default" from "the caller explicitly passed exactly
+        # FIXED_MAX_AGENT_CALLS (6)" -- both look identical here, and that is
+        # deliberate, not an oversight. A sentinel default that could tell
+        # them apart would break production: the canonical runtime
+        # (``atomizer/config.py``) *always* passes ``max_agent_calls=`` (its
+        # own default already equals ``FIXED_MAX_AGENT_CALLS``), and shipped
+        # config templates spell it out explicitly too
+        # (``external_agents.max_agent_calls: 6`` in ``atomizer.yaml``). If
+        # equality to the default opted a session out of scaling, the fix
+        # this router exists to provide would never fire for any real
+        # deployment. So: explicitly configuring 6 is equivalent to accepting
+        # the default and *will* scale up with chunk_count; an operator who
+        # wants a hard, non-scaling ceiling below the default must configure
+        # a value of 5 or less.
         session_call_budget = (
             effective_max_agent_calls(total_chunks)
             if self.max_agent_calls == FIXED_MAX_AGENT_CALLS

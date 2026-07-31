@@ -578,7 +578,11 @@ def load_config(
     # configured value below that default is honoured literally as a hard
     # per-deployment ceiling with no scaling, which is a real, non-silent
     # effect on every session -- not the same "declared but ignored" defect
-    # shape as an out-of-bounds deadline_seconds. The check above still keeps
+    # shape as an out-of-bounds deadline_seconds. Configuring exactly
+    # FIXED_MAX_AGENT_CALLS here (the shipped `atomizer.yaml` template does)
+    # is therefore indistinguishable from omitting the key and *will* scale
+    # with chunk_count; an operator who wants a true hard ceiling below the
+    # default must configure 5 or less. The check above still keeps
     # operators from configuring *above* the fixed default, since only the
     # automatic chunk-count scaling (bounded by FIXED_MAX_AGENT_CALLS_CAP) may
     # raise the ceiling past FIXED_MAX_AGENT_CALLS.

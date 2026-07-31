@@ -30,6 +30,21 @@ class TestAtomizerConfig(unittest.TestCase):
         self.assertEqual(cfg.context_window, 32768)
         self.assertEqual(len(hash_value), 64)  # SHA-256 hex digest
 
+    def test_load_config_parses_tier1_max_session_chunks_from_yaml_template(self):
+        """Issue #89: load_config must surface the *packaged* atomizer.yaml's
+        tier-1 max_session_chunks (7), not merely AgentProfile's own default.
+
+        This exercises the real runtime path (``profiles_from_config`` via
+        ``load_config``) rather than comparing ``default_profiles()`` against
+        a raw ``yaml.safe_load`` of the template, so a regression in the
+        config-loading plumbing itself -- not just in the shipped numbers --
+        would be caught here.
+        """
+        cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
+        profiles_by_id = {profile.id: profile for profile in cfg.external_profiles}
+        self.assertEqual(profiles_by_id["claude"].max_session_chunks, 7)
+        self.assertEqual(profiles_by_id["codex"].max_session_chunks, 7)
+
     def test_override_merges_and_changes_hash(self):
         """Base hash differs after override file with split.max_fragment_chars: 100."""
         # Load default config and get hash

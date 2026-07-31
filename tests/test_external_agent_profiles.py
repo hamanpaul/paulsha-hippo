@@ -93,16 +93,22 @@ def test_effective_max_agent_calls_scales_with_chunk_count_like_deadline():
 
     ``FIXED_MAX_AGENT_CALLS`` (6) is the floor -- unchanged for <=4 chunk
     sessions, since ``chunk_count + 2 <= 6`` there. The ``+2`` margin absorbs
-    one fallback transition's retained-chunk resume (#86); the cap keeps a
-    single session from claiming an unbounded number of calls.
+    one fallback transition's retained-chunk resume (#86); the cap (20) sits
+    above the largest chunk_count the #85 time budget can plausibly reach
+    (1800s / 240s-per-chunk ~= 7.5 chunks) with room for one fallback
+    transition on top, so it stops runaway retries without re-creating #89's
+    park for ordinary large sessions (a prior cap of 12 made every session
+    >=13 chunks unparkable-free on zero failures, since chunk_count + 2 > 12
+    once chunk_count >= 11).
     """
     assert effective_max_agent_calls(0) == FIXED_MAX_AGENT_CALLS
     assert effective_max_agent_calls(1) == FIXED_MAX_AGENT_CALLS
     assert effective_max_agent_calls(4) == FIXED_MAX_AGENT_CALLS
     assert effective_max_agent_calls(7) == 9
     assert effective_max_agent_calls(8) == 10
-    assert effective_max_agent_calls(10) == FIXED_MAX_AGENT_CALLS_CAP
-    assert effective_max_agent_calls(11) == FIXED_MAX_AGENT_CALLS_CAP
+    assert effective_max_agent_calls(13) == 15
+    assert effective_max_agent_calls(18) == FIXED_MAX_AGENT_CALLS_CAP
+    assert effective_max_agent_calls(19) == FIXED_MAX_AGENT_CALLS_CAP
     assert effective_max_agent_calls(100) == FIXED_MAX_AGENT_CALLS_CAP
 
 
@@ -626,13 +632,56 @@ def test_router_session_seven_chunks_completes_without_park_under_default_call_b
     assert router.last_result.failure_category is None
 
 
+def test_router_session_thirteen_chunks_completes_with_full_scaled_budget():
+    """Issue #89 review fix: 13 chunks must fit comfortably under the raised cap.
+
+    A 13-chunk session's scaled budget is max(6, 13+2)=15, well under
+    FIXED_MAX_AGENT_CALLS_CAP (20). Two profiles waste one call each (fail
+    immediately without validating anything) before a third profile resumes
+    from chunk 0 and validates all 13 chunks -- for exactly 15 total calls
+    (2 wasted + 13 productive), landing precisely on the scaled budget without
+    exceeding it. Before the cap was raised from 12 to 20, this same scenario
+    would have hit "budget" partway through the third profile's attempt.
+    """
+    profiles = (
+        _profile("fail1", tier=1, priority=1),
+        _profile("fail2", tier=1, priority=2),
+        _profile("good", tier=2, priority=1),
+    )
+    calls: list[tuple[str, str]] = []
+
+    def execute(profile, prompt, call):
+        calls.append((profile.id, prompt))
+        if profile.id in {"fail1", "fail2"}:
+            return "bad", "", 0
+        return "valid", "", 0
+
+    def validate(raw):
+        if raw != "valid":
+            raise ValueError("invalid")
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    outputs = router.run_session(
+        tuple(f"chunk-{i}" for i in range(13)), response_validator=validate
+    )
+
+    assert outputs == ("valid",) * 13
+    assert len(calls) == 15
+    assert len(router.chunk_provenance) == 13
+    assert router.last_result is not None
+    assert router.last_result.failure_category is None
+
+
 def test_router_session_call_budget_saturates_at_cap_for_oversized_session():
     """Issue #89: the scaled call budget must still saturate at the fixed cap.
 
-    A 13-chunk session would need max(6, 13+2)=15 calls under the raw
-    formula, but FIXED_MAX_AGENT_CALLS_CAP bounds it at 12 -- the session
-    must park after exactly 12 validated chunks rather than being allowed to
-    grow without limit.
+    A 21-chunk session would need max(6, 21+2)=23 calls under the raw
+    formula, but FIXED_MAX_AGENT_CALLS_CAP (20) bounds it -- the session
+    must park after exactly 20 validated chunks rather than being allowed to
+    grow without limit. 21 chunks is deliberately past the cap's declared
+    "18 chunks + one fallback transition" design point (see
+    ``effective_max_agent_calls``'s docstring), so hitting the ceiling here is
+    the intended pathological-oversplit stop, not a regression of #89's fix.
     """
     profile = _profile("only", tier=1)
 
@@ -641,7 +690,7 @@ def test_router_session_call_budget_saturates_at_cap_for_oversized_session():
 
     router = ExternalAgentRouter((profile,), executor=execute)
     with pytest.raises(Exception, match="fallback exhausted"):
-        router.run_session(tuple(f"chunk-{i}" for i in range(13)))
+        router.run_session(tuple(f"chunk-{i}" for i in range(21)))
 
     assert len(router.chunk_provenance) == FIXED_MAX_AGENT_CALLS_CAP
     assert router.attempts[-1].failure_category == "budget"
@@ -666,6 +715,96 @@ def test_router_session_explicit_call_budget_override_is_not_scaled():
 
     assert len(router.chunk_provenance) == 5
     assert router.attempts[-1].failure_category == "budget"
+
+
+def test_router_session_explicit_max_agent_calls_equal_to_default_still_scales():
+    """Deliberate contract: an explicit ``max_agent_calls=6`` is NOT a hard cap.
+
+    ``run_session`` cannot distinguish "the caller omitted max_agent_calls"
+    from "the caller explicitly passed exactly FIXED_MAX_AGENT_CALLS (6)" --
+    both look identical as ``self.max_agent_calls == FIXED_MAX_AGENT_CALLS``,
+    and that is intentional, not an oversight. A sentinel that could tell
+    them apart would break production: ``atomizer/config.py`` always passes
+    ``max_agent_calls=`` explicitly (defaulting to FIXED_MAX_AGENT_CALLS), and
+    the shipped ``atomizer.yaml`` template spells out
+    ``external_agents.max_agent_calls: 6`` literally. If equality to the
+    default opted a session out of scaling, issue #89's fix would never fire
+    for any real deployment. So: passing exactly 6 must still scale.
+
+    Two profiles waste one call each (fail without validating anything, as in
+    the shared-budget tests), then a third profile validates all 8 chunks --
+    for exactly 10 total calls (2 wasted + 8 productive), matching the scaled
+    budget for an 8-chunk session (8 + 2 = 10) rather than the unscaled 6. If
+    the explicit 6 were treated as a literal override (no scaling), this
+    scenario would instead hit "budget" after only 4 productive chunks.
+    """
+    profiles = (
+        _profile("fail1", tier=1, priority=1),
+        _profile("fail2", tier=1, priority=2),
+        _profile("good", tier=2, priority=1),
+    )
+    calls: list[tuple[str, str]] = []
+
+    def execute(profile, prompt, call):
+        calls.append((profile.id, prompt))
+        if profile.id in {"fail1", "fail2"}:
+            return "bad", "", 0
+        return "valid", "", 0
+
+    def validate(raw):
+        if raw != "valid":
+            raise ValueError("invalid")
+
+    router = ExternalAgentRouter(
+        profiles, executor=execute, max_agent_calls=FIXED_MAX_AGENT_CALLS
+    )
+    outputs = router.run_session(
+        tuple(f"chunk-{i}" for i in range(8)), response_validator=validate
+    )
+
+    assert outputs == ("valid",) * 8
+    assert len(calls) == 10
+    assert len(router.chunk_provenance) == 8
+    assert router.last_result is not None
+    assert router.last_result.failure_category is None
+
+
+def test_router_session_fallback_succeeds_within_scaled_call_budget():
+    """Issue #89 review: a realistic single-fallback success path must not park.
+
+    An 8-chunk session's scaled budget is 10 (8+2). Profile A's very first
+    call fails; profile B then resumes from chunk 0 (issue #86 retention --
+    nothing was validated yet, so there is nothing to resume past) and
+    validates all 8 chunks. Total calls: 1 (A's failed attempt) + 8 (B's full
+    run) = 9, comfortably within the scaled budget of 10 -- this is the
+    ordinary case the +2 fallback margin exists for, not just a boundary
+    calculation.
+    """
+    profiles = (_profile("a", tier=1), _profile("b", tier=2))
+    calls: list[tuple[str, str]] = []
+
+    def execute(profile, prompt, call):
+        calls.append((profile.id, prompt))
+        if profile.id == "a":
+            return "bad", "", 0
+        return "valid", "", 0
+
+    def validate(raw):
+        if raw != "valid":
+            raise ValueError("invalid")
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    outputs = router.run_session(
+        tuple(f"chunk-{i}" for i in range(8)), response_validator=validate
+    )
+
+    assert outputs == ("valid",) * 8
+    assert len(calls) == 9
+    assert calls[0] == ("a", "chunk-0")
+    assert [entry.profile_id for entry in router.chunk_provenance] == ["b"] * 8
+    assert router.last_result is not None
+    assert router.last_result.failure_category is None
+    assert router.last_result.fallback_reason == "degraded-success"
 
 
 def test_router_session_call_budget_scaling_applies_across_fallback_transitions():
