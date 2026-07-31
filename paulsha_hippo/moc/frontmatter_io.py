@@ -56,6 +56,28 @@ def _emit(value: Any, indent: int = 0) -> list[str]:
     return [f"{pad}{_scalar(value)}"]
 
 
+def _needs_quoting_for_type_fidelity(s: str) -> bool:
+    """True 若裸字串 ``s`` 在 YAML round-trip 後型別不再是 ``str``（issue #102）。
+
+    判準用實測不用清單：``yaml.safe_load(s)`` 的型別 != str 即需引號。這一網
+    打盡數字樣（``264``/``1.5``/``1e3``）、布林樣（``true``/``no``/``off``）、
+    null 樣（``null``/``~``）、空字串等所有 YAML 隱式型別轉換，勝過手寫
+    regex 清單且不必隨 YAML 1.1 bool/null 詞彙表增修而補洞。
+    """
+    try:
+        import yaml
+    except ModuleNotFoundError:
+        # No YAML engine available to probe with; caller's other heuristics
+        # (special chars, embedded quotes, etc.) are the only signal left.
+        return False
+    try:
+        parsed = yaml.safe_load(s)
+    except yaml.YAMLError:
+        # Unparsable as bare YAML -> must be quoted regardless of type.
+        return True
+    return not isinstance(parsed, str)
+
+
 def _scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -63,7 +85,7 @@ def _scalar(value: Any) -> str:
     # Quote strings that open a flow collection, carry YAML special chars, or hold
     # embedded quotes/newlines. When quoting, escape so the double-quoted scalar
     # round-trips through yaml.safe_load instead of producing broken YAML (#139).
-    if (
+    needs_quote = (
         s.startswith(("[", "]", "{", "}", "'", '"', "!", "&", "*", "@", "`", "|", ">", "%"))
         or ":" in s
         or "#" in s
@@ -71,7 +93,15 @@ def _scalar(value: Any) -> str:
         or "\n" in s
         or "\r" in s
         or s != s.strip()
-    ):
+    )
+    # A str value whose bare form would silently change type on re-parse
+    # (numeric-like/bool-like/null-like/empty strings, e.g. "264" -> int 264)
+    # must also be quoted (#102). Scoped to actual str inputs: non-str values
+    # (int/float/None/datetime, etc.) already serialize through the checks
+    # above using their str() form and are left as-is.
+    if not needs_quote and isinstance(value, str):
+        needs_quote = _needs_quoting_for_type_fidelity(s)
+    if needs_quote:
         escaped = (
             s.replace("\\", "\\\\")
             .replace('"', '\\"')

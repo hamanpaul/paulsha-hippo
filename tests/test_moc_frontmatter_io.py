@@ -5,7 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paulsha_hippo.lib.lifecycle.schema import compute_checksum, validate_frontmatter
+from paulsha_hippo.moc import census as moc_census
 from paulsha_hippo.moc import frontmatter_io as fio
+from paulsha_hippo.moc import search as moc_search
 
 _SLICE = (
     "---\n"
@@ -44,6 +46,113 @@ class FrontmatterIoTests(unittest.TestCase):
             self.assertEqual(body, "BODY LINE ONE\nBODY LINE TWO\n")
             result = validate_frontmatter(frontmatter=fm, body=body)
             self.assertTrue(result.ok, result.errors)
+
+
+class ScalarQuotingRoundTripTests(unittest.TestCase):
+    """Issue #102: ``_scalar()`` 對「YAML round-trip 會變成非字串」的字串樣值
+    （數字樣／布林樣／null 樣／空字串）不加引號，導致 ``update()`` 對既有
+    frontmatter 做無關欄位更新時，重新 ``dump()`` 會把這些字串值剝除引號、
+    下一次 ``read()`` 被 YAML 解析回原生 int/bool/None 型別。
+
+    生產劇本：issue #101 熱修把 tag ``264``（int）改成 ``"264"``（str）存活
+    不到一輪——janitor/moc pass 對同一份 frontmatter 呼叫
+    ``frontmatter_io.update()`` 更新其他欄位時，經 ``_scalar()`` 序列化又把
+    引號剝掉，下一輪 MOC index 的嚴格 tags 驗證再次判 invalid。
+    """
+
+    # 判準（比清單更可靠）：yaml.safe_load(candidate) 的型別 != str 即需引號。
+    ROUND_TRIP_HAZARDS = [
+        "264", "1.5", "1e3", "true", "True", "false", "no", "off",
+        "null", "~", "", "normal string", "中文標籤",
+    ]
+
+    def test_scalar_field_round_trips_as_str_across_two_update_cycles(self):
+        for value in self.ROUND_TRIP_HAZARDS:
+            with self.subTest(value=value):
+                with TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "s.md"
+                    path.write_text(_slice_text(), encoding="utf-8")
+
+                    # write (1st update) -> read
+                    fio.update(path, {"probe": value})
+                    fm1, _ = fio.read(path.read_text(encoding="utf-8"))
+                    self.assertIsInstance(fm1["probe"], str, f"{value!r} lost str type on 1st round-trip")
+                    self.assertEqual(fm1["probe"], value)
+
+                    # write (2nd update, unrelated field forces a full re-dump) -> read
+                    fio.update(path, {"title": "unrelated change"})
+                    fm2, _ = fio.read(path.read_text(encoding="utf-8"))
+                    self.assertIsInstance(fm2["probe"], str, f"{value!r} lost str type on 2nd round-trip")
+                    self.assertEqual(fm2["probe"], value)
+
+    def test_list_element_round_trips_as_str_across_two_update_cycles(self):
+        for value in self.ROUND_TRIP_HAZARDS:
+            with self.subTest(value=value):
+                with TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "s.md"
+                    path.write_text(_slice_text(), encoding="utf-8")
+
+                    fio.update(path, {"tags": [value]})
+                    fm1, _ = fio.read(path.read_text(encoding="utf-8"))
+                    self.assertEqual(fm1["tags"], [value])
+                    self.assertTrue(all(isinstance(t, str) for t in fm1["tags"]))
+
+                    fio.update(path, {"title": "unrelated change"})
+                    fm2, _ = fio.read(path.read_text(encoding="utf-8"))
+                    self.assertEqual(fm2["tags"], [value])
+                    self.assertTrue(all(isinstance(t, str) for t in fm2["tags"]))
+
+
+class ProductionTagQuotingScenarioTests(unittest.TestCase):
+    """整合測試：重現 issue #101 熱修（tag ``264`` -> ``"264"``）在下一輪
+    ``frontmatter_io.update()`` 後被剝除引號、令 MOC index 的嚴格 tags
+    驗證（``moc/search.py::_tags_fts_text``、``moc/census.py::
+    _census_tags_invalid``）重新判 invalid_frontmatter 的生產劇本。
+    """
+
+    def _slice_with_tag_264(self) -> str:
+        body = "BODY LINE ONE\nBODY LINE TWO\n"
+        text = _SLICE.replace("__CK__", compute_checksum(body))
+        # 已由主線程熱修過的狀態：tag 已是帶引號的字串 "264"。
+        return text.replace(
+            "distilled_from: claude:s1\n",
+            'distilled_from: claude:s1\ntags:\n  - "264"\n',
+        )
+
+    def test_tags_survive_unrelated_update_and_pass_moc_validation(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.md"
+            path.write_text(self._slice_with_tag_264(), encoding="utf-8")
+
+            fm0, _ = fio.read(path.read_text(encoding="utf-8"))
+            self.assertEqual(fm0["tags"], ["264"])
+
+            # A janitor/moc pass rewriting an unrelated field (title) must not
+            # disturb the already-hotfixed tags value.
+            fio.update(path, {"title": "retitled by pass"})
+
+            fm1, _ = fio.read(path.read_text(encoding="utf-8"))
+            self.assertEqual(fm1["tags"], ["264"])
+            self.assertTrue(all(isinstance(t, str) for t in fm1["tags"]))
+            self.assertEqual(fm1["title"], "retitled by pass")
+
+            # Cross-check against the actual MOC index tags validators (#101).
+            self.assertIsNotNone(moc_search._tags_fts_text(fm1["tags"]))
+            self.assertFalse(moc_census._census_tags_invalid(fm1["tags"]))
+
+    def test_repeated_passes_keep_tags_valid(self):
+        # janitor/moc rewrites frontmatter every cycle; simulate several
+        # consecutive unrelated-field updates (the "每輪 rewrite" scenario).
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.md"
+            path.write_text(self._slice_with_tag_264(), encoding="utf-8")
+
+            for i in range(3):
+                fio.update(path, {"title": f"pass {i}"})
+                fm, _ = fio.read(path.read_text(encoding="utf-8"))
+                self.assertEqual(fm["tags"], ["264"])
+                self.assertIsNotNone(moc_search._tags_fts_text(fm["tags"]))
+                self.assertFalse(moc_census._census_tags_invalid(fm["tags"]))
 
 
 if __name__ == "__main__":
