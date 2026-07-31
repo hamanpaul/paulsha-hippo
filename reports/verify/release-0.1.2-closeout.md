@@ -52,7 +52,7 @@
 ## 資料截止時間戳與產生方式聲明
 
 - 資料查詢時間：2026-07-31T01:27:08Z（UTC）。
-- Repo 快照：`/home/paul_chen/prj_pri/hippo-gates-test`（worktree），`HEAD` 為 detached，commit `f5df39496de17c8b4fb3aa88dfa698b7c547aaf4`（`v0.1.1-58-gf5df394`），`VERSION` 檔仍為 `0.1.1`（未 bump）。本次彙編未修改該 worktree 任何檔案。
+- Repo 快照：本機隔離 detached worktree，`HEAD` 為 commit `f5df39496de17c8b4fb3aa88dfa698b7c547aaf4`（`v0.1.1-58-gf5df394`），`VERSION` 檔仍為 `0.1.1`（未 bump）。本次彙編未修改該 worktree 任何檔案。
 - 產生方式：
   - Issue 標題／關閉時間／`stateReason`／body／comments／closing 與 cross-reference timeline：`gh api graphql`（`repository.issue.timelineItems`，型別 `CLOSED_EVENT`／`CROSS_REFERENCED_EVENT`／`REOPENED_EVENT`）批次查詢 17 個 issue 一次取得。
   - PR 標題／merge commit／body（含「驗證」章節逐字引用）：`gh pr view <N> -R hamanpaul/paulsha-hippo --json ...`，並以 `git merge-base --is-ancestor <commit> HEAD` 在上述 worktree 逐一核對每個 closing PR 的 merge commit 確實為 candidate 的祖先提交。
