@@ -1,0 +1,7 @@
+---
+type: fix
+---
+- 修 issue #101：LLM 產出的數字 tag（未引號 YAML int）通過 publication 卻被 MOC index 拒絕，造成 dream 每輪誤判 `partial`（sticky diagnostic 第五例）。生產實證：cg 蒸餾 70-slice 大 session 時，模型把 issue 編號輸出成未加引號的 tag `264`，寫入 YAML frontmatter 後被解析成 int；`moc/search.py::_tags_fts_text` 與 `moc/census.py::_census_tags_invalid` 對 `tags` 做嚴格 list[str] 驗證（刻意的最後防線，避免 #16 同類單一毒 slice 炸掉整批 `build_index`），一旦命中非字串元素就整個 slice 判 `invalid_frontmatter` 並排除、記路徑 warning，`build_index()` 回傳的 warning 使 orchestrator 的 `clean = not warnings` 每輪誤判 `partial`。資料已由主線程熱修，本次只補 code 層防線。
+- `paulsha_hippo/atomizer/slice_frontmatter.py` 新增 `normalize_tags()`：`str` 保留原樣（`strip()` 後為空／純空白丟棄）；`bool`/`int`/`float` 以 `str()` 字串化保留；`None`／`dict`／嵌套 `list`/`tuple` 等非 scalar 丟棄；整體非 `list` 視為空 `list`；正規化後保序去重（字串化後相同即視為同一 tag，例如 `264` 與 `"264"` 只留一個）。`build_from_proposal()`（LLM 產出的 proposal → frontmatter 的唯一寫入路徑）改為 `"tags": normalize_tags(list(proposal.tags))`，兩處都走同一函式、不複製貼上。
+- 盤點 `retitle.py`／`llm_promoter.py` 其他寫 tags 進 frontmatter 的路徑：`llm_promoter.py` 僅有 `slice_frontmatter.build_from_proposal()` 這一個建構 `SliceProposal` → frontmatter 的呼叫點（已涵蓋在本次修復內）；`retitle.py` 的 `frontmatter_io.update()` 呼叫只更新 `title`/`atom_title`/`aliases`，不寫 `tags` 鍵，故未接上本次的正規化函式。另附帶發現一個未在本次範圍修的相關風險：`moc/frontmatter_io.py::_scalar()` 對 list 內字串元素的 YAML 輸出不會為純數字字串（如 `"264"`）加引號，任何後續呼叫 `frontmatter_io.update()`（例如 retitle）都會把整份 frontmatter（含已正規化好的 tags）重新 `dump()` 一次，導致純數字字串 tag 在下一次讀取時被 YAML 誤判回 int、重現本 issue 的症狀；MOC index 的嚴格驗證不動，此追加風險留待後續 issue 評估。
+- `MOC index 的嚴格驗證與 fail-soft warning 未變動`——它是正確的最後防線，本次只在上游補正規化。

@@ -8,6 +8,9 @@ from paulsha_hippo.atomizer import slice_frontmatter
 from paulsha_hippo.atomizer.config import AtomizerConfig
 from paulsha_hippo.atomizer.llm_output import SliceProposal
 from paulsha_hippo.atomizer.splitter import Fragment
+from paulsha_hippo.moc import census as moc_census
+from paulsha_hippo.moc import frontmatter_io as fio
+from paulsha_hippo.moc import search as moc_search
 
 CFG = AtomizerConfig(
     schema_version="1", boundary_patterns=(r"^#{1,6}\s",), max_fragment_chars=8000,
@@ -254,6 +257,97 @@ class BuildFromProposalTitleTests(unittest.TestCase):
         meta = self._meta(); del meta["session_title"]
         sl = slice_frontmatter.build_from_proposal(self._proposal(), meta)
         self.assertEqual(sl.frontmatter["session_title"], "")
+
+
+class NormalizeTagsTests(unittest.TestCase):
+    """Issue #101: LLM 產出的數字 tag（未引號 YAML int，如 264）需在
+    slice_frontmatter 的寫入路徑被正規化成字串，MOC index 的嚴格 list[str]
+    驗證（moc/search.py::_tags_fts_text、moc/census.py::_census_tags_invalid）
+    才不會判 invalid_frontmatter 排除整個 slice，導致 dream 每輪誤判 partial。
+    """
+
+    def test_int_tag_is_stringified(self):
+        self.assertEqual(slice_frontmatter.normalize_tags([264]), ["264"])
+
+    def test_mixed_types_all_become_strings(self):
+        result = slice_frontmatter.normalize_tags(["router", 264, 3.5, True, False])
+        self.assertEqual(result, ["router", "264", "3.5", "True", "False"])
+        self.assertTrue(all(isinstance(tag, str) for tag in result))
+
+    def test_none_and_nested_containers_dropped(self):
+        result = slice_frontmatter.normalize_tags(
+            ["keep", None, ["nested", "list"], {"k": "v"}, (1, 2)]
+        )
+        self.assertEqual(result, ["keep"])
+
+    def test_empty_and_whitespace_only_strings_dropped(self):
+        result = slice_frontmatter.normalize_tags(["a", "", "   ", "\t\n", "b"])
+        self.assertEqual(result, ["a", "b"])
+
+    def test_duplicates_deduplicated_preserving_order(self):
+        result = slice_frontmatter.normalize_tags(["a", "b", "a", "c", "b", "a"])
+        self.assertEqual(result, ["a", "b", "c"])
+
+    def test_int_and_stringified_duplicate_collapse(self):
+        # 264 (int) 與 "264"（str）正規化後同為 "264"——去重須視為同一 tag。
+        result = slice_frontmatter.normalize_tags([264, "264"])
+        self.assertEqual(result, ["264"])
+
+    def test_non_list_value_becomes_empty_list(self):
+        self.assertEqual(slice_frontmatter.normalize_tags("not-a-list"), [])
+        self.assertEqual(slice_frontmatter.normalize_tags(None), [])
+        self.assertEqual(slice_frontmatter.normalize_tags({"a": 1}), [])
+        self.assertEqual(slice_frontmatter.normalize_tags(264), [])
+
+    def test_empty_list_stays_empty(self):
+        self.assertEqual(slice_frontmatter.normalize_tags([]), [])
+
+
+class BuildFromProposalTagsNormalizationTests(unittest.TestCase):
+    """驗證 build_from_proposal 的 tags 寫入路徑實際套用 normalize_tags——
+    不只是單元測試 normalize_tags 本身有沒有接上生產路徑。"""
+
+    def _proposal_with_tags(self, tags):
+        return SliceProposal(
+            title="alpha",
+            artifact_kind="report",
+            project="prplos-core",
+            tags=tags,
+            body="distilled body",
+            source_fragment_indices=(0,),
+            relations=(),
+        )
+
+    def test_int_tag_normalized_in_frontmatter(self):
+        # 生產實證：cg 蒸餾 70-slice 大 session 產出未引號 issue 編號 264。
+        built = slice_frontmatter.build_from_proposal(self._proposal_with_tags((264,)), _SESSION_META)
+        self.assertEqual(built.frontmatter["tags"], ["264"])
+        self.assertTrue(all(isinstance(t, str) for t in built.frontmatter["tags"]))
+
+    def test_mixed_type_tags_normalized_and_deduped_in_frontmatter(self):
+        built = slice_frontmatter.build_from_proposal(
+            self._proposal_with_tags(("pwhm", 264, 3.5, True, None, "pwhm", "  ")),
+            _SESSION_META,
+        )
+        self.assertEqual(built.frontmatter["tags"], ["pwhm", "264", "3.5", "True"])
+
+    def test_yaml_round_trip_all_tags_are_strings(self):
+        # 模擬 MOC index 讀取：正規化後 render → 重新 parse，tags 元素全為 str。
+        built = slice_frontmatter.build_from_proposal(
+            self._proposal_with_tags((264, 1.0, False)), _SESSION_META
+        )
+        rendered = slice_frontmatter.render(built)
+        parsed_fm, _body = fio.read(rendered)
+        self.assertEqual(parsed_fm["tags"], ["264", "1.0", "False"])
+        self.assertTrue(all(isinstance(t, str) for t in parsed_fm["tags"]))
+
+    def test_normalized_tags_pass_moc_index_strict_validation(self):
+        # 直接呼叫 moc/search.py 與 moc/census.py 判 invalid tags type 的那段
+        # 判準（_tags_fts_text / _census_tags_invalid）：正規化後兩邊都不再
+        # 判 invalid，slice 不會被排除。
+        built = slice_frontmatter.build_from_proposal(self._proposal_with_tags((264,)), _SESSION_META)
+        self.assertIsNotNone(moc_search._tags_fts_text(built.frontmatter["tags"]))
+        self.assertFalse(moc_census._census_tags_invalid(built.frontmatter["tags"]))
 
 
 if __name__ == "__main__":
