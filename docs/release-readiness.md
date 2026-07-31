@@ -61,6 +61,29 @@ on one missing artifact rather than on defects: AR-02/AR-03/AR-07/AR-14 all
 wait on a built wheel (`wheel_sha256` is still `null`), and AR-05/AR-06/AR-08/
 IC-01 wait on that wheel being installed into a clean environment.
 
+**Gate attestation run (2026-07-31) — 13 of 16 gates passed for candidate
+`f5df394`.** A full local gate-execution pass (build, clean-venv install,
+config migration, live doctor probes, natural degraded-path corpus evidence,
+publication/rollback test families, three-client hook ledger evidence,
+staged-upgrade fail-closed drill on isolated targets, recovery CLI full-cycle
+drill on an isolated mini-root plus a read-only independent index census of the
+live root, policy/openspec/diff validation, and a batch closeout report at
+`reports/verify/release-0.1.2-closeout.md`) moved AR-02/03/04/06/07/08/09/10/
+12/13 and IC-01/02 to `passed` — each entry in
+`reports/verify/release-readiness-matrix.json` carries the verbatim numbers,
+hashes and honest caveats. The three remaining gates: **AR-05** stays pending
+solely because the codex tier-1 probe is blocked by the provider usage limit
+(resets 2026-08-05; claude, cg and local-vllm all probed green); **AR-11** soak
+stands at 1/3 in a healthy window (the qualifying `19:00:42Z` cycle also
+contains the AR-06 degraded-path publications); **AR-14** is deferred by
+maintainer decision. Known follow-ups recorded, none release-blocking: the
+`hippo search` CLI errors with `no such column: build` against the current
+retrieval index; `build_release_artifact.py`'s version field is env-driven and
+decoupled from `pyproject.toml`; three OpenSpec changes (issue-41/64/80) remain
+unarchived with unmaintained task checklists; and the version-bump commit at
+release time will change the candidate, requiring a wheel rebuild, matrix
+rebind, and (if redeployed) a fresh soak window.
+
 **AR-11 note (2026-07-30, this rebind) — window semantics codified; 3/3
 achieved on the *previous* deployed build; count restarts for this candidate.**
 PR #91 (`ed1ea37`, in this candidate) codified the soak counting semantics the
