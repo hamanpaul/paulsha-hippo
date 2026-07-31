@@ -35,7 +35,9 @@ external_agents:
       enabled: true
       tier: 1
       priority: 10
-      max_session_chunks: 6
+      # issue #89: 1800s deadline cap (#85) / 240s per chunk ~= 7.5 chunks;
+      # keep 7-chunk sessions on tier-1 instead of falling to tier-2 cg.
+      max_session_chunks: 7
       traits: [judge, reasoner]
       task_classes: [atomization, title, skillopt]
       model: sonnet
@@ -47,7 +49,8 @@ external_agents:
       enabled: true
       tier: 1
       priority: 20
-      max_session_chunks: 6
+      # issue #89: keep tier-1 (claude/codex) aligned on max_session_chunks.
+      max_session_chunks: 7
       traits: [judge, reasoner]
       task_classes: [atomization, title, skillopt]
       model: gpt-5.6-sol

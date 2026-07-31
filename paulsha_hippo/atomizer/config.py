@@ -570,6 +570,22 @@ def load_config(
         raise AtomizerConfigError(
             "external_agents budgets cannot exceed fixed bounded limits"
         )
+    # Unlike `deadline_seconds` below, `max_agent_calls` is deliberately NOT
+    # forced to equal FIXED_MAX_AGENT_CALLS here. Since issue #89,
+    # `run_session` derives the *effective* call budget from chunk count
+    # (`agent_profiles.effective_max_agent_calls`) only when the router was
+    # constructed with the unmodified default (== FIXED_MAX_AGENT_CALLS); a
+    # configured value below that default is honoured literally as a hard
+    # per-deployment ceiling with no scaling, which is a real, non-silent
+    # effect on every session -- not the same "declared but ignored" defect
+    # shape as an out-of-bounds deadline_seconds. Configuring exactly
+    # FIXED_MAX_AGENT_CALLS here (the shipped `atomizer.yaml` template does)
+    # is therefore indistinguishable from omitting the key and *will* scale
+    # with chunk_count; an operator who wants a true hard ceiling below the
+    # default must configure 5 or less. The check above still keeps
+    # operators from configuring *above* the fixed default, since only the
+    # automatic chunk-count scaling (bounded by FIXED_MAX_AGENT_CALLS_CAP) may
+    # raise the ceiling past FIXED_MAX_AGENT_CALLS.
     # The chain budget is derived from the packed chunk count
     # (`agent_profiles.session_deadline_seconds`), with
     # FIXED_SESSION_DEADLINE_SECONDS as its floor; `run_session` consults
