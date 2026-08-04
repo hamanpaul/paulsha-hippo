@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- Entity hub 同步（#107）：新增 `moc/entity_hub.py` 維護 knowledge 層 `entities` 子目錄的 hub 頁，讓 linker 物化的 `[[EntityName]]` mentions 連結有持久解析目標——缺頁補 stub（`entity_kind: unclassified`＋反向連結清單）、既有頁只重刷反向連結段落（人工/agent 分類欄位保留；提及全消失刷成 0 篇不留死連結）、`alias_of` 歸戶 canonical、含 `#` 的 entity 於前綴頁維護 `## <錨點>` 段落（每輪整段重刷，slice 改名/新增 mentions 都進場）、外來檔一律拒寫；回報兩軌——`warnings` 只裝暫時性 I/O 失敗，結構性狀態記 `stats.structural` 不污染 dream clean 判定（#101 教訓）。`run_moc()` 接入（隨 dream hourly timer 自動執行），並新增 CLI `hippo knowledge entity-hubs（--dry-run|--apply）`：dry-run 有待辦、或 apply 有 I/O 失敗即 exit 1 供排程健檢。
 - Prompt-time shortlist 新增 offer 早停機制：同一 `(tool, session_id)` 歷史 offer 事件數達
   `OFFER_STOP_AFTER_EVENTS`（8）門檻、且 session 從未出現讀取或 applied 訊號時，
   `build_shortlist_and_record` 提前回傳空字串，不再注入 shortlist、不記新 offered ledger
