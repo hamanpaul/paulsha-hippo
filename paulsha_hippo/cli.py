@@ -389,6 +389,17 @@ def _build_parser() -> argparse.ArgumentParser:
     kgroup.add_argument("--apply", action="store_true")
     rekey_p.set_defaults(func=_rekey)
 
+    entity_hubs_p = knowledge_subparsers.add_parser(
+        "entity-hubs",
+        help="entity hub 同步：mentions 物化斷鏈的常態維護（#107）。"
+             "dry-run（預設）只回報缺頁/待刷清單，有待辦即 exit 1 供排程檢查。")
+    entity_hubs_p.add_argument("--memory-root", required=True)
+    entity_hubs_p.add_argument("--now", default=None)
+    egroup = entity_hubs_p.add_mutually_exclusive_group()
+    egroup.add_argument("--dry-run", action="store_true")
+    egroup.add_argument("--apply", action="store_true")
+    entity_hubs_p.set_defaults(func=_entity_hubs)
+
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
     # still errors with exit 2 when the flag is omitted.
@@ -832,6 +843,35 @@ def _rekey(args: argparse.Namespace) -> int:
     if summary.get("errors", 0):
         return 1
     if summary.get("indexed") is False:
+        return 1
+    return 0
+
+
+def _entity_hubs(args: argparse.Namespace) -> int:
+    """`hippo knowledge entity-hubs`：同步（或 dry-run 檢查）entity hub 層。
+
+    dry-run（預設）不寫檔，輸出待建/待刷動作清單；有待辦動作時 exit 1，
+    供排程當健康檢查用（比照 `hippo index verify` 的 exit 語意）。
+    """
+    from .moc import entity_hub
+
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    apply = bool(getattr(args, "apply", False))
+    stats, warnings = entity_hub.sync_entity_hubs(root, now, apply=apply)
+    actions = stats.get("actions", [])
+    print(json.dumps({
+        "mode": "apply" if apply else "dry-run",
+        "stats": {k: v for k, v in stats.items() if k not in ("actions", "structural")},
+        "structural": stats.get("structural", []),
+        "actions": actions,
+        "warnings": warnings,
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    # 比照 _rekey/_prune_listed：apply 失敗（I/O warnings）以 exit code 回報；
+    # dry-run 有待辦動作即 1（健檢語意）。結構性跳過只入 JSON，不影響 exit。
+    if warnings:
+        return 1
+    if not apply and actions:
         return 1
     return 0
 
