@@ -1061,3 +1061,63 @@ def test_session_cache_lands_validated_chunk_even_when_session_later_exhausts(tm
     assert len(payloads) == 1
     assert payloads[0]["output"] == "valid"
     assert payloads[0]["provenance"]["profile_id"] == "first"
+
+
+def test_router_session_deadline_break_records_skipped_profile_provenance(monkeypatch):
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+
+    def mock_monotonic():
+        return current_time[0]
+
+    monkeypatch.setattr(time, "monotonic", mock_monotonic)
+
+    def execute(profile, prompt, attempt):
+        if profile.id == "claude":
+            current_time[0] += 700.0
+            raise AgentRunError("claude timeout", category="timeout")
+        return "answer", "", 0
+
+    router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
+
+    with pytest.raises(AgentRunError, match="fallback exhausted"):
+        router.run("prompt")
+
+    attempt_profiles = [attempt.profile_id for attempt in router.attempts]
+    assert attempt_profiles == ["claude", "codex", "cg", "local-vllm"]
+    assert router.attempts[0].profile_id == "claude"
+    assert router.attempts[0].failure_category == "timeout"
+
+    for attempt in router.attempts[1:]:
+        assert attempt.failure_category == "ineligible"
+        assert attempt.error_message == "session_deadline"
+
+
+def test_router_sufficient_deadline_provenance_unchanged():
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    profiles = (_profile("claude", tier=1, priority=1), _profile("codex", tier=1, priority=2))
+    calls: list[str] = []
+
+    def execute(profile, prompt, attempt):
+        calls.append(profile.id)
+        if profile.id == "claude":
+            raise AgentRunError("failed", category="process")
+        return "answer", "", 0
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    assert router.run("prompt") == "answer"
+    assert calls == ["claude", "codex"]
+    assert [attempt.profile_id for attempt in router.attempts] == ["claude", "codex"]
+    assert router.attempts[0].failure_category == "process"
+    assert router.attempts[1].failure_category is None
+
+
+
