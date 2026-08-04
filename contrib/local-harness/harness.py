@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -304,6 +305,87 @@ def request_json(base_url: str, api_key: str, payload: dict, validate, what: str
     return None  # unreachable
 
 
+FRAGMENT_HEADER_RE = re.compile(r"^\s*\[fragment\s+(\d+)", re.IGNORECASE)
+
+
+def slice_prompt_by_fragments(
+    prompt: str,
+    indices: set[int] | list[int] | int,
+    neighbor: int = 1,
+) -> str:
+    """Slice prompt to keep preamble, selected fragment blocks (±neighbor), and tail (## Output).
+
+    If indices is empty, out of range, or prompt contains no fragment markers,
+    fails safe by returning the original prompt.
+    """
+    if isinstance(indices, int):
+        target_set = {indices}
+    elif isinstance(indices, (set, list, tuple)):
+        target_set = {idx for idx in indices if isinstance(idx, int)}
+    else:
+        target_set = set()
+
+    if not target_set:
+        return prompt
+
+    expanded_indices = set()
+    for idx in target_set:
+        for offset in range(-neighbor, neighbor + 1):
+            expanded_indices.add(idx + offset)
+
+    lines = prompt.splitlines(keepends=True)
+    preamble_lines: list[str] = []
+    fragments: list[tuple[int, list[str]]] = []
+    tail_lines: list[str] = []
+
+    state = "preamble"
+    current_frag_idx: int | None = None
+    current_frag_lines: list[str] = []
+
+    for line in lines:
+        match = FRAGMENT_HEADER_RE.match(line)
+        if match:
+            if state == "preamble":
+                state = "fragments"
+            elif state == "fragments":
+                if current_frag_idx is not None:
+                    fragments.append((current_frag_idx, current_frag_lines))
+            current_frag_idx = int(match.group(1))
+            current_frag_lines = [line]
+        elif state == "fragments" and line.rstrip().startswith("## Output"):
+            if current_frag_idx is not None:
+                fragments.append((current_frag_idx, current_frag_lines))
+            state = "tail"
+            tail_lines = [line]
+        elif state == "preamble":
+            preamble_lines.append(line)
+        elif state == "fragments":
+            current_frag_lines.append(line)
+        elif state == "tail":
+            tail_lines.append(line)
+
+    if state == "fragments" and current_frag_idx is not None:
+        fragments.append((current_frag_idx, current_frag_lines))
+
+    if not fragments:
+        return prompt
+
+    selected_lines: list[str] = []
+    has_match = False
+    for frag_idx, frag_lines in fragments:
+        if frag_idx in expanded_indices:
+            has_match = True
+            selected_lines.extend(frag_lines)
+
+    if not has_match:
+        sys.stderr.write(
+            f"hippo-local-harness: warning: input slicing match failed for indices {indices!r}, falling back to full prompt\n"
+        )
+        return prompt
+
+    return "".join(preamble_lines) + "".join(selected_lines) + "".join(tail_lines)
+
+
 def finding_errors(item: object) -> list[str]:
     """Validate one finding object (pass-2 output) against hippo hard rules."""
     wrapper = {
@@ -416,6 +498,9 @@ def main() -> None:
         siblings = [t for t in all_titles if t != concept["title"]] or ["(none)"]
         write_payload = dict(base_payload)
         write_payload.update(thinking_off)
+        sliced_prompt = slice_prompt_by_fragments(
+            prompt, concept.get("fragment_indices", []), neighbor=1
+        )
         write_payload["messages"] = [
             {
                 "role": "user",
@@ -426,7 +511,7 @@ def main() -> None:
                     siblings=", ".join(siblings),
                 )
                 + "\n\n"
-                + prompt,
+                + sliced_prompt,
             }
         ]
         item = request_json(
