@@ -191,12 +191,62 @@ def test_router_skips_profile_with_oversized_session_without_call():
 
 
 def test_default_profiles_have_max_session_chunks_bounds():
-    """Issue #89: tier-1 max_session_chunks raised 6->7 (1800s cap / 240s ~= 7.5)."""
+    """Issue #89: tier-1 max_session_chunks raised 6->7 (1800s cap / 240s ~= 7.5). Issue #99: cg set to 6."""
     profiles = default_profiles()
     mapping = {profile.id: profile.max_session_chunks for profile in profiles}
     assert mapping["claude"] == 7
     assert mapping["codex"] == 7
-    assert mapping["cg"] is None
+    assert mapping["cg"] == 6
+
+
+def test_default_cg_profile_skips_oversized_session_as_ineligible():
+    """Issue #99: cg profile with >6 session chunks must be marked ineligible."""
+    profiles = {profile.id: profile for profile in default_profiles()}
+    cg = profiles["cg"]
+    cg_enabled = AgentProfile.from_mapping({**vars(cg), "enabled": True})
+    assert cg_enabled.max_session_chunks == 6
+    assert cg_enabled.eligible(task_class="atomization", chunk_count=7) == (False, "session_size")
+
+    fallback = _profile("fallback", tier=3)
+    calls: list[str] = []
+
+    def execute(profile, prompt, call):
+        calls.append(profile.id)
+        return "valid", "", 0
+
+    router = ExternalAgentRouter((cg_enabled, fallback), executor=execute)
+    outputs = router.run_session(tuple(f"chunk-{i}" for i in range(7)))
+
+    assert outputs == ("valid",) * 7
+    assert calls == ["fallback"] * 7
+    assert [a.profile_id for a in router.attempts] == ["cg", "fallback"]
+    assert router.attempts[0].profile_id == "cg"
+    assert router.attempts[0].failure_category == "ineligible"
+
+
+def test_default_cg_profile_eligible_within_max_session_chunks_bound():
+    """Issue #99: cg profile with <=6 session chunks remains eligible and executable when enabled."""
+    profiles = {profile.id: profile for profile in default_profiles()}
+    cg = profiles["cg"]
+    cg_enabled = AgentProfile.from_mapping({**vars(cg), "enabled": True})
+    assert cg_enabled.max_session_chunks == 6
+    assert cg_enabled.eligible(task_class="atomization", chunk_count=6) == (True, "eligible")
+    assert cg_enabled.eligible(task_class="atomization", chunk_count=1) == (True, "eligible")
+
+    calls: list[str] = []
+
+    def execute(profile, prompt, call):
+        calls.append(profile.id)
+        return "valid", "", 0
+
+    router = ExternalAgentRouter((cg_enabled,), executor=execute)
+    outputs = router.run_session(tuple(f"chunk-{i}" for i in range(6)))
+
+    assert outputs == ("valid",) * 6
+    assert calls == ["cg"] * 6
+    assert router.attempts[0].profile_id == "cg"
+    assert router.attempts[0].failure_category is None
+
 
 
 def test_default_profiles_have_three_deterministic_tiers_and_traits():
