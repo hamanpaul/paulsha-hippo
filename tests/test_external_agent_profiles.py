@@ -1097,7 +1097,7 @@ def test_router_session_deadline_break_records_skipped_profile_provenance(monkey
 
     for attempt in router.attempts[1:]:
         assert attempt.failure_category == "ineligible"
-        assert attempt.error_message == "session_deadline"
+        assert attempt.stderr == "session_deadline"
 
 
 def test_router_sufficient_deadline_provenance_unchanged():

@@ -885,10 +885,32 @@ class ExternalAgentRouter:
         calls = 0
         validated: dict[int, str] = {}
         chunk_results: dict[int, AgentRunResult] = {}
-        for profile in self.profiles:
+        for profile_idx, profile in enumerate(self.profiles):
             if len(attempts) >= self.max_attempts or calls >= session_call_budget:
                 break
             if time.monotonic() - started >= session_deadline:
+                for rem_profile in self.profiles[profile_idx:]:
+                    if rem_profile.enabled and self.task_class in rem_profile.task_classes:
+                        attempts.append(
+                            AgentRunResult(
+                                rem_profile.id,
+                                rem_profile.revision,
+                                rem_profile.tier,
+                                len(attempts) + 1,
+                                rem_profile.model,
+                                rem_profile.effort,
+                                None,
+                                "unavailable",
+                                rem_profile.command_fingerprint(),
+                                0.0,
+                                "ineligible",
+                                sanitize_stderr("session_deadline"),
+                                None,
+                                None,
+                                rem_profile.priority,
+                                RESPONSE_SCHEMA_VERSION,
+                            )
+                        )
                 break
             if self._circuit_open_until.get(profile.id, 0.0) > time.monotonic():
                 continue
