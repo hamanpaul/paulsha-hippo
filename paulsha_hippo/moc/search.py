@@ -5,6 +5,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -20,10 +21,12 @@ from ..ledger import lifecycle
 from ..ledger import retrieval_set
 from ..ledger import usage as usage_ledger
 from ..noise import classify_noise, pool_exclude_reason
+from ..retrieval import to_fts_query
 from . import frontmatter_io as fio
 
 INDEX_WRITE_BATCH_SIZE = 100
 LOGGER = logging.getLogger("paulsha_hippo.moc.search")
+_CANONICAL_FTS_QUERY = re.compile(r'^"[^"]+"(?: OR "[^"]+")*$')
 
 # 跨批次契約 #6：build_index() 回傳 dict 的六個 coverage 鍵。
 COVERAGE_KEYS = ("scanned", "invalid_frontmatter", "pool_excluded",
@@ -477,11 +480,23 @@ def _row_read_count(row: tuple) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
+def _normalize_match_query(query: str) -> str:
+    stripped = query.strip()
+    if not stripped:
+        return ""
+    if _CANONICAL_FTS_QUERY.fullmatch(stripped):
+        return stripped
+    return to_fts_query(stripped)
+
+
 def search(memory_root: Path, query: str, *, project: str | None, limit: int,
            include_decayed: bool) -> list[dict]:
     path = index_path(memory_root)
     if not path.exists():
         raise SearchIndexError("search index not built; run the dream/moc pass first")
+    match_query = _normalize_match_query(query)
+    if not match_query:
+        return []
     conn = sqlite3.connect(path)
     try:
         has_usage_cols = _slice_meta_has_usage_columns(conn)
@@ -490,7 +505,7 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
                f"m.link_weight, m.active, m.path{usage_select} "
                "FROM slices_fts f JOIN slice_meta m ON m.slice_id = f.slice_id "
                "WHERE slices_fts MATCH ?")
-        params: list[object] = [query]
+        params: list[object] = [match_query]
         if project:
             sql += " AND m.project = ?"
             params.append(project)
