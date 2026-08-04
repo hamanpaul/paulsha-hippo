@@ -483,6 +483,7 @@ def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
 # unparseable JSON on a >6-chunk session that fell through when tier-1 was
 # still capped at 6).
 _TIER1_MAX_SESSION_CHUNKS = 7
+_CG_MAX_SESSION_CHUNKS = 6
 
 
 def default_profiles() -> tuple[AgentProfile, ...]:
@@ -490,7 +491,7 @@ def default_profiles() -> tuple[AgentProfile, ...]:
         ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print"), _TIER1_MAX_SESSION_CHUNKS),
         ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-"), _TIER1_MAX_SESSION_CHUNKS),
         ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print"), None),
-        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
+        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), _CG_MAX_SESSION_CHUNKS),
         ("co-gem", 3, 10, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
         ("claude-gem", 3, 20, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("claude-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
     )
