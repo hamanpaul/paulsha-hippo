@@ -397,8 +397,18 @@ def _build_parser() -> argparse.ArgumentParser:
     entity_hubs_p.add_argument("--now", default=None)
     egroup = entity_hubs_p.add_mutually_exclusive_group()
     egroup.add_argument("--dry-run", action="store_true")
-    egroup.add_argument("--apply", action="store_true")
+    entity_hubs_p.add_argument("--apply", action="store_true")
     entity_hubs_p.set_defaults(func=_entity_hubs)
+
+    normalize_tags_p = knowledge_subparsers.add_parser(
+        "normalize-tags",
+        help="一次性正規化 knowledge slice frontmatter 中的非字串 tags (#109)",
+    )
+    normalize_tags_p.add_argument("--memory-root", required=True)
+    ngroup = normalize_tags_p.add_mutually_exclusive_group()
+    ngroup.add_argument("--dry-run", action="store_true")
+    ngroup.add_argument("--apply", action="store_true")
+    normalize_tags_p.set_defaults(func=_normalize_tags)
 
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
@@ -872,6 +882,20 @@ def _entity_hubs(args: argparse.Namespace) -> int:
     if warnings:
         return 1
     if not apply and actions:
+        return 1
+    return 0
+
+
+def _normalize_tags(args: argparse.Namespace) -> int:
+    from . import tags_migration
+
+    root = Path(args.memory_root)
+    apply = bool(getattr(args, "apply", False))
+    summary, warnings = tags_migration.normalize_tags_migration(root, apply=apply)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False))
+    if warnings:
         return 1
     return 0
 

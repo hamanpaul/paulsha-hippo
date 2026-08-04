@@ -16,7 +16,7 @@ def _create_slice(root: Path, rel_path: str, tags: list | None, body: str = "Tes
         if not tags:
             tags_yaml = "tags: []\n"
         else:
-            tags_yaml = "tags:\n" + "\n".join(f"  - {t}" for t in tags) + "\n"
+            tags_yaml = "tags:\n" + "\n".join(f"  - {'null' if t is None else t}" for t in tags) + "\n"
     
     content = (
         "---\n"

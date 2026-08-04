@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any
 
 
-def read(text: str) -> tuple[dict[str, Any], str]:
+def read(text: str | Path) -> tuple[dict[str, Any], str]:
     """Return (frontmatter_dict, body). Body is everything after the closing ---."""
+    if isinstance(text, Path):
+        text = text.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         return {}, text
