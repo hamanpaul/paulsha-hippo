@@ -33,7 +33,7 @@ jobs:
           grep -Eq '[1-9][0-9]* tests collected' "$RUNNER_TEMP/pytest-collection.log"
 
       - name: Run test suite
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ contrib/local-harness/tests/ -q
 
       - name: Build and smoke clean wheel install
         run: |

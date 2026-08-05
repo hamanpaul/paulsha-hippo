@@ -14,7 +14,8 @@ def test_ci_does_not_false_green_test_detection_or_install_failure():
     assert "|| true" not in install_block
     assert "python -m pip install \".[test]\"" in install_block
     assert "python -m pytest --collect-only -q" in text
-    assert "python -m pytest tests/ -q" in text
+    # CI must run both the package suite and the contrib harness suite (R-19)
+    assert "python -m pytest tests/ contrib/local-harness/tests/ -q" in text
 
 
 def test_ci_clean_install_smoke_runs_outside_checkout():
