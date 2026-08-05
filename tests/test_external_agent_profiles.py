@@ -222,13 +222,23 @@ def test_default_cg_profile_skips_oversized_session_as_ineligible():
     assert [a.profile_id for a in router.attempts] == ["cg", "fallback"]
     assert router.attempts[0].profile_id == "cg"
     assert router.attempts[0].failure_category == "ineligible"
+    # 釘死 provenance reason：ineligible attempt 的 stderr 欄位必須是
+    # session_size——否則在沒裝 cg 二進位的主機上，光靠 "executable"
+    # ineligibility 也能讓上面的 router 斷言通過，測不到 #99 的語意。
+    assert router.attempts[0].stderr == "session_size"
 
 
 def test_default_cg_profile_eligible_within_max_session_chunks_bound():
     """Issue #99: cg profile with <=6 session chunks remains eligible and executable when enabled."""
     profiles = {profile.id: profile for profile in default_profiles()}
     cg = profiles["cg"]
-    cg_enabled = AgentProfile.from_mapping({**vars(cg), "enabled": True})
+    # eligible() 末段會 shutil.which(argv[0])——CI（ubuntu-latest 只 pip
+    # install ".[test]"）沒有 cg 可執行檔，保留預設 argv 會回 (False,
+    # "executable")。比照本檔 _profile/STUB 慣例把 argv 換成 stub，保留
+    # default cg 的 max_session_chunks=6 來驗門檻語意本身。
+    cg_enabled = AgentProfile.from_mapping(
+        {**vars(cg), "enabled": True, "argv": [sys.executable, str(STUB)]}
+    )
     assert cg_enabled.max_session_chunks == 6
     assert cg_enabled.eligible(task_class="atomization", chunk_count=6) == (True, "eligible")
     assert cg_enabled.eligible(task_class="atomization", chunk_count=1) == (True, "eligible")
