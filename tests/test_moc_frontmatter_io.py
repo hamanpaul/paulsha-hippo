@@ -103,6 +103,39 @@ class ScalarQuotingRoundTripTests(unittest.TestCase):
                     self.assertTrue(all(isinstance(t, str) for t in fm2["tags"]))
 
 
+class NullFidelityRoundTripTests(unittest.TestCase):
+    """Issue #109 review：``_scalar(None)`` 曾輸出 ``None`` 字面值，但 PyYAML
+    不把 ``None`` 當 null 詞彙，``update()`` 往返後原生 null 劣化成字串
+    "None"（實質資料劣化）。修正為輸出 ``null``，比照 #102/#104 的型別保真
+    精神；同時與既有 ROUND_TRIP_HAZARDS 的字串 ``"null"``（維持引號字串）
+    方向相反、互不干擾。"""
+
+    def test_scalar_none_emits_yaml_null_literal(self):
+        self.assertEqual(fio._scalar(None), "null")
+
+    def test_null_values_survive_repeated_update_round_trips(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.md"
+            text = _slice_text().replace(
+                "distilled_from: claude:s1\n",
+                "distilled_from: claude:s1\n"
+                "fallback_note: null\n"
+                "distiller:\n  profile_id: cg\n  fallback_reason: null\n",
+            )
+            path.write_text(text, encoding="utf-8")
+            fm0, _ = fio.read(path.read_text(encoding="utf-8"))
+            self.assertIsNone(fm0["fallback_note"])
+            self.assertIsNone(fm0["distiller"]["fallback_reason"])
+
+            # 多輪無關欄位 update（janitor/moc 每輪 rewrite 劇本）後 null 不漂移
+            for i in range(2):
+                fio.update(path, {"title": f"pass {i}"})
+                fm, _ = fio.read(path.read_text(encoding="utf-8"))
+                self.assertIsNone(fm["fallback_note"], "top-level null 劣化成字串 'None'")
+                self.assertIsNone(fm["distiller"]["fallback_reason"], "nested null 劣化成字串 'None'")
+            self.assertIn("fallback_reason: null", path.read_text(encoding="utf-8"))
+
+
 class ProductionTagQuotingScenarioTests(unittest.TestCase):
     """整合測試：重現 issue #101 熱修（tag ``264`` -> ``"264"``）在下一輪
     ``frontmatter_io.update()`` 後被剝除引號、令 MOC index 的嚴格 tags
