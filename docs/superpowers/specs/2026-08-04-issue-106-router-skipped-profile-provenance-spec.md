@@ -17,9 +17,9 @@ Root cause 與既有修復（issue #89 系列：把單次呼叫 timeout 與整�
 
 ## Goals
 
-- G1：`RouterState` 因 `session_deadline` 提前 `break` 時，為每一個原本 enabled 且 `task_class` 相符、但因預算耗盡而未被嘗試的 profile，各補一筆 provenance 記錄（樣式比照緊鄰的 `eligible=False` / `failure_category="ineligible"` pattern）。
-- G2：新增記錄的 reason 沿用既有 ineligible 分類體系（例如 `session_deadline`），不新增 `FALLBACK_ON` / `classify_failure` 分類，不擴大 fallback allowlist。
-- G3：預算充足、迴圈正常走完全部 profile 的既有情境，記錄行為與現行完全一致（零回歸）。
+- G1：`RouterState` 因鏈預算耗盡提前 `break` 時——含 pre-attempt deadline check 與 attempt 中途 deadline / call budget 耗盡（`category="budget"` 底部 break）兩條路徑——為每一個原本 enabled 且 `task_class` 相符、但因預算耗盡而未被嘗試的 profile，各補一筆 provenance 記錄（樣式比照緊鄰的 `eligible=False` / `failure_category="ineligible"` pattern）；circuit-open 的剩餘 profile 維持主迴圈的無聲跳過語意，不補記。
+- G2：新增記錄的 reason 沿用既有 ineligible 分類體系（`session_deadline` / `session_budget`），不新增 `FALLBACK_ON` / `classify_failure` 分類，不擴大 fallback allowlist。
+- G3：預算充足、迴圈正常走完全部 profile 的既有情境，記錄行為與現行完全一致（零回歸）；exhausted raise 的 `category` / `profile_id` / `exit_code` / `stderr` 一律取自 terminal 真實 attempt，park 行為與修復前完全一致（skip 補記可使 `attempts` 長度超過 `max_attempts`，屬明文預期語意）。
 - G4：全套 pytest、`policy_check`、`openspec validate --all --strict` 綠。
 
 ## Non-goals
@@ -30,6 +30,8 @@ Root cause 與既有修復（issue #89 系列：把單次呼叫 timeout 與整�
 
 ## Acceptance
 
-- 模擬鏈 `[claude(慢、吃光大半 session_deadline), codex, cg, local-vllm]`：斷言 break 後 `attempts`/provenance 含所有 enabled 且 task_class 匹配的 profile，被跳過者各有一筆記錄。
+- 模擬鏈 `[claude(慢、吃光大半 session_deadline), codex, cg, local-vllm]`：斷言 break 後 `attempts`/provenance 含所有 enabled 且 task_class 匹配的 profile，被跳過者各有一筆記錄，且 raise 的 `category` / `profile_id` / `stderr` 取自最後一筆真實 attempt。
+- attempt 中途 budget 耗盡（多 chunk session）觸發底部 break 時，剩餘 profile 同樣獲得補記（reason `session_budget`）。
+- circuit-open 的剩餘 profile 在補記時被跳過（與主迴圈無聲 continue 一致）。
 - 預算充足時的既有測試全綠（回歸保護）。
 - 對應 accepted plan：`docs/superpowers/plans/2026-08-04-issue-106-router-skipped-profile-provenance.md`。

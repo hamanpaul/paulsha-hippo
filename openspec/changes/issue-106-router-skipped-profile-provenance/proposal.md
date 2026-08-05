@@ -15,9 +15,9 @@ work_item: issue-106-router-skipped-profile-provenance
 
 ## What Changes
 
-- `paulsha_hippo/agent_profiles.py::RouterState` 主迴圈因 `session_deadline` 提前 `break` 前，對剩餘 enabled 且 task_class 相符的 profile，逐一比照緊鄰的 `eligible=False` pattern 補一筆 `AgentRunResult`（`failure_category="ineligible"`，reason 沿用既有分類體系，例如 `session_deadline`）。
-- 不新增 `FALLBACK_ON` / `classify_failure` 分類，不改變 dispatch 順序、deadline 算式、fallback 語意、park 行為——本次修復**只補觀測**。
-- 新增模擬慢 tier-1 鏈測試（`tests/test_external_agent_profiles.py`）與預算充足時的回歸保護測試。
+- `paulsha_hippo/agent_profiles.py::RouterState` 主迴圈因鏈預算耗盡提前 `break` 前——含 pre-attempt deadline check（reason `session_deadline`）與 attempt 中途 deadline / call budget 耗盡的 `budget` 底部 break（reason `session_budget`）兩條路徑——對剩餘 enabled 且 task_class 相符、且 circuit 未開路的 profile，逐一比照緊鄰的 `eligible=False` pattern 補一筆 `AgentRunResult`（`failure_category="ineligible"`）。
+- 不新增 `FALLBACK_ON` / `classify_failure` 分類，不改變 dispatch 順序、deadline 算式、fallback 語意、park 行為——本次修復**只補觀測**；exhausted raise 的 `category` / `profile_id` / `exit_code` / `stderr` 錨定最後一筆真實 attempt（terminal 快照），不受合成 skip 記錄影響。
+- 新增模擬慢 tier-1 鏈測試（`tests/test_external_agent_profiles.py`）、raise 內容回歸鎖、mid-attempt budget break 測試、circuit-open 不補記測試、`max_attempts` 溢出語意鎖，與預算充足時的回歸保護測試。
 - 新增 `changelog.d/106-router-skip-provenance.md`（type: fix）。
 
 ## Impact
