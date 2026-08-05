@@ -212,13 +212,14 @@ def _build_proposal(
     item: Any, index: int, allowed_projects: set[str], seen_titles: set[str]
 ) -> SliceProposal:
     """Build one proposal. Hard-field violations fail the whole response;
-    soft issues (unknown project, malformed relation) are repaired in place."""
+    soft issues (unknown top-level fields, unknown project, malformed
+    relations) are repaired/dropped in place deterministically."""
     if not isinstance(item, dict):
         raise LlmOutputError(f"proposal {index} is not an object")
     unknown_keys = sorted(set(item) - _PROPOSAL_KEYS)
     if unknown_keys:
         _LOG.warning(
-            "atomizer: proposal %s dropped unknown field(s): %s",
+            "atomize: proposal %s dropped unknown field(s): %s",
             index,
             ", ".join(unknown_keys),
         )

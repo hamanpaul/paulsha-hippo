@@ -23,6 +23,7 @@ work_item: issue-105-proposal-soft-repair
 ## Impact
 
 - 影響範圍：`paulsha_hippo/atomizer/llm_output.py` 的 proposal 解析路徑（`_build_proposal`／`_parse_proposals`）；不影響頂層 canonical response schema（`schema_version`／`disposition`／`reason`）驗證，不影響 `project`／`relations` 既有 soft-repair 行為。
+- 邊界（legacy `parse()` 多陣列掃描路徑）：「proposal 形狀＋多餘欄位」的陣列不再被 unknown-field raise 淘汰而成為合法競爭者，raw 同時含真 proposal 陣列與此類陣列時會改判 `multiple valid JSON arrays found`；掃描淘汰非 proposal 陣列時也可能先記一筆 unknown-field warning。僅及 legacy／測試面，生產路徑只走 `parse_response`（嚴格單一 JSON value）不受影響——詳見 design.md D1 邊界記載。
 - 風險：低——只新增一個 soft 分支並收斂哪些欄位可被裁剪，既有 hard violation 判定範圍不變、有逐條回歸測試鎖定。
 - 生產效益：避免單一 proposal 的一次幻覺欄位拖垮同一回應裡其他所有 proposal，減少 session park 與 AR-11 soak 窗口重置的誤觸發。
 - Authority：`docs/superpowers/plans/2026-08-04-issue-105-proposal-soft-repair.md`、spec/design 同名對（`docs/superpowers/specs/2026-08-04-issue-105-proposal-soft-repair-{spec,design}.md`）、issue #105。

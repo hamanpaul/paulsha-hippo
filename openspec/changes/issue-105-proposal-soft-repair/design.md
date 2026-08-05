@@ -27,6 +27,8 @@ proposals.append(_build_proposal(item, index, allowed_projects, seen_titles))
 
 `_build_proposal` 把 unknown-key 檢查從「直接 raise」改為：對每個未知鍵 `_LOG.warning`（含被丟棄的欄位名與 proposal 序號），丟棄後繼續驗證該 proposal 其餘（認得的）欄位。理由：未知欄位是模型多產出的雜訊（打錯欄位名／多寫一個 schema 沒有的欄位），性質與 `project`／`relations` 既有 soft-repair 相同——都是「這一小塊不認得，丟掉即可」，不像缺 `title`／型別錯誤那樣代表整筆 proposal 的核心資料不可信。既有欄位存取（`_require_field`／`item.get(...)`）本就只讀認得的 key，未知鍵原本就不會被讀取，因此本項變更的最小範圍是「不 raise + 加 warning」。
 
+**邊界記載（legacy `parse()` 多陣列掃描路徑的候選鑑別力放寬）**：`parse()` 會掃描 raw 中所有候選 JSON 陣列並以 `_parse_proposals` 鑑別。未知欄位降級後，「proposal 形狀＋多餘欄位」的陣列不再被 unknown-field raise 淘汰而成為合法競爭者——若 raw 同時含真 proposal 陣列與一個帶額外欄位的 proposal 形狀陣列，結果會從「正常解析前者」變為 `multiple valid JSON arrays found` 整份失敗；掃描淘汰非 proposal 陣列（如 `[{"note": ...}]`）時，也可能先記一筆 unknown-field warning 再因 hard violation（如 `artifact_kind`）被淘汰。此變化僅及 legacy／測試面：生產路徑只走 `parse_response`（`llm_promoter.py` 經嚴格單一 JSON value 解析），不存在多候選競爭，故接受此邊界變化、不另設路徑開關。
+
 ### D2：hard violation 清單逐條保留，整份判死語意不變
 
 以下情形維持現狀，任一命中仍讓 `_parse_proposals` 對整份回應 raise `LlmOutputError`：

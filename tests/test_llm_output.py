@@ -274,7 +274,7 @@ class LlmOutputTests(unittest.TestCase):
         log_output = "\n".join(cm.output)
         self.assertIn("tags2", log_output)
         self.assertIn("unknown_field", log_output)
-        self.assertIn("1", log_output)
+        self.assertIn("proposal 1", log_output)
 
     def test_hard_field_violations_fail_entire_response_as_a_whole(self):
         hard_cases = [
