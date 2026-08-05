@@ -397,7 +397,7 @@ def _build_parser() -> argparse.ArgumentParser:
     entity_hubs_p.add_argument("--now", default=None)
     egroup = entity_hubs_p.add_mutually_exclusive_group()
     egroup.add_argument("--dry-run", action="store_true")
-    entity_hubs_p.add_argument("--apply", action="store_true")
+    egroup.add_argument("--apply", action="store_true")
     entity_hubs_p.set_defaults(func=_entity_hubs)
 
     normalize_tags_p = knowledge_subparsers.add_parser(
