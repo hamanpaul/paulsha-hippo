@@ -305,7 +305,18 @@ def request_json(base_url: str, api_key: str, payload: dict, validate, what: str
     return None  # unreachable
 
 
-FRAGMENT_HEADER_RE = re.compile(r"^\s*\[fragment\s+(\d+)", re.IGNORECASE)
+# Must match build_prompt's marker format verbatim: line-anchored, lowercase,
+# closing bracket, optional multi-part suffix — `[fragment N]` or
+# `[fragment N part X/Y]`. Anything looser (indentation, no closing bracket,
+# IGNORECASE) mistakes quoted markers inside fragment bodies for real block
+# boundaries and silently corrupts the slice.
+FRAGMENT_HEADER_RE = re.compile(r"^\[fragment (\d+)(?: part \d+/\d+)?\]\s*$")
+
+
+def _slice_warn(detail: str) -> None:
+    sys.stderr.write(
+        f"hippo-local-harness: warning: input slicing {detail}, falling back to full prompt\n"
+    )
 
 
 def slice_prompt_by_fragments(
@@ -326,6 +337,7 @@ def slice_prompt_by_fragments(
         target_set = set()
 
     if not target_set:
+        _slice_warn(f"got no usable fragment indices from {indices!r}")
         return prompt
 
     expanded_indices = set()
@@ -343,31 +355,33 @@ def slice_prompt_by_fragments(
     current_frag_lines: list[str] = []
 
     for line in lines:
+        if state == "tail":
+            # Once in the tail every line is kept verbatim — even one that
+            # looks like a fragment marker must never be silently dropped.
+            tail_lines.append(line)
+            continue
         match = FRAGMENT_HEADER_RE.match(line)
         if match:
-            if state == "preamble":
-                state = "fragments"
-            elif state == "fragments":
-                if current_frag_idx is not None:
-                    fragments.append((current_frag_idx, current_frag_lines))
+            if state == "fragments" and current_frag_idx is not None:
+                fragments.append((current_frag_idx, current_frag_lines))
+            state = "fragments"
             current_frag_idx = int(match.group(1))
             current_frag_lines = [line]
-        elif state == "fragments" and line.rstrip().startswith("## Output"):
+        elif state == "fragments" and line.rstrip() == "## Output":
             if current_frag_idx is not None:
                 fragments.append((current_frag_idx, current_frag_lines))
             state = "tail"
             tail_lines = [line]
         elif state == "preamble":
             preamble_lines.append(line)
-        elif state == "fragments":
+        else:  # state == "fragments"
             current_frag_lines.append(line)
-        elif state == "tail":
-            tail_lines.append(line)
 
     if state == "fragments" and current_frag_idx is not None:
         fragments.append((current_frag_idx, current_frag_lines))
 
     if not fragments:
+        _slice_warn("found no fragment markers")
         return prompt
 
     selected_lines: list[str] = []
@@ -378,9 +392,7 @@ def slice_prompt_by_fragments(
             selected_lines.extend(frag_lines)
 
     if not has_match:
-        sys.stderr.write(
-            f"hippo-local-harness: warning: input slicing match failed for indices {indices!r}, falling back to full prompt\n"
-        )
+        _slice_warn(f"match failed for indices {indices!r}")
         return prompt
 
     return "".join(preamble_lines) + "".join(selected_lines) + "".join(tail_lines)
@@ -494,12 +506,19 @@ def main() -> None:
     all_titles = [c["title"] for c in concepts]
     findings: list[dict] = []
     seen: set[str] = set()
+    full_bytes = len(prompt.encode("utf-8"))
     for concept in concepts:
         siblings = [t for t in all_titles if t != concept["title"]] or ["(none)"]
         write_payload = dict(base_payload)
         write_payload.update(thinking_off)
-        sliced_prompt = slice_prompt_by_fragments(
-            prompt, concept.get("fragment_indices", []), neighbor=1
+        concept_indices = concept.get("fragment_indices", [])
+        sliced_prompt = slice_prompt_by_fragments(prompt, concept_indices, neighbor=1)
+        # Audit trail (issue #74): make pass-1 index attribution and the actual
+        # bytes reduction observable per concept write.
+        sys.stderr.write(
+            f"hippo-local-harness: write[{concept['title'][:30]}]: "
+            f"indices={concept_indices} "
+            f"input {len(sliced_prompt.encode('utf-8'))}/{full_bytes} bytes\n"
         )
         write_payload["messages"] = [
             {
