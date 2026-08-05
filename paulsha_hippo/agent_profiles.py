@@ -16,7 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, ClassVar, Mapping, Sequence
 
 
 ROUTER_CONTRACT_VERSION = "1"
@@ -773,9 +773,77 @@ class ExternalAgentRouter:
             return "policy"
         return category
 
-    def _raise_exhausted(self, attempts: list[AgentRunResult]) -> None:
+    def _record_skipped_profiles(
+        self,
+        attempts: list[AgentRunResult],
+        remaining: Sequence[AgentProfile],
+        reason: str,
+    ) -> None:
+        """Append provenance-only records for profiles the chain budget kept
+        the router from ever reaching (issue #106).
+
+        Each remaining enabled, task-class-matching profile gets one
+        ``failure_category="ineligible"`` record in the existing ineligible
+        style: zero elapsed time, no agent call consumed, ``reason`` as the
+        sanitized stderr. Profiles whose circuit breaker is currently open are
+        *not* recorded -- the main loop silently ``continue``s over an open
+        circuit even with budget to spare, so recording one here as
+        budget-skipped would misstate provenance. These records are appended
+        only after the loop has already decided to break: they never affect
+        dispatch order, deadline/call-budget arithmetic, fallback semantics,
+        or which attempt the exhausted raise reports. Because they land after
+        the loop's own bookkeeping, ``len(attempts)`` may exceed
+        ``max_attempts`` (serialization is bounded downstream by
+        ``_MAX_PROVENANCE_ATTEMPTS``).
+        """
+        now = time.monotonic()
+        for profile in remaining:
+            if not (profile.enabled and self.task_class in profile.task_classes):
+                continue
+            if self._circuit_open_until.get(profile.id, 0.0) > now:
+                continue
+            attempts.append(
+                AgentRunResult(
+                    profile.id,
+                    profile.revision,
+                    profile.tier,
+                    len(attempts) + 1,
+                    profile.model,
+                    profile.effort,
+                    None,
+                    "unavailable",
+                    profile.command_fingerprint(),
+                    0.0,
+                    "ineligible",
+                    sanitize_stderr(reason),
+                    None,
+                    None,
+                    profile.priority,
+                    RESPONSE_SCHEMA_VERSION,
+                )
+            )
+
+    _LAST_FROM_ATTEMPTS: ClassVar[object] = object()
+
+    def _raise_exhausted(
+        self,
+        attempts: list[AgentRunResult],
+        last: AgentRunResult | None | object = _LAST_FROM_ATTEMPTS,
+    ) -> None:
+        """Raise the exhausted-chain error for ``attempts``.
+
+        ``last`` is the terminal *real* attempt the raise reports
+        (category / profile_id / exit_code / stderr). It defaults to
+        ``attempts[-1]`` for the pre-#106 call shape, but ``run_session``
+        passes it explicitly: once deadline/budget skip records are appended
+        (issue #106) the tail of ``attempts`` can be a synthetic skip record,
+        and park behavior must keep reporting the last attempt that actually
+        ran -- provenance grows, the raised error does not change.
+        """
         self.attempts = tuple(attempts)
-        last = attempts[-1] if attempts else None
+        if last is self._LAST_FROM_ATTEMPTS:
+            last = attempts[-1] if attempts else None
+        assert last is None or isinstance(last, AgentRunResult)
         category = last.failure_category if last else "ineligible"
         detail = "external agent fallback exhausted"
         if last is not None:
@@ -882,13 +950,22 @@ class ExternalAgentRouter:
         self._last_error = None
         started = time.monotonic()
         attempts: list[AgentRunResult] = []
+        # The terminal *real* attempt record -- the one `_raise_exhausted`
+        # must report. Tracked separately from `attempts[-1]` because the
+        # issue-#106 skip records appended right before a break would
+        # otherwise become the tail and silently rewrite the raised
+        # category/profile/stderr (and therefore park behavior).
+        terminal: AgentRunResult | None = None
         calls = 0
         validated: dict[int, str] = {}
         chunk_results: dict[int, AgentRunResult] = {}
-        for profile in self.profiles:
+        for profile_idx, profile in enumerate(self.profiles):
             if len(attempts) >= self.max_attempts or calls >= session_call_budget:
                 break
             if time.monotonic() - started >= session_deadline:
+                self._record_skipped_profiles(
+                    attempts, self.profiles[profile_idx:], "session_deadline"
+                )
                 break
             if self._circuit_open_until.get(profile.id, 0.0) > time.monotonic():
                 continue
@@ -903,26 +980,26 @@ class ExternalAgentRouter:
                 # is a real fallback transition and must remain in provenance,
                 # while still consuming zero agent calls.
                 if profile.enabled and self.task_class in profile.task_classes:
-                    attempts.append(
-                        AgentRunResult(
-                            profile.id,
-                            profile.revision,
-                            profile.tier,
-                            len(attempts) + 1,
-                            profile.model,
-                            profile.effort,
-                            None,
-                            "unavailable",
-                            profile.command_fingerprint(),
-                            0.0,
-                            "ineligible",
-                            sanitize_stderr(reason),
-                            None,
-                            None,
-                            profile.priority,
-                            RESPONSE_SCHEMA_VERSION,
-                        )
+                    ineligible_result = AgentRunResult(
+                        profile.id,
+                        profile.revision,
+                        profile.tier,
+                        len(attempts) + 1,
+                        profile.model,
+                        profile.effort,
+                        None,
+                        "unavailable",
+                        profile.command_fingerprint(),
+                        0.0,
+                        "ineligible",
+                        sanitize_stderr(reason),
+                        None,
+                        None,
+                        profile.priority,
+                        RESPONSE_SCHEMA_VERSION,
                     )
+                    attempts.append(ineligible_result)
+                    terminal = ineligible_result
                 continue
             attempt_index = len(attempts) + 1
             attempt_started = time.monotonic()
@@ -1050,10 +1127,22 @@ class ExternalAgentRouter:
                     output_bytes=int(getattr(caught, "output_bytes", 0) or 0),
                 )
                 attempts.append(result)
+                terminal = result
                 self._circuit_open_until[profile.id] = time.monotonic() + 60.0
                 if category not in ALLOWED_FALLBACK_CATEGORIES or category not in profile.fallback_on:
+                    if category == "budget":
+                        # The session-wide chain budget (deadline or call
+                        # budget) ran out mid-attempt: the remaining profiles
+                        # vanish for the same reason as a pre-attempt deadline
+                        # break and get the same provenance-only skip records
+                        # (issue #106). Other non-fallback categories end the
+                        # chain as a deliberate per-profile decision and keep
+                        # their pre-existing provenance shape.
+                        self._record_skipped_profiles(
+                            attempts, self.profiles[profile_idx + 1:], "session_budget"
+                        )
                     break
-        self._raise_exhausted(attempts)
+        self._raise_exhausted(attempts, terminal)
 
 
 __all__ = [

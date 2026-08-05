@@ -1061,3 +1061,218 @@ def test_session_cache_lands_validated_chunk_even_when_session_later_exhausts(tm
     assert len(payloads) == 1
     assert payloads[0]["output"] == "valid"
     assert payloads[0]["provenance"]["profile_id"] == "first"
+
+
+def test_router_session_deadline_break_records_skipped_profile_provenance(monkeypatch):
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+
+    def mock_monotonic():
+        return current_time[0]
+
+    monkeypatch.setattr(time, "monotonic", mock_monotonic)
+
+    def execute(profile, prompt, attempt):
+        if profile.id == "claude":
+            current_time[0] += 700.0
+            raise AgentRunError("claude timeout", category="timeout")
+        return "answer", "", 0
+
+    router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
+
+    with pytest.raises(AgentRunError, match="fallback exhausted") as excinfo:
+        router.run("prompt")
+
+    attempt_profiles = [attempt.profile_id for attempt in router.attempts]
+    assert attempt_profiles == ["claude", "codex", "cg", "local-vllm"]
+    assert router.attempts[0].profile_id == "claude"
+    assert router.attempts[0].failure_category == "timeout"
+
+    for attempt in router.attempts[1:]:
+        assert attempt.failure_category == "ineligible"
+        assert attempt.stderr == "session_deadline"
+
+    # "the session SHALL otherwise park exactly as before": the raised error
+    # must report the terminal *real* attempt, never a synthetic skip record
+    # -- otherwise llm_promoter maps timeout->transient into
+    # ineligible->backend_unavailable and every parked artifact downstream
+    # (ledger, _failed evidence, dream census, requeue category) flips.
+    assert excinfo.value.category == "timeout"
+    assert excinfo.value.profile_id == "claude"
+    assert excinfo.value.stderr == "claude timeout"
+
+
+def test_router_deadline_break_raise_reports_terminal_real_attempt(monkeypatch):
+    """Production incident shape (issue #106 review finding): claude timeout ->
+    codex timeout -> deadline break. Provenance gains skip records for cg and
+    local-vllm, but the exhausted raise must stay byte-identical to pre-#106
+    behavior: category/profile_id/stderr from the last profile that really ran
+    (codex), not from the appended skip tail (local-vllm/session_deadline)."""
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+    def execute(profile, prompt, attempt):
+        current_time[0] += 350.0
+        raise AgentRunError(f"{profile.id} timeout", category="timeout")
+
+    router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
+
+    with pytest.raises(AgentRunError, match="fallback exhausted") as excinfo:
+        router.run("prompt")
+
+    assert [attempt.profile_id for attempt in router.attempts] == [
+        "claude", "codex", "cg", "local-vllm",
+    ]
+    assert router.attempts[0].failure_category == "timeout"
+    assert router.attempts[1].failure_category == "timeout"
+    assert router.attempts[2].failure_category == "ineligible"
+    assert router.attempts[3].failure_category == "ineligible"
+
+    assert excinfo.value.category == "timeout"
+    assert excinfo.value.profile_id == "codex"
+    assert excinfo.value.stderr == "codex timeout"
+
+
+def test_router_mid_attempt_budget_break_records_skipped_profile_provenance(monkeypatch):
+    """The chain deadline can also expire *inside* an attempt (multi-chunk
+    session): the chunk loop raises category="budget", which is not a fallback
+    category, so the router breaks at the bottom of the loop. The remaining
+    profiles must get the same provenance-only skip records as a pre-attempt
+    deadline break (reason "session_budget"), and the raise must still report
+    the terminal real attempt."""
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+    def execute(profile, prompt, attempt):
+        # chunk-0 validates but eats the whole session deadline; chunk-1 then
+        # hits the in-attempt remaining_seconds <= 0 budget raise.
+        current_time[0] += 650.0
+        return "answer", "", 0
+
+    router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
+
+    with pytest.raises(AgentRunError, match="fallback exhausted") as excinfo:
+        router.run_session(("chunk-0", "chunk-1"))
+
+    assert [attempt.profile_id for attempt in router.attempts] == [
+        "claude", "codex", "cg", "local-vllm",
+    ]
+    assert router.attempts[0].failure_category == "budget"
+    for attempt in router.attempts[1:]:
+        assert attempt.failure_category == "ineligible"
+        assert attempt.stderr == "session_budget"
+        assert attempt.elapsed_seconds == 0.0
+
+    assert excinfo.value.category == "budget"
+    assert excinfo.value.profile_id == "claude"
+
+
+def test_router_deadline_break_does_not_record_circuit_open_profile(monkeypatch):
+    """A remaining profile whose circuit breaker is open would have been
+    silently skipped by the main loop even with budget to spare; the
+    deadline-break skip records must not claim it was lost to the deadline."""
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+    def execute(profile, prompt, attempt):
+        current_time[0] += 700.0
+        raise AgentRunError("claude timeout", category="timeout")
+
+    router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
+    router._circuit_open_until["cg"] = current_time[0] + 3600.0
+
+    with pytest.raises(AgentRunError, match="fallback exhausted"):
+        router.run("prompt")
+
+    assert [attempt.profile_id for attempt in router.attempts] == [
+        "claude", "codex", "local-vllm",
+    ]
+
+
+def test_router_skip_records_may_exceed_max_attempts(monkeypatch):
+    """Documented issue-#106 semantic: skip records are appended after the
+    loop has already decided to break, so len(attempts) may exceed
+    max_attempts. They are provenance-only -- the raise still reports the
+    terminal real attempt and no extra agent call is consumed."""
+    import time
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    claude = _profile("claude", tier=1, priority=1)
+    codex = _profile("codex", tier=1, priority=2)
+    cg = _profile("cg", tier=2, priority=1)
+    local_vllm = _profile("local-vllm", tier=3, priority=1)
+
+    current_time = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+    def execute(profile, prompt, attempt):
+        current_time[0] += 700.0
+        raise AgentRunError("claude timeout", category="timeout")
+
+    router = ExternalAgentRouter(
+        (claude, codex, cg, local_vllm), executor=execute, max_attempts=3
+    )
+
+    with pytest.raises(AgentRunError, match="fallback exhausted") as excinfo:
+        router.run("prompt")
+
+    assert len(router.attempts) == 4
+    assert [attempt.failure_category for attempt in router.attempts] == [
+        "timeout", "ineligible", "ineligible", "ineligible",
+    ]
+    assert excinfo.value.category == "timeout"
+    assert excinfo.value.profile_id == "claude"
+
+
+def test_router_sufficient_deadline_provenance_unchanged():
+    from paulsha_hippo.agent_profiles import AgentRunError
+
+    profiles = (_profile("claude", tier=1, priority=1), _profile("codex", tier=1, priority=2))
+    calls: list[str] = []
+
+    def execute(profile, prompt, attempt):
+        calls.append(profile.id)
+        if profile.id == "claude":
+            raise AgentRunError("failed", category="process")
+        return "answer", "", 0
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    assert router.run("prompt") == "answer"
+    assert calls == ["claude", "codex"]
+    assert [attempt.profile_id for attempt in router.attempts] == ["claude", "codex"]
+    assert router.attempts[0].failure_category == "process"
+    assert router.attempts[1].failure_category is None
+
+
+
