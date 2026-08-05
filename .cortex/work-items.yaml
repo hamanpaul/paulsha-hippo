@@ -48,3 +48,51 @@ work_items:
       - kind: path
         ref: 'docs/superpowers/workstreams/issue-64-ledger-torn-line-repair/todo.md'
     excludes: []
+  issue-98-search-retrieval-schema:
+    title: 'issue-98-search-retrieval-schema'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#98'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-98-search-fts-sanitizer.md'
+    excludes: []
+  issue-74-local-harness-input-slicing:
+    title: 'issue-74-local-harness-input-slicing'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#74'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-74-harness-input-slicing.md'
+    excludes: []
+  issue-99-cg-max-session-chunks:
+    title: 'issue-99-cg-max-session-chunks'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#99'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-99-cg-max-session-chunks.md'
+    excludes: []
+  issue-105-proposal-soft-repair:
+    title: 'issue-105-proposal-soft-repair'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#105'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-105-proposal-soft-repair.md'
+    excludes: []
+  issue-106-router-skipped-profile-provenance:
+    title: 'issue-106-router-skipped-profile-provenance'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#106'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-106-router-skip-provenance.md'
+    excludes: []
+  issue-109-normalize-tags-migration:
+    title: 'issue-109-normalize-tags-migration'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#109'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-08-04-issue-109-normalize-tags-migration.md'
+    excludes: []
