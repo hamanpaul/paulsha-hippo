@@ -33,7 +33,7 @@ work_item: issue-109-normalize-tags-migration
 
 ## Task 2: apply + 冪等
 
-- [ ] 先寫測試：`--apply` 後該 2 個 slice 的 tags 全為字串、body 與其他 frontmatter 欄位逐位元不變（僅 tags 行改動）；再跑 `--dry-run` 回報 0；再跑一次 `--apply` 為 no-op。
+- [ ] 先寫測試：`--apply` 後該 2 個 slice 的 tags 全為字串、body 逐位元不變、其他 frontmatter 欄位 parsed 值不變（parse-equivalent：update() 整份重 dump，表層引號樣式可正規化；datetime→ISO8601 字串、null 維持 null 為宣告的正規化，見 openspec design D4）；含 production-shaped fixture 全欄位斷言；再跑 `--dry-run` 回報 0；再跑一次 `--apply` 為 no-op。
 - [ ] 先寫測試（回歸 #104 保護）：apply 後對其中一個 slice 呼叫 `frontmatter_io.update()`（模擬 retitle），重新解析 tags 仍全為字串。
 - [ ] 實作 apply：`normalize_tags()` + `frontmatter_io.update()`。
 - [ ] CLI 接線 `hippo knowledge normalize-tags`；全套綠；`changelog.d/109-normalize-tags-migration.md`（type: fix）。

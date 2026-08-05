@@ -7,10 +7,8 @@ from pathlib import Path
 from typing import Any
 
 
-def read(text: str | Path) -> tuple[dict[str, Any], str]:
+def read(text: str) -> tuple[dict[str, Any], str]:
     """Return (frontmatter_dict, body). Body is everything after the closing ---."""
-    if isinstance(text, Path):
-        text = text.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         return {}, text
@@ -87,6 +85,11 @@ def _needs_quoting_for_type_fidelity(s: str) -> bool:
 
 
 def _scalar(value: Any) -> str:
+    if value is None:
+        # YAML 原生 null 必須序列化回 ``null``：str(None) 會寫出 ``None``，
+        # 而 PyYAML 不把 ``None`` 當 null 詞彙，下一次 read() 就劣化成字串
+        # "None"（issue #109 review；比照 #102/#104 的型別保真精神）。
+        return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     s = str(value)
@@ -105,8 +108,8 @@ def _scalar(value: Any) -> str:
     # A str value whose bare form would silently change type on re-parse
     # (numeric-like/bool-like/null-like/empty strings, e.g. "264" -> int 264)
     # must also be quoted (#102). Scoped to actual str inputs: non-str values
-    # (int/float/None/datetime, etc.) already serialize through the checks
-    # above using their str() form and are left as-is.
+    # (int/float/datetime, etc.; None handled above as null) already serialize
+    # through the checks above using their str() form and are left as-is.
     if not needs_quote and isinstance(value, str):
         needs_quote = _needs_quoting_for_type_fidelity(s)
     if needs_quote:

@@ -30,15 +30,24 @@ MOC index 每輪重建判 `invalid tags type` 而排除、記 warning，令 orch
   `--apply` 重用 `atomizer/slice_frontmatter.py::normalize_tags()` 正規化、
   `moc/frontmatter_io.py::update()` 落地改寫。
 - `paulsha_hippo/cli.py` 接線新子命令。
-- 新增回歸測試：dry-run 精確計數與 bytes 不變、apply 後 tags 全為字串且僅 tags 行變動、
-  冪等（apply 後 dry-run 為 0、再次 apply 為 no-op）、apply 後呼叫
-  `frontmatter_io.update()` 坐實 #104 round-trip 保護。
+- `moc/frontmatter_io.py::_scalar()` 型別保真修正（review 收斂）：None 改輸出
+  YAML `null`（原輸出 `None` 字面值，PyYAML 不視為 null，`update()` 往返後劣化
+  成字串 `"None"`），比照 #102/#104 精神；附直接 round-trip 測試。
+- 新增回歸測試：dry-run 精確計數與 bytes 不變、apply 後 tags 全為字串且
+  parse-equivalent（body 逐位元不變、其他欄位 parsed 值不變，僅宣告的
+  datetime→ISO8601 字串正規化與 null 保真；production-shaped fixture 全欄位
+  斷言）、無條件 memory_layer 過濾（打錯 --memory-root 不改寫非 knowledge
+  文件）、scalar tags→[] 決策鎖、冪等（apply 後 dry-run 為 0、再次 apply 為
+  no-op 且 bytes 不變）、apply 後呼叫 `frontmatter_io.update()` 坐實 #104
+  round-trip 保護。
 - 新增 `changelog.d/109-normalize-tags-migration.md`（type: fix）。
 
 ## Impact
 
 - 影響範圍：新增獨立 CLI 子命令與新模組；不修改 MOC index 的嚴格驗證邏輯（維持
-  fail-soft 最後防線），不動 dream/atomize/janitor 既有熱路徑。
+  fail-soft 最後防線），不動 dream/atomize/janitor 既有熱路徑的呼叫結構。唯一
+  申報的共用路徑修正：`frontmatter_io._scalar()` None→`null` 一行型別保真修正
+  ——只影響「原本就會劣化成字串 `"None"`」的 None 序列化，附直接測試。
 - 風險：低——重用單一真理來源的正規化（`normalize_tags()`）與已修復的序列化
   （`frontmatter_io.update()`，PR #104），無新序列化邏輯，migration 為純附加、
   可重跑、有 dry-run。

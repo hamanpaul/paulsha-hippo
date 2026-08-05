@@ -32,7 +32,11 @@ def normalize_tags_migration(root_dir: Path | str, apply: bool = False) -> tuple
                 warnings.append(f"Failed to read {path}: {exc}")
                 continue
 
-            if fm.get("memory_layer") != "knowledge" and knowledge.exists():
+            # 無條件過濾（repo 慣例，比照 rekey.py/linker.py）：即使 knowledge
+            # 子目錄不存在而 fallback 掃 root，也只碰 memory_layer == "knowledge"
+            # 的 slice，--memory-root 打錯時不會改寫 inbox、episodic 或一般文件
+            # （issue #109 review）。
+            if fm.get("memory_layer") != "knowledge":
                 continue
 
             scanned += 1

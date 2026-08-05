@@ -36,8 +36,11 @@ cycle 不再被此類 sticky diagnostic 打斷。
 - G2：`--dry-run` 列出所有 tags 含非字串元素的既存 slice 及其正規化後 tags 預覽，不修改
   任何檔案（bytes 逐位元不變）。
 - G3：`--apply` 重用 `atomizer/slice_frontmatter.py::normalize_tags()` 正規化、
-  `moc/frontmatter_io.py::update()` 落地改寫，僅 tags 行變動，body 與其他 frontmatter
-  欄位逐位元不變。
+  `moc/frontmatter_io.py::update()` 落地改寫，語意契約為 parse-equivalent（issue #109
+  review 收斂）：body 逐位元不變；tags 以外的 frontmatter 欄位 parsed 值不變
+  （`update()` 整份重 dump，YAML 表層引號樣式可正規化），僅宣告兩項型別正規化——
+  未引號 datetime 標量 → 等值 ISO8601 字串（stage3 schema 契約）、null 維持 null
+  （`_scalar()` None→`null` 修正，杜絕劣化成字串 `"None"`）。
 - G4：冪等——`--apply` 後重跑 `--dry-run` 回報 0 待修 slice；再次 `--apply` 為 no-op。
 - G5：回歸鎖——`--apply` 後對其中一個 slice 呼叫 `frontmatter_io.update()`（模擬 retitle
   等下游呼叫），重新解析 tags 仍全為字串，坐實 PR #104 的往返保護對本 migration 輸出同樣

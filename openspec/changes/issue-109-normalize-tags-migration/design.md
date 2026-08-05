@@ -34,7 +34,9 @@ dry-run/apply 安全邊界。
 
 - 正規化：`paulsha_hippo/atomizer/slice_frontmatter.py::normalize_tags()` 已是 #103
   落地的正規化單一真理來源。既存資料 migration 直接重用同一函式，避免兩套 tags 正規化
-  規則互相分岔。
+  規則互相分岔。此取捨包含「非 list scalar tags（如 `tags: hello`）依 #101 語意整體
+  視為空 list」：migration 不為保留 scalar 另設第二套規則，抹除在 `--dry-run` 預覽
+  （`normalized_tags: []`）中對操作者可見，並以測試明文鎖住（issue #109 review）。
 - 序列化：`paulsha_hippo/moc/frontmatter_io.py::update()` 已由 PR #104 補上
   `_needs_quoting_for_type_fidelity()`，純數字字串 tag 經 `update()` 往返不再被 YAML
   剝回 int。apply 階段直接呼叫 `update()` 落地，不另寫 frontmatter dump 邏輯，天然
@@ -50,12 +52,41 @@ dry-run/apply 安全邊界。
   等下游呼叫）重新解析 tags 仍全為字串，坐實 #104 的往返修復對本 migration 輸出同樣
   有效。
 
+### D4：apply 的語意契約是 parse-equivalent，不是逐位元（issue #109 review 收斂）
+
+`--apply` 走 `frontmatter_io.update()` 整份重 dump，結構上不保證「僅 tags 行變動、
+其他行逐位元不變」——YAML 表層形（json 引號 free-text 的引號樣式等）會被正規化。
+issue owner 指定重用 `update()`（D2），因此收斂為接受重 dump 語意並明文鎖住：
+
+- body 逐位元不變；tags 以外欄位 parsed 值不變（parsed-equality 全欄位斷言，
+  production-shaped fixture）。
+- 宣告的型別正規化僅兩項：未引號 YAML datetime 標量（`created_at: 2026-08-02
+  07:52:28`）→ 等值 ISO8601 字串——stage3 schema 對 `created_at` 的契約本就是字串
+  （`lib/lifecycle/schema.py::_is_iso8601` 對 datetime 物件 FAIL），此為朝 schema
+  收斂的正規化而非劣化；null 維持 null。
+- 順手修 `frontmatter_io._scalar()`：None 原輸出 `None` 字面值（PyYAML 不視為
+  null），`update()` 往返後劣化成字串 `"None"`——改輸出 `null`，比照 #102/#104
+  型別保真精神，附直接 round-trip 測試。
+
+### D5：無條件 memory_layer 過濾（issue #109 review 收斂）
+
+`<root>/knowledge` 不存在時 fallback 掃 root 下 `.md`，但 `memory_layer !=
+"knowledge"` 的過濾無條件生效（repo 慣例，比照 `rekey.py`／`moc/linker.py`）：
+使用者把 `--memory-root` 打錯再加 `--apply` 時，不會改寫 inbox/episodic 或一般
+markdown 文件。
+
 ## Testing
 
 - `--dry-run` 對 3 個 fixture slice（tags 全字串／含裸 int tag／含 None 與嵌套 list）
   回報恰好 2 個待修 slice 及各自正規化後 tags 預覽，不改任何檔案（bytes 逐位元比對）。
-- `--apply` 後該 2 個 slice tags 全為字串，body 與其他 frontmatter 欄位逐位元不變
-  （僅 tags 行改動）；再 `--dry-run` 回報 0；再 `--apply` 為 no-op。
+- `--apply` 後該 2 個 slice tags 全為字串，body 逐位元不變、其他 frontmatter 欄位
+  parsed 值不變（D4 parse-equivalent）；再 `--dry-run` 回報 0；再 `--apply` 為 no-op。
+- production-shaped fixture（json 引號 free-text、未引號 datetime、裸 null distiller
+  欄位、非空 provenance/distiller dict、引號數字樣 version）：apply 後全欄位
+  parsed-equality、datetime→ISO8601 字串、null 維持 null、bytes 級冪等。
+- 打錯 `--memory-root`（無 knowledge/）：僅 `memory_layer: knowledge` 檔案被改寫，
+  一般文件與 inbox 層檔案 bytes 不變（D5）。
+- 非 list scalar tags（`tags: hello`）→ dry-run 預覽 `[]`、apply 後 `[]`（D2 決策鎖）。
 - `--apply` 後對其中一個 slice 呼叫 `frontmatter_io.update()`，重新解析 tags 仍全為
   字串（回歸 #104 保護）。
 - CLI 接線 `hippo knowledge normalize-tags`；全套 pytest、
