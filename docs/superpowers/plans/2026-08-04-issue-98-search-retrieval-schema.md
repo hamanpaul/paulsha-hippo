@@ -11,7 +11,7 @@ work_item: issue-98-search-retrieval-schema
 
 **Root cause（已驗證）:** SQLite FTS5 對 `MATCH ?` 綁定參數仍會解析查詢語法；查詢字串含 `word:` 時 `word` 被當 column-filter，欄位不存在即報 `no such column`。`paulsha_hippo/retrieval.py::to_fts_query()` 已是正確 sanitizer，hooks 的 shortlist 路徑（`hooks/_shortlist_common.py`）已在用；只有 `moc/cli.py::run()`（`hippo search` 入口）呼叫 `moc/search.py::search()` 時把 `args.query` 原文直送 FTS5。
 
-**Target branch:** `feature/98-search-fts-sanitizer`
+**Target branch:** `feature/98-issue-98-search-retrieval-schema`
 
 ## Global Constraints
 

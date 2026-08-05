@@ -5,7 +5,6 @@ import fcntl
 import json
 import logging
 import os
-import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -26,7 +25,6 @@ from . import frontmatter_io as fio
 
 INDEX_WRITE_BATCH_SIZE = 100
 LOGGER = logging.getLogger("paulsha_hippo.moc.search")
-_CANONICAL_FTS_QUERY = re.compile(r'^"[^"]+"(?: OR "[^"]+")*$')
 
 # 跨批次契約 #6：build_index() 回傳 dict 的六個 coverage 鍵。
 COVERAGE_KEYS = ("scanned", "invalid_frontmatter", "pool_excluded",
@@ -480,21 +478,19 @@ def _row_read_count(row: tuple) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
-def _normalize_match_query(query: str) -> str:
-    stripped = query.strip()
-    if not stripped:
-        return ""
-    if _CANONICAL_FTS_QUERY.fullmatch(stripped):
-        return stripped
-    return to_fts_query(stripped)
-
-
 def search(memory_root: Path, query: str, *, project: str | None, limit: int,
            include_decayed: bool) -> list[dict]:
     path = index_path(memory_root)
     if not path.exists():
         raise SearchIndexError("search index not built; run the dream/moc pass first")
-    match_query = _normalize_match_query(query)
+    # issue #98：查詢一律經 retrieval.to_fts_query() 淨化後才進 FTS5（單一
+    # sanitizer 真理來源，與 hooks shortlist 一致），`word:` 形輸入不再被
+    # FTS5 當 column-filter 拋 no such column。不設「已 canonical 形查詢」
+    # bypass——shortlist 傳入的 canonical 查詢重 sanitize 為冪等（token 皆已
+    # 過濾、OR 為 stopword）。語意成本（刻意接受）：多詞查詢由 FTS5 隱式
+    # AND 收斂為 OR-join；stopword／單字元 latin token 被丟棄；sanitize 後
+    # 為空（純 stopword／符號）回空 list 而非拋 SQL 錯誤。
+    match_query = to_fts_query(query)
     if not match_query:
         return []
     conn = sqlite3.connect(path)

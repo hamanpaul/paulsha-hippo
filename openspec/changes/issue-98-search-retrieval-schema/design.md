@@ -21,11 +21,11 @@ work_item: issue-98-search-retrieval-schema
 
 ### D2：重用 `retrieval.to_fts_query()`，單一 sanitizer 真理來源
 
-不複製實作。簽名不合時以最小 adapter 呼叫，不 fork 邏輯。
+不複製實作。簽名不合時以最小 adapter 呼叫，不 fork 邏輯。`search()` 內對所有查詢無條件套用，不設「已 canonical 形（`"tok" OR "tok"`）查詢」bypass：shortlist 生產路徑傳入的 canonical 查詢重 sanitize 為冪等（token 皆已通過長度／stopword 過濾、`OR` 本身是 stopword），bypass 只會引入第二條無測試守護的語意分支。
 
-### D3：語意零回歸為硬門檻
+### D3：門檻為「既有測試涵蓋之語意零回歸」，非全輸入結果等價
 
-`tests/test_moc_search.py` 既有斷言一條不改；合法輸入 sanitize 後結果必須等價（shortlist 生產路徑已證明此性質）。
+`tests/test_moc_search.py` 既有斷言一條不改、全綠。但套用 `to_fts_query()` 對合法輸入**不是**結果等價：多詞查詢的比對語意由 FTS5 隱式 AND 收斂為 OR-join（例 `flock ledger` 修復前只命中同時含兩詞的 slice，修復後含任一詞即命中）；stopword 與單字元 latin token 被丟棄；sanitize 後為空的查詢回空 list 而非拋 SQL 錯誤。此語意成本為刻意接受——換取 CLI 與 hooks shortlist 共用單一 sanitizer 真理來源、行為一致；揭露於 changelog 碎片與 spec。
 
 ## Testing
 
