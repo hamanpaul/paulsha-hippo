@@ -34,6 +34,22 @@ class SearchTests(unittest.TestCase):
             self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
             self.assertIn("project", hits[0])
 
+    def test_search_column_filter_query_does_not_raise(self):
+        # Issue #98: column-filter style queries like "build: f5df394", "tag:123", "col:"
+        # must not raise sqlite3.OperationalError / SearchIndexError.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "build note", "build f5df394 details")
+            search.build_index(root, link_weights={})
+            # 正向行為 pin：sanitize 後 tokens build/f5df394 仍須真的命中
+            # sl-1——防 `return []` 式退化實作也能讓本測試綠。
+            hits = search.search(root, "build: f5df394", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
+            for q in ["tag:123", "col:"]:
+                hits = search.search(root, q, project=None, limit=5, include_decayed=True)
+                self.assertIsInstance(hits, list)
+
     def test_search_stable_sort_uses_base_score_before_slice_id(self):
         # v5 plan BLOCKER #7：有 usage boost 時排序鍵須為
         # (adjusted_score, base_score, slice_id)，同分時以 base_score 決勝，

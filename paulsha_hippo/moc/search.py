@@ -20,6 +20,7 @@ from ..ledger import lifecycle
 from ..ledger import retrieval_set
 from ..ledger import usage as usage_ledger
 from ..noise import classify_noise, pool_exclude_reason
+from ..retrieval import to_fts_query
 from . import frontmatter_io as fio
 
 INDEX_WRITE_BATCH_SIZE = 100
@@ -482,6 +483,16 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
     path = index_path(memory_root)
     if not path.exists():
         raise SearchIndexError("search index not built; run the dream/moc pass first")
+    # issue #98：查詢一律經 retrieval.to_fts_query() 淨化後才進 FTS5（單一
+    # sanitizer 真理來源，與 hooks shortlist 一致），`word:` 形輸入不再被
+    # FTS5 當 column-filter 拋 no such column。不設「已 canonical 形查詢」
+    # bypass——shortlist 傳入的 canonical 查詢重 sanitize 為冪等（token 皆已
+    # 過濾、OR 為 stopword）。語意成本（刻意接受）：多詞查詢由 FTS5 隱式
+    # AND 收斂為 OR-join；stopword／單字元 latin token 被丟棄；sanitize 後
+    # 為空（純 stopword／符號）回空 list 而非拋 SQL 錯誤。
+    match_query = to_fts_query(query)
+    if not match_query:
+        return []
     conn = sqlite3.connect(path)
     try:
         has_usage_cols = _slice_meta_has_usage_columns(conn)
@@ -490,7 +501,7 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
                f"m.link_weight, m.active, m.path{usage_select} "
                "FROM slices_fts f JOIN slice_meta m ON m.slice_id = f.slice_id "
                "WHERE slices_fts MATCH ?")
-        params: list[object] = [query]
+        params: list[object] = [match_query]
         if project:
             sql += " AND m.project = ?"
             params.append(project)
