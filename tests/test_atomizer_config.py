@@ -44,6 +44,7 @@ class TestAtomizerConfig(unittest.TestCase):
         profiles_by_id = {profile.id: profile for profile in cfg.external_profiles}
         self.assertEqual(profiles_by_id["claude"].max_session_chunks, 7)
         self.assertEqual(profiles_by_id["codex"].max_session_chunks, 7)
+        self.assertEqual(profiles_by_id["cg"].max_session_chunks, 6)
 
     def test_override_merges_and_changes_hash(self):
         """Base hash differs after override file with split.max_fragment_chars: 100."""

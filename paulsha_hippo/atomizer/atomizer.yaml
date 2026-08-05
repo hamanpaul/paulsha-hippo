@@ -73,6 +73,9 @@ external_agents:
       enabled: false
       tier: 2
       priority: 20
+      # issue #99: cg large-session JSON extraction becomes unreliable at 7+ chunks;
+      # stop early and let the next profile take over with ineligible provenance.
+      max_session_chunks: 6
       traits: [heavy-implementation, fast]
       task_classes: [atomization, title, skillopt]
       model: default
