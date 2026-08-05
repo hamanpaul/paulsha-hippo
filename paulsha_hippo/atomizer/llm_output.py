@@ -212,12 +212,17 @@ def _build_proposal(
     item: Any, index: int, allowed_projects: set[str], seen_titles: set[str]
 ) -> SliceProposal:
     """Build one proposal. Hard-field violations fail the whole response;
-    soft issues (unknown project, malformed relation) are repaired in place."""
+    soft issues (unknown top-level fields, unknown project, malformed
+    relations) are repaired/dropped in place deterministically."""
     if not isinstance(item, dict):
         raise LlmOutputError(f"proposal {index} is not an object")
     unknown_keys = sorted(set(item) - _PROPOSAL_KEYS)
     if unknown_keys:
-        raise LlmOutputError(f"proposal {index} has unknown fields: {', '.join(unknown_keys)}")
+        _LOG.warning(
+            "atomize: proposal %s dropped unknown field(s): %s",
+            index,
+            ", ".join(unknown_keys),
+        )
 
     artifact_kind = item.get("artifact_kind")
     if artifact_kind not in ARTIFACT_KINDS:
@@ -277,8 +282,11 @@ def _parse_proposals(data: Any, known_projects: list[str]) -> list[SliceProposal
     proposals: list[SliceProposal] = []
     seen_titles: set[str] = set()
     for index, item in enumerate(data):
-        # A canonical response is one transaction.  Publishing only the valid
-        # subset would make retries non-deterministic and silently lose findings.
+        # A canonical response is one transaction for hard schema violations.
+        # Hard violations (missing title, invalid artifact_kind, bad type) fail
+        # the whole response to avoid non-deterministic retry and silent loss of findings.
+        # Soft issues (unknown top-level fields, unknown project, malformed relations)
+        # are safely repaired/dropped deterministically without triggering retries.
         proposals.append(_build_proposal(item, index, allowed_projects, seen_titles))
     return proposals
 

@@ -242,13 +242,99 @@ class LlmOutputTests(unittest.TestCase):
         with self.assertRaises(llm_output.LlmOutputError):
             llm_output.parse(raw, PROJECTS)
 
-    def test_unknown_top_level_fields_raise(self):
+    def test_unknown_top_level_fields_soft_repaired_and_dropped(self):
         raw = (
             '[{"title":"a","artifact_kind":"report","project":"paulshaclaw","tags":[],"body":"b",'
             '"source_fragment_indices":[0],"relations":[],"extra":"x"}]'
         )
-        with self.assertRaises(llm_output.LlmOutputError):
-            llm_output.parse(raw, PROJECTS)
+        proposals = llm_output.parse(raw, PROJECTS)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].title, "a")
+
+    def test_unknown_top_level_field_dropped_with_warning_and_proposals_survive(self):
+        raw = json.dumps(
+            [
+                _proposal_payload("valid1"),
+                {
+                    "title": "valid2",
+                    "artifact_kind": "report",
+                    "project": "paulshaclaw",
+                    "tags": ["t"],
+                    "body": "body-valid2",
+                    "source_fragment_indices": [1],
+                    "relations": [],
+                    "tags2": ["extra_tag"],
+                    "unknown_field": 123,
+                },
+            ]
+        )
+        with self.assertLogs("paulsha_hippo.atomizer", level="WARNING") as cm:
+            proposals = llm_output.parse(raw, PROJECTS)
+        self.assertEqual([p.title for p in proposals], ["valid1", "valid2"])
+        log_output = "\n".join(cm.output)
+        self.assertIn("tags2", log_output)
+        self.assertIn("unknown_field", log_output)
+        self.assertIn("proposal 1", log_output)
+
+    def test_hard_field_violations_fail_entire_response_as_a_whole(self):
+        hard_cases = [
+            # missing title
+            [
+                _proposal_payload("valid"),
+                {
+                    "artifact_kind": "report",
+                    "project": "paulshaclaw",
+                    "tags": [],
+                    "body": "b",
+                    "source_fragment_indices": [1],
+                    "relations": [],
+                },
+            ],
+            # invalid artifact_kind
+            [
+                _proposal_payload("valid"),
+                {
+                    "title": "bad_kind",
+                    "artifact_kind": "invalid_kind",
+                    "project": "paulshaclaw",
+                    "tags": [],
+                    "body": "b",
+                    "source_fragment_indices": [1],
+                    "relations": [],
+                },
+            ],
+            # empty body
+            [
+                _proposal_payload("valid"),
+                {
+                    "title": "bad_body",
+                    "artifact_kind": "report",
+                    "project": "paulshaclaw",
+                    "tags": [],
+                    "body": "   ",
+                    "source_fragment_indices": [1],
+                    "relations": [],
+                },
+            ],
+            # empty source_fragment_indices
+            [
+                _proposal_payload("valid"),
+                {
+                    "title": "bad_indices",
+                    "artifact_kind": "report",
+                    "project": "paulshaclaw",
+                    "tags": [],
+                    "body": "b",
+                    "source_fragment_indices": [],
+                    "relations": [],
+                },
+            ],
+        ]
+        for idx, payload in enumerate(hard_cases):
+            with self.subTest(case=idx):
+                raw = json.dumps(payload)
+                with self.assertRaises(llm_output.LlmOutputError):
+                    llm_output.parse(raw, PROJECTS)
 
     def test_non_object_relation_is_dropped(self):
         raw = (
