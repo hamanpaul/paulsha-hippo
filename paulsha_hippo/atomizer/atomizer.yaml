@@ -73,6 +73,14 @@ external_agents:
       enabled: false
       tier: 2
       priority: 20
+      # issue #99：cg 對一般 session 是最穩的 profile（organic 勝出 80.9%、
+      # promote 100%），但對大 payload 已實證不可靠——>6 chunks 的 session
+      # （實例 213KB/47+ fragments）燒 153s 後吐出不可解析 JSON（exit 3）。
+      # 宣告閘門讓這類 session 以 session_size 立即不合格、直接落到 tier-3，
+      # 而不是先浪費 153s 再失敗。tier-1 上限為 7，故 cg 實際只會接到
+      # tier-1 因其他原因失敗的 ≤6 chunk session。
+      # 完整的 copilot 大 payload 可靠性量測仍未完成，見 issue #99。
+      max_session_chunks: 6
       traits: [heavy-implementation, fast]
       task_classes: [atomization, title, skillopt]
       model: default

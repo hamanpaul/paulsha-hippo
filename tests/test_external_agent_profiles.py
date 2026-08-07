@@ -191,12 +191,21 @@ def test_router_skips_profile_with_oversized_session_without_call():
 
 
 def test_default_profiles_have_max_session_chunks_bounds():
-    """Issue #89: tier-1 max_session_chunks raised 6->7 (1800s cap / 240s ~= 7.5)."""
+    """Issue #89: tier-1 max_session_chunks raised 6->7 (1800s cap / 240s ~= 7.5).
+
+    Issue #99 then bounded tier-2 cg at 6 so an oversized session is rejected
+    with `session_size` instead of burning 153s before returning unparseable
+    JSON. The two ceilings are deliberately adjacent: with tier-1 at 7, cg only
+    ever sees <=6-chunk sessions that tier-1 failed for some other reason.
+    """
     profiles = default_profiles()
     mapping = {profile.id: profile.max_session_chunks for profile in profiles}
     assert mapping["claude"] == 7
     assert mapping["codex"] == 7
-    assert mapping["cg"] is None
+    assert mapping["cg"] == 6
+    # tier-3 stays unbounded: it is the last resort and must never decline on
+    # size, or a large session has nowhere left to go.
+    assert mapping["co-gem"] is None
 
 
 def test_default_profiles_have_three_deterministic_tiers_and_traits():

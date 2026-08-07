@@ -483,6 +483,16 @@ def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
 # unparseable JSON on a >6-chunk session that fell through when tier-1 was
 # still capped at 6).
 _TIER1_MAX_SESSION_CHUNKS = 7
+# tier-2 cg (issue #99): the same production evidence cited above also says what
+# cg must *not* be handed. cg is the strongest profile on ordinary sessions
+# (organic win rate 80.9%, promote 100%), so it stays in the chain -- but on a
+# >6-chunk payload it burned 153s and then returned unparseable JSON. Declaring
+# the ceiling turns that into an immediate `session_size` ineligibility, so an
+# oversized session drops straight to tier-3 instead of paying 153s first.
+# With tier-1 capped at 7, cg only ever sees <=6-chunk sessions that tier-1
+# failed for some other reason. The full large-payload reliability measurement
+# is still open; this is the fail-fast half.
+_CG_MAX_SESSION_CHUNKS = 6
 
 
 def default_profiles() -> tuple[AgentProfile, ...]:
@@ -490,7 +500,7 @@ def default_profiles() -> tuple[AgentProfile, ...]:
         ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print"), _TIER1_MAX_SESSION_CHUNKS),
         ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-"), _TIER1_MAX_SESSION_CHUNKS),
         ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print"), None),
-        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
+        ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), _CG_MAX_SESSION_CHUNKS),
         ("co-gem", 3, 10, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("co-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
         ("claude-gem", 3, 20, ("low-cost", "fallback"), ("atomization", "title", "skillopt"), "local", "low", ("low", "medium"), ("claude-gem", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), None),
     )

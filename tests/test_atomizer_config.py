@@ -454,3 +454,36 @@ class SessionDeadlineIsNotASilentKnobTests(unittest.TestCase):
                 load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=path)
         finally:
             path.unlink(missing_ok=True)
+
+
+class CgSessionSizeGateTests(unittest.TestCase):
+    """issue #99：cg 對大 payload 已實證不可靠，須以 session_size 閘門 fail-fast。"""
+
+    def test_shipped_template_declares_cg_session_size_gate(self):
+        cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
+        profiles_by_id = {profile.id: profile for profile in cfg.external_profiles}
+        self.assertEqual(profiles_by_id["cg"].max_session_chunks, 6)
+
+    def _enabled_cg(self):
+        # 出貨模板把 cg 設為 enabled: false（部署端才啟用），而 eligible() 的
+        # disabled 檢查會先短路，故要在啟用狀態下才驗得到 size 閘門本身。
+        import dataclasses
+
+        cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
+        cg = {profile.id: profile for profile in cfg.external_profiles}["cg"]
+        return dataclasses.replace(cg, enabled=True)
+
+    def test_cg_rejects_oversized_sessions_before_spending_a_call(self):
+        # 不合格必須在呼叫之前判定（reason=session_size），否則就只是把
+        # 153s 的浪費換個地方發生。
+        eligible, reason = self._enabled_cg().eligible(
+            task_class="atomization", chunk_count=7
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "session_size")
+
+    def test_cg_still_accepts_sessions_within_its_proven_range(self):
+        _, reason = self._enabled_cg().eligible(
+            task_class="atomization", chunk_count=6
+        )
+        self.assertNotEqual(reason, "session_size")
