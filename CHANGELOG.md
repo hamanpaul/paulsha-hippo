@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- lifecycle 詞彙表改為記憶平面與治理平面的聯集，修復與 `paulsha-cortex` 的跨平面對齊 FAIL：`lib/lifecycle/schema.PHASES` 新增 cortex 的首階段 `claim`，成為 `("claim", "research", "define", "plan", "build", "verify", "review", "ship")`。`claim`（cortex 的 work item 認領）與 `research`（本平面記憶 slice 的調查階段）語意不同、不可互相改名，故採聯集——既有 235 個 `phase: research` slice 零遷移即維持合法。`PHASES` 在本平面只做成員資格檢查與 gates 產生、不決定順序，擴充不改變既有行為，`current_phase` 預設仍為 `research`。三套套件之間維持零 import 依賴，相等性續由 paulshaclaw 的消費端對齊測試守。
+
 ### Added
 - Entity hub 同步（#107）：新增 `moc/entity_hub.py` 維護 knowledge 層 `entities` 子目錄的 hub 頁，讓 linker 物化的 `[[EntityName]]` mentions 連結有持久解析目標——缺頁補 stub（`entity_kind: unclassified`＋反向連結清單）、既有頁只重刷反向連結段落（人工/agent 分類欄位保留；提及全消失刷成 0 篇不留死連結）、`alias_of` 歸戶 canonical、含 `#` 的 entity 於前綴頁維護 `## <錨點>` 段落（每輪整段重刷，slice 改名/新增 mentions 都進場）、外來檔一律拒寫；回報兩軌——`warnings` 只裝暫時性 I/O 失敗，結構性狀態記 `stats.structural` 不污染 dream clean 判定（#101 教訓）。`run_moc()` 接入（隨 dream hourly timer 自動執行），並新增 CLI `hippo knowledge entity-hubs（--dry-run|--apply）`：dry-run 有待辦、或 apply 有 I/O 失敗即 exit 1 供排程健檢。
 - Prompt-time shortlist 新增 offer 早停機制：同一 `(tool, session_id)` 歷史 offer 事件數達
