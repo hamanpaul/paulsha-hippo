@@ -19,6 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paulsha_hippo import cli as memory_cli, paths
+from paulsha_hippo.agent_profiles import FIXED_TIMEOUT_SECONDS
 from paulsha_hippo.ledger import processing
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "atomizer"
@@ -32,7 +33,8 @@ def _seed(root: Path) -> None:
     shutil.copyfile(RAW_FIXTURE, raw)
 
 
-def _write_profile(root: Path, agent_script: str, *, timeout_seconds: int = 300) -> None:
+def _write_profile(root: Path, agent_script: str,
+                   *, timeout_seconds: int = FIXED_TIMEOUT_SECONDS) -> None:
     import yaml
 
     projects = root / "projects.yaml"
@@ -132,7 +134,7 @@ class NonZeroExitTests(unittest.TestCase):
 
 
 class TimeoutTests(unittest.TestCase):
-    def test_timeout_override_cannot_weaken_fixed_300_second_contract(self):
+    def test_timeout_override_cannot_weaken_the_fixed_per_call_contract(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed(root)
@@ -140,7 +142,7 @@ class TimeoutTests(unittest.TestCase):
             rc, out = _atomize(root, "2026-07-10T00:00:00Z")
             self.assertEqual(rc, 1)
             self.assertIsNone(processing.state_of(root, SESSION_KEY))
-            self.assertIn("timeout is fixed at 300", out)
+            self.assertIn(f"timeout is fixed at {FIXED_TIMEOUT_SECONDS}", out)
             self.assertEqual(_cache_json_files(root), [])
 
 

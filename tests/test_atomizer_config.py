@@ -418,11 +418,18 @@ class SessionDeadlineStarvationTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
-    def test_per_agent_timeout_cap_is_unchanged(self):
-        """Hang protection for a single call must not be relaxed by this fix."""
+    def test_per_agent_timeout_cap_is_pinned_and_not_per_deployment(self):
+        """單次呼叫的 hang protection 仍是固定值，且不可由 deployment 覆寫。
+
+        #75 當時的立場是「本修復不放寬單次上限」，故此測試原本釘住 300。#119
+        以量測推翻了那個值本身——300s 距離實測最慢 chunk（244s）只剩 19% 裕度，
+        且低於 #74 量到的 local-vllm effort-high 400s，使 tier-3 對大 payload
+        結構上不可能完成。值改為 600，但「固定、不可 per-deployment 覆寫」這個
+        性質不變，仍由 `agent_profiles` 的 profile 解析主動拒絕覆寫。
+        """
         from paulsha_hippo.agent_profiles import FIXED_TIMEOUT_SECONDS, AgentProfile
 
-        self.assertEqual(FIXED_TIMEOUT_SECONDS, 300)
+        self.assertEqual(FIXED_TIMEOUT_SECONDS, 600)
         self.assertEqual(AgentProfile.timeout, FIXED_TIMEOUT_SECONDS)
 
 
