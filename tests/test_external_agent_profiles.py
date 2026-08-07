@@ -17,6 +17,8 @@ from paulsha_hippo.agent_profiles import (
     FIXED_PER_CHUNK_DEADLINE_SECONDS,
     FIXED_SESSION_DEADLINE_CAP_SECONDS,
     FIXED_SESSION_DEADLINE_SECONDS,
+    FIXED_TIMEOUT_SECONDS,
+    AgentRunError,
     cache_identity,
     child_environment,
     default_profiles,
@@ -121,12 +123,22 @@ def test_per_call_timeout_still_bounded_by_fixed_timeout_seconds():
 
     router = ExternalAgentRouter((_profile("only", tier=1),))
     router._run_one = run_one  # type: ignore[method-assign]
+    # Both branches of `min(profile.timeout, remaining_seconds)` must stay
+    # covered: chunk 0 starts with the whole chain budget available and is
+    # therefore bounded by the per-call cap, while chunk 1 starts late enough
+    # that the *remaining* budget is the smaller of the two. Expressed via the
+    # constants rather than literals so raising either one (issue #119 raised
+    # both) cannot silently collapse this into a single-branch test.
+    tail_remaining = 300
+    elapsed = session_deadline_seconds(2) - tail_remaining
+    assert tail_remaining < FIXED_TIMEOUT_SECONDS  # chunk 1 must hit the remainder branch
+
     # 9 monotonic() reads per this 1-profile/2-chunk session: started, the
     # deadline/circuit checks, attempt_started, then per chunk a shared
     # chunk_started/remaining_seconds read plus one elapsed-time read after
     # the call returns (issue #86 per-chunk provenance), and finally the
     # attempt's own elapsed-time read.
-    time_points = iter([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 450.0, 450.0, 450.0])
+    time_points = iter([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, elapsed, elapsed, elapsed])
 
     original_monotonic = time.monotonic
     time.monotonic = lambda: next(time_points)  # type: ignore[method-assign]
@@ -138,7 +150,7 @@ def test_per_call_timeout_still_bounded_by_fixed_timeout_seconds():
     finally:
         time.monotonic = original_monotonic
 
-    assert captured == [300, 150]
+    assert captured == [FIXED_TIMEOUT_SECONDS, tail_remaining]
 
 
 def test_router_rejects_invalid_max_session_chunks():
@@ -1123,6 +1135,14 @@ def test_session_cache_lands_validated_chunk_even_when_session_later_exhausts(tm
     assert payloads[0]["provenance"]["profile_id"] == "first"
 
 
+# issue #114 的四個 deadline-break 測試原本把時間推進量寫死（700.0 / 650.0 /
+# 350.0），那是照當時的 600s chain 下限校準的。#119 把下限提到 1200 後，寫死的
+# 數字不再耗盡預算、deadline break 不會發生，測試意圖隨之失效。改以常數推導，
+# 讓「幾棒之後耗盡」這個意圖不隨下限數值漂移。單 chunk session 走 chain 下限。
+_EXHAUSTS_CHAIN_BUDGET = session_deadline_seconds(1) + 1.0
+_HALF_CHAIN_BUDGET = session_deadline_seconds(1) / 2 + 1.0
+
+
 def test_router_session_deadline_break_records_skipped_profile_provenance(monkeypatch):
     import time
     from paulsha_hippo.agent_profiles import AgentRunError
@@ -1141,7 +1161,7 @@ def test_router_session_deadline_break_records_skipped_profile_provenance(monkey
 
     def execute(profile, prompt, attempt):
         if profile.id == "claude":
-            current_time[0] += 700.0
+            current_time[0] += _EXHAUSTS_CHAIN_BUDGET
             raise AgentRunError("claude timeout", category="timeout")
         return "answer", "", 0
 
@@ -1187,7 +1207,7 @@ def test_router_deadline_break_raise_reports_terminal_real_attempt(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
 
     def execute(profile, prompt, attempt):
-        current_time[0] += 350.0
+        current_time[0] += _HALF_CHAIN_BUDGET
         raise AgentRunError(f"{profile.id} timeout", category="timeout")
 
     router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
@@ -1229,7 +1249,7 @@ def test_router_mid_attempt_budget_break_records_skipped_profile_provenance(monk
     def execute(profile, prompt, attempt):
         # chunk-0 validates but eats the whole session deadline; chunk-1 then
         # hits the in-attempt remaining_seconds <= 0 budget raise.
-        current_time[0] += 650.0
+        current_time[0] += _EXHAUSTS_CHAIN_BUDGET
         return "answer", "", 0
 
     router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
@@ -1266,7 +1286,7 @@ def test_router_deadline_break_does_not_record_circuit_open_profile(monkeypatch)
     monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
 
     def execute(profile, prompt, attempt):
-        current_time[0] += 700.0
+        current_time[0] += _EXHAUSTS_CHAIN_BUDGET
         raise AgentRunError("claude timeout", category="timeout")
 
     router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
@@ -1297,7 +1317,7 @@ def test_router_skip_records_may_exceed_max_attempts(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
 
     def execute(profile, prompt, attempt):
-        current_time[0] += 700.0
+        current_time[0] += _EXHAUSTS_CHAIN_BUDGET
         raise AgentRunError("claude timeout", category="timeout")
 
     router = ExternalAgentRouter(
@@ -1336,3 +1356,43 @@ def test_router_sufficient_deadline_provenance_unchanged():
 
 
 
+
+def test_session_floor_admits_two_full_per_call_budgets():
+    """Issue #119：單次呼叫上限與 chain 下限之間必須留得下第二棒。
+
+    `_run_one` 收到的是 ``min(profile.timeout, remaining_seconds)``，所以當
+    chain 下限等於單次上限時，第一棒耗盡自己的預算就把整條 chain 吃光，
+    fallback 一秒都拿不到——正是 #85 註解點名的結構性飢餓。把單次上限由
+    300 提到 600（#74 實測 local-vllm effort high 需 400s，300s 讓 tier-3 對
+    大 payload 結構上不可能完成）之後，下限必須同步上抬，否則修好 tier-3
+    的同時會廢掉小 session 的 fallback。
+    """
+    assert FIXED_SESSION_DEADLINE_SECONDS >= 2 * FIXED_TIMEOUT_SECONDS
+
+
+def test_first_profile_burning_full_per_call_budget_does_not_starve_fallback(monkeypatch):
+    """第一棒燒滿單次預算後，第二棒仍必須拿得到一次完整呼叫。
+
+    以假時鐘取代真 sleep：executor 每次被呼叫就把時鐘推進整個單次上限，
+    模擬「跑到自己的上限才失敗」的最壞情況。單 chunk session 走 chain 下限。
+    """
+    clock = {"now": 0.0}
+    monkeypatch.setattr(
+        "paulsha_hippo.agent_profiles.time.monotonic", lambda: clock["now"]
+    )
+
+    profiles = (_profile("first", tier=1), _profile("second", tier=2))
+    calls: list[str] = []
+
+    def execute(profile, prompt, call):
+        calls.append(profile.id)
+        clock["now"] += FIXED_TIMEOUT_SECONDS
+        if profile.id == "first":
+            raise AgentRunError(
+                "agent timed out", category="timeout", profile_id=profile.id
+            )
+        return "valid", "", 0
+
+    router = ExternalAgentRouter(profiles, executor=execute)
+    assert router.run_session(("chunk-0",)) == ("valid",)
+    assert calls == ["first", "second"]

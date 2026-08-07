@@ -1,0 +1,10 @@
+---
+type: fix
+---
+- 修 issue #119 的子形狀 B（tier-1 撞單次呼叫上限後整條降級鏈耗盡致 park）：`agent_profiles.FIXED_TIMEOUT_SECONDS` 由 300 提高到 600。300s 與 `FIXED_PER_CHUNK_DEADLINE_SECONDS`（240s）源自同一批量測（per-chunk 實測約 190.5s / 244s），最慢 chunk 距離硬上限只剩 56s、19% 裕度，稍重的 chunk 即撞上限；且 #74 量到 local-vllm 在 effort high 需 400s，300s 使 tier-3 對大 payload **結構上不可能完成**。
+- **先評估過 progress-aware（idle）逾時並以實測否決**：`claude --print` 在完成前不吐任何 bytes——實測一次 12.0s 的呼叫，2632 bytes 全部在 12.0s 的單一 read 落地，之前為零。idle 偵測器看到的是整段呼叫都靜默，設任何門檻都會誤殺慢而有進展的呼叫。串流需改用 `--output-format stream-json`，會打破 router 解析的單一 JSON 回應契約，故不採用。此判斷已寫入 `FIXED_TIMEOUT_SECONDS` 的註解，避免日後重複調查。
+- **同步上抬 chain 下限**：`FIXED_SESSION_DEADLINE_SECONDS` 由 600 提高到 1200。`_run_one` 收到的是 `min(profile.timeout, remaining_seconds)`，下限等於單次上限時第一棒燒滿自己的預算就把整條 chain 吃光、fallback 一秒都拿不到——與 #85 註解點名的結構性飢餓同型，只是換了位置。新增 `test_session_floor_admits_two_full_per_call_budgets` 釘住「下限 ≥ 兩倍單次上限」的不變量，並以假時鐘寫了行為測試（第一棒燒滿整個單次預算後第二棒仍須拿得到完整呼叫）；兩者在只提高單次上限、未動下限時皆會失敗，已實測確認。
+- 出貨模板 `paulsha_hippo/atomizer/atomizer.yaml` 的 `external_agents.deadline_seconds` 同步 600 → 1200。`atomizer/config.py` 對此值採 fail-closed（不等於常數即拒絕載入），故**部署時必須與 live config 同時更新**，詳見下方。
+- 同樣把 #114 新增的四個 deadline-break 測試改為常數推導。它們原本把時間推進量寫死（`700.0` / `650.0` / `350.0`），那是照當時 600s chain 下限校準的——下限提到 1200 後這些數字不再耗盡預算、deadline break 不會發生，測試意圖（「第幾棒之後耗盡」）隨之失效而非只是數字不合。改以 `session_deadline_seconds(1)` 推導出 `_EXHAUSTS_CHAIN_BUDGET` 與 `_HALF_CHAIN_BUDGET` 兩個具名量。
+- 清理兩處把 300 寫死、因而會隨常數漂移的測試設施：`tests/test_atomizer_backend_matrix.py` 的 `_write_profile()` 預設值與 `tests/stage2_integration_check.sh` 的 stub profile，改為引用 `FIXED_TIMEOUT_SECONDS`。既有的 per-call timeout 邊界測試改以常數表達（原本斷言字面值 `[300, 150]`，常數變動後第二個分支不再被觸發、失去覆蓋意義）。
+- **部署順序（重要）**：`FIXED_SESSION_DEADLINE_SECONDS` 與 live config 的 `external_agents.deadline_seconds` 必須**同時**變更。單獨改 live config 為 1200 而未重裝，會讓仍是 600 的已部署副本每輪 `AtomizerConfigError` 失敗；單獨重裝而未改 live config 亦然。正確步驟：`pipx install --force <repo>` 與 live config 改值一併完成，再 `hippo install service --enable` 更新 unit 的 `HIPPO_BUILD_COMMIT`。此為 2026-07-28 同型事故的反向重演，已於常數註解與模板註解兩處標註。

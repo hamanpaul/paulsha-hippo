@@ -27,7 +27,11 @@ phase_map:
 default_artifact_kind: report
 default_phase: review
 external_agents:
-  deadline_seconds: 600
+  # issue #119：必須恰等於 agent_profiles.FIXED_SESSION_DEADLINE_SECONDS，
+  # 否則 config 載入 fail-closed。單次呼叫上限由 300 提到 600 之後，chain
+  # 下限同步 600 → 1200，讓第一棒燒滿自己的預算後 fallback 仍拿得到一次
+  # 完整呼叫。改這個值必須同時更新每個 deployment 的 live config。
+  deadline_seconds: 1200
   max_attempts: 6
   max_agent_calls: 6
   profiles:

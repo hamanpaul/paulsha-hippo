@@ -22,19 +22,42 @@ from typing import Any, Callable, ClassVar, Mapping, Sequence
 ROUTER_CONTRACT_VERSION = "1"
 RESPONSE_SCHEMA_VERSION = "1"
 MIN_PROVIDER_CONTEXT = 32_768
-FIXED_TIMEOUT_SECONDS = 300
+# Bound for a *single* agent call; hang protection. Raised 300 -> 600 by issue
+# #119. 300s was calibrated from the same measurements as
+# FIXED_PER_CHUNK_DEADLINE_SECONDS below (per-chunk completion of roughly
+# 190.5s / 244s), leaving the worst measured chunk only 56s -- 19% -- of
+# headroom, so any chunk slightly heavier than the measurement window hit the
+# cap and fell through the chain. Worse, issue #74 measured local-vllm needing
+# 400s at effort high, which made the tier-3 fallback structurally incapable of
+# finishing a large payload no matter how much chain budget remained.
+#
+# An idle-based ("progress-aware") detector would be the principled way to tell
+# a hung call from a slow-but-progressing one, and was evaluated first. It is
+# not implementable here: `claude --print` emits nothing until completion
+# (measured: a 12.0s run delivered all 2632 bytes in a single read at 12.0s,
+# zero bytes before), so an idle detector observes total silence for the entire
+# call and would kill every slow call at whatever threshold it used. Streaming
+# would require `--output-format stream-json`, which breaks the single-JSON
+# response contract the router parses.
+FIXED_TIMEOUT_SECONDS = 600
 # Bound for the *whole* fallback chain, distinct from FIXED_TIMEOUT_SECONDS which
 # bounds a *single* agent call. Conflating the two structurally starves every
 # profile after the first: `_run_one` receives
 # `min(profile.timeout, remaining_seconds)`, so when four eligible profiles share
 # one agent's worth of budget the tier-3 fallback can never get its allotted
 # time. Measured: claude 35.1s + codex 16.5s + cg 66.6s consumed 118s of a 300s
-# session budget, leaving local-vllm 181s for work that needed 203s. The
-# per-call cap (and therefore hang protection) is deliberately left unchanged;
-# only the chain-wide budget grows, so a slow-but-progressing fallback can run
-# to its own limit instead of inheriting the leftovers.
-# 600s remains the lower bound to preserve single/double-chunk behavior.
-FIXED_SESSION_DEADLINE_SECONDS = 600
+# session budget, leaving local-vllm 181s for work that needed 203s.
+#
+# The floor must therefore stay at least two per-call budgets wide, or a first
+# profile that burns its full call leaves the fallback nothing at all -- the
+# same starvation in a new place. #119 raised it 600 -> 1200 in lockstep with
+# the per-call cap; `test_session_floor_admits_two_full_per_call_budgets` locks
+# the invariant so a future bump to one constant cannot silently re-open it.
+# NOTE: `atomizer/config.py` rejects any `external_agents.deadline_seconds`
+# that is not exactly this value, so changing it REQUIRES updating the shipped
+# `atomizer.yaml` template *and* every deployment's live config in the same
+# release -- an unsynchronized live config fails every dream cycle closed.
+FIXED_SESSION_DEADLINE_SECONDS = 1200
 # 240s/chunk is anchored by observed per-chunk completion on large sessions
 # (roughly 190.5s / 244s in measured profiles); the cap was tuned so one
 # session doesn't monopolize the hourly timer cycle.

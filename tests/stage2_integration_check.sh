@@ -175,6 +175,8 @@ from pathlib import Path
 
 import yaml
 
+from paulsha_hippo.agent_profiles import FIXED_TIMEOUT_SECONDS
+
 config_path = Path(os.environ["ATOMIZE_CONFIG_ROOT"]) / "config.yaml"
 document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 document["known_projects_file"] = os.environ["ATOMIZE_PROJECTS"]
@@ -183,7 +185,8 @@ document["external_agents"]["profiles"] = [{
     "traits": ["test"], "task_classes": ["atomization"],
     "model": "fake-agent", "supported_models": ["fake-agent"],
     "effort": "medium", "supported_efforts": ["medium"],
-    "timeout": 300,
+    # profile 解析要求恰等於 FIXED_TIMEOUT_SECONDS，不可硬編碼數值（#119）
+    "timeout": FIXED_TIMEOUT_SECONDS,
     "argv": ["python3", os.environ["ATOMIZE_AGENT"]],
 }]
 config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
