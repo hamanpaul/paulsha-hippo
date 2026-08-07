@@ -86,6 +86,42 @@ class SearchTests(unittest.TestCase):
             with self.assertRaises(search.SearchIndexError):
                 search.search(Path(tmp), "x", project=None, limit=5, include_decayed=False)
 
+    def test_query_with_colon_is_not_parsed_as_fts5_column_filter(self):
+        # issue #98：`MATCH ?` 的綁定參數仍由 FTS5 解析查詢語法，`word:` 形式會被
+        # 當成 column-filter 前綴，欄位不存在即 `no such column: build`。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "candidate-notes", "candidate f5df394 rebind")
+            search.build_index(root, link_weights={})
+            hits = search.search(root, "build: f5df394", project=None, limit=5,
+                                 include_decayed=True)
+            self.assertEqual([h["slice_id"] for h in hits], ["sl-1"])
+
+    def test_query_with_fts5_operators_is_neutralized(self):
+        # 裸露的 FTS5 運算子同樣不得讓使用者查詢炸開。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            for query in ('alpha AND* (bad', 'alpha "unbalanced', 'NEAR/'):
+                with self.subTest(query=query):
+                    search.search(root, query, project=None, limit=5, include_decayed=True)
+
+    def test_content_less_query_returns_empty_without_searching(self):
+        # sanitizer 對純 stopword／單字元輸入回傳空字串；空 MATCH 是 FTS5 語法錯誤，
+        # 故必須在開 DB 之前就早退，而不是送一個空查詢進去。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "proj", "alpha", "alpha body")
+            search.build_index(root, link_weights={})
+            with mock.patch("paulsha_hippo.moc.search.sqlite3.connect") as connect:
+                self.assertEqual(
+                    search.search(root, "how do I", project=None, limit=5,
+                                  include_decayed=True),
+                    [],
+                )
+            connect.assert_not_called()
+
     def test_build_index_failure_preserves_existing_db(self):
         # #16：建索引中途失敗，舊 DB 必須完整保留（廢除先 unlink）
         with TemporaryDirectory() as tmp:

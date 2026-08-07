@@ -20,6 +20,7 @@ from ..ledger import lifecycle
 from ..ledger import retrieval_set
 from ..ledger import usage as usage_ledger
 from ..noise import classify_noise, pool_exclude_reason
+from ..retrieval import to_fts_query
 from . import frontmatter_io as fio
 
 INDEX_WRITE_BATCH_SIZE = 100
@@ -479,9 +480,25 @@ def _row_read_count(row: tuple) -> int:
 
 def search(memory_root: Path, query: str, *, project: str | None, limit: int,
            include_decayed: bool) -> list[dict]:
+    """Lexical search over the slice index. ``query`` is arbitrary user text.
+
+    issue #98：`MATCH ?` 的綁定參數並不會讓 FTS5 停止解析查詢語法——`word:` 形式
+    仍被當成 column-filter 前綴（`build: f5df394` → `no such column: build`），裸露的
+    `AND` / `*` / `NEAR/` / 未閉合引號同理會是語法錯誤。消毒收在這裡而非 CLI，
+    讓所有 caller 共用同一個收口點；prompt-time shortlist 路徑
+    （`hooks/_shortlist_common.py`）本來就走同一個 `to_fts_query()`。
+
+    注意語意：`to_fts_query()` 逐詞加引號後以 OR 串接，故多詞查詢由 FTS5 預設的
+    隱含 AND 變成 OR，再由 bm25 排序決定先後——命中集合變寬、最相關者仍在前。
+    """
     path = index_path(memory_root)
     if not path.exists():
         raise SearchIndexError("search index not built; run the dream/moc pass first")
+    match_query = to_fts_query(query)
+    if not match_query:
+        # 純 stopword／單字元輸入沒有可搜尋的內容詞；空字串是 FTS5 語法錯誤，
+        # 因此在開 DB 之前早退。
+        return []
     conn = sqlite3.connect(path)
     try:
         has_usage_cols = _slice_meta_has_usage_columns(conn)
@@ -490,7 +507,7 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
                f"m.link_weight, m.active, m.path{usage_select} "
                "FROM slices_fts f JOIN slice_meta m ON m.slice_id = f.slice_id "
                "WHERE slices_fts MATCH ?")
-        params: list[object] = [query]
+        params: list[object] = [match_query]
         if project:
             sql += " AND m.project = ?"
             params.append(project)
