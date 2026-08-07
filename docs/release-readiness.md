@@ -9,10 +9,83 @@ down is kept as historical record of that release's readiness process.
 
 ## 0.1.2 release candidate readiness
 
-The matrix is currently rebound to the 0.1.2 candidate at commit
+**Current state (2026-08-07) — release freeze in effect; matrix binding is
+knowingly stale; AR-11 soak restarted at 0/3.** Everything below this block is
+history, kept for the rebind/attestation trail. Read this block first: several
+statements further down (notably "`wheel_sha256` is `null`" and the 13-of-16
+attestation) were true when written and are no longer.
+
+*Freeze.* `main` is frozen at `4d2b1f230a0160d6fe9d9d453bd47235ec9b5f93`
+(#121). No further `code_paths` changes land until 0.1.2 ships; subsequent
+fixes go to 0.1.3. Open at freeze time and deferred: #96, #117, #118 (0.1.3),
+plus #99 which stays open for the outstanding copilot large-payload root-cause
+measurement (its fail-fast half shipped in #112).
+
+*The matrix binding is stale, deliberately.*
+`reports/verify/release-readiness-matrix.json` still binds
+`f5df39496de17c8b4fb3aa88dfa698b7c547aaf4` with `wheel_sha256`
+`b942feb2296a8eff2d161fab76e82c0be8ad05eac1ec8a7510f14d3756f1f1a4`. **Fourteen
+commits have landed since** (#95, #97, #100, #103, #104, #108, #111, #112,
+#113, #114, #115, #116, #110, #121). Under `readiness.bind_candidate()`'s drift
+rule, every `passed` gate in that file — including the 13-of-16 attestation
+recorded below — is therefore **zombie evidence attesting a code state that is
+no longer the candidate**, and the wheel hash is the wheel of a superseded
+commit. The rebind is deliberately deferred rather than done now: rebinding
+drops all evidence and forces a full re-attestation pass, which is only worth
+paying once, after AR-11 soak completes on the deployed build. Until then this
+paragraph — not the `passed` flags in the JSON — is the accurate statement of
+gate status.
+
+*Deployment.* `4d2b1f2` was deployed on 2026-08-07 and verified:
+`HIPPO_BUILD_COMMIT` matches repo HEAD, `hippo doctor` reports no FAIL/WARN,
+and the deployed copy (not the repo checkout) was read back directly for
+`FIXED_TIMEOUT_SECONDS=600`, `FIXED_SESSION_DEADLINE_SECONDS=1200` and cg
+`eligible(chunk_count=7) -> (False, "session_size")`. A complete deployment has
+**four independent sync points**, only the first of which `pipx install
+--force` covers: (1) the package itself; (2) the live config
+`~/.config/paulsha-hippo/config.yaml` — `external_agents.deadline_seconds` must
+equal `FIXED_SESSION_DEADLINE_SECONDS` exactly or config load fails closed on
+*every* cycle, and cg's `max_session_chunks` from #112 is not refreshed from the
+template because user values win; (3) the local-vllm harness at
+`~/.local/bin/local-vllm`, a symlink to a standalone copy of
+`contrib/local-harness/harness.py` that ships outside the wheel — it still
+carried the pre-#110 version until this deployment; (4) `hippo install hooks`,
+because hook scripts also carry the build commit and are not updated by `pipx
+install` (missing this surfaces only as `hippo doctor`'s
+`FAIL hooks build mismatch`).
+
+*AR-11 soak restarted.* The build change opened a new window at
+`2026-08-07T05:00:05Z`; that first cycle was `ok` with static regression
+markers and zero ingress, i.e. neutral. **Soak is 0/3 for this build.** The
+3/3 that build `1299fa1` completed in the `2026-08-04T03:00Z` →
+`2026-08-06T01:00Z` window is **not transferable** — same rule that voided the
+`76edb93` attestation. `~/.local/share/hippo-ops/soak-check.py` reproduces the
+window analysis from the append-only ledger at any time.
+
+*Remaining work, in order.* (1) accumulate 3 qualifying cycles on `4d2b1f2`;
+(2) re-run AR-05 — the codex quota that blocked it reset on 2026-08-05, so it
+is now runnable; (3) rebind the matrix to the shipping candidate and re-run the
+artifact-bound gates (AR-01 test counts have moved, AR-02/AR-03 need a wheel
+rebuilt from that commit); (4) AR-14 GitHub Release and assets. Note that the
+`VERSION` bump commit itself changes the candidate again — if that commit is
+deployed, the soak window reopens, so either bump without redeploying or budget
+for a fresh soak.
+
+*Watch item.* `02:00Z` has been a recurring `partial` slot (2026-07-31, 08-03,
+08-04, 08-06 — each one `parked` +1, every time the whole fallback chain
+exhausted). #110, #112 and #121 all target that failure shape and are now
+deployed for the first time; whether `02:00Z` stops parking is the first real
+signal that they worked. Tracked as #119, whose remaining scope is narrowed to
+the tier-1 per-call timeout sub-shape.
+
+---
+
+**History below.** The matrix was rebound to the 0.1.2 candidate at commit
 `f5df39496de17c8b4fb3aa88dfa698b7c547aaf4` (main HEAD, chosen by the
-maintainer on 2026-07-30). `wheel_sha256` is `null` because the 0.1.2 wheel
-has not been built yet.
+maintainer on 2026-07-30). *As of that rebind* `wheel_sha256` was `null`
+because the 0.1.2 wheel had not been built yet; the 2026-07-31 attestation pass
+below then built it. See the current-state block above for what supersedes
+this.
 
 **Rebind history.** The candidate was previously
 `2f3dc981e6c283fbe3f85ccc9fbd7cb79c8ae809`; eight merges landed after it
