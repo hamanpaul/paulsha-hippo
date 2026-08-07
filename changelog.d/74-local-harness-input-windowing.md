@@ -1,0 +1,12 @@
+---
+type: fix
+---
+- 修 issue #74：`contrib/local-harness/harness.py` 的 map-reduce 只切輸出不切輸入——pass 2 每個 concept 的 write 都把整份 session payload（實測約 100KB）重送一遍，只在指令文字裡「告訴」模型該用哪些 fragment index。`maxItems: 8` 的 concept 上限意味著最壞情況 9 次呼叫 × 100KB ≈ 900KB 的輸入處理量，即 #74 量到的 203s／357s／400s 的來源。
+- 新增 `window_prompt()`：以 pass 1 已算出的 `fragment_indices`（`ENUM_SCHEMA` 的**必填**欄位，`minItems: 1`）content-addressed 地裁切輸入，只送該 concept 實際引用的 fragments。切分依據是 hippo 既有的 prompt 結構（`paulsha_hippo/atomizer/prompt.py` 對每個 fragment 輸出 `[fragment N]` 標記），**不需要改動 hippo 端的 prompt 契約**。
+- 預設附帶 ±1 鄰域（`NEIGHBOUR_FRAGMENTS = 1`）：決策往往落在觸發它的指令的下一個 turn，補鄰域是廉價的脈絡保險；設 0 即停用。
+- **fail-safe 優先於省時**：結構無法辨識（找不到 fragments／Output 標頭）、`fragment_indices` 為空、或裁切後零 fragment 命中時，一律回退送出**完整原始 prompt**。失去 skill contract 的殘缺 prompt，或沒有任何 fragment 的 prompt，都比慢但完整的呼叫糟糕得多。split fragment 的每個 part 都隨其 index 一起保留。
+- pass 2 組訊息的邏輯抽成 `build_write_message()` 並加測試守護：切輸入若被改回整份重送，會是一個 token 的隱形變更，抽出來才測得到「有沒有真的接上」，而不只測「切法對不對」。
+- 修正兩處已失真的註解：`REQUEST_TIMEOUT_S` 原註明「keep under hippo external_agents.deadline_seconds=300」，但真正約束單次呼叫的是 `agent_profiles.FIXED_TIMEOUT_SECONDS`（chain 全鏈預算不決定單次呼叫能跑多久）；270 同時低於舊的 300 與 #119 提高後的 600，且切輸入才是讓 per-write 耗時下降的主因，此上限已非綁定約束。模組 docstring 同步。
+- 新增 `tests/test_local_harness_windowing.py`（9 項）。`contrib/**` 不在 `code_paths` 內、原本無任何測試覆蓋，但它是 tier-3 保底層的實作，切輸入的正確性直接決定大 session 會不會 park，故納入 repo 測試套件（以 importlib 由檔案路徑載入；模組無 import 副作用）。
+- **未經 live 驗證**：本次無法對地端引擎實跑——`http://192.168.199.199:8001/v1` 於撰寫時無回應（連線 timeout）。因此耗時改善為依 payload 縮減幅度推導，**非實測值**；部署後應以實際 session 重新量測 per-write 耗時與 `truncated at max_tokens` 發生率，再回填證據。
+- **部署**：`~/.local/bin/local-vllm` 是本檔的獨立副本（撰寫時與 repo 版 byte-identical），不隨 wheel 發布。本修復要生效必須另外把 `contrib/local-harness/harness.py` 複製過去，`pipx install --force` 不會涵蓋它。

@@ -20,8 +20,10 @@ Quality levers (方案 1/3 of issue #55):
     - guided decoding: response_format json_schema = hippo canonical schema v1
     - reasoning control mapped from {EFFORT}: low -> thinking off,
       medium -> reasoning_effort low, high -> model default
-    - temperature 0 + fixed seed, bounded max_tokens, request timeout < hippo
-      deadline_seconds (300)
+    - temperature 0 + fixed seed, bounded max_tokens, request timeout under
+      hippo's per-call cap (agent_profiles.FIXED_TIMEOUT_SECONDS)
+    - pass 2 sends only the fragments a concept actually cites, not the whole
+      session payload (issue #74)
     - one retry-with-repair round on canonical-validation failure; then fail
       closed (non-zero exit, empty stdout) so hippo parks the session
 """
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -37,7 +40,13 @@ from pathlib import Path
 HARNESS_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = HARNESS_DIR / "schema-v1.json"
 DEFAULT_ENV_FILE = "~/.config/paulsha-hippo/local-vllm.env"
-REQUEST_TIMEOUT_S = 270  # keep under hippo external_agents.deadline_seconds=300
+# Must stay under hippo's *per-call* cap (agent_profiles.FIXED_TIMEOUT_SECONDS),
+# not the chain-wide `external_agents.deadline_seconds` the old comment named --
+# a single write that outlives the per-call cap is killed by hippo regardless of
+# how much chain budget remains. 270 sits under both the old 300 and the 600 that
+# issue #119 raised it to; issue #74's input windowing is what brings per-write
+# time down, so this ceiling is no longer the binding constraint.
+REQUEST_TIMEOUT_S = 270
 SEED = 20260723
 
 ARTIFACT_KINDS = {
@@ -252,6 +261,83 @@ Return ONLY the JSON object for this one slice.
 """
 
 
+# ---- content-addressed input windowing (issue #74) -----------------------
+# Pass 1 already computes, per concept, exactly which fragments support it
+# (`fragment_indices` is a *required*, minItems:1 field of ENUM_SCHEMA). Before
+# this, pass 2 threw that away and re-sent the entire prompt for every concept,
+# merely *naming* the indices in the instruction text: with `maxItems: 8` the
+# worst case was 9 calls x the full payload (~100KB measured), which is where
+# the 200-400s per-write times came from. Since the prompt labels every
+# fragment (`paulsha_hippo/atomizer/prompt.py` emits `[fragment N]`), the input
+# can be cut here without any change to hippo's prompt contract.
+FRAGMENTS_HEADER = "## Session fragments to atomize"
+OUTPUT_HEADER = "## Output"
+_FRAGMENT_LABEL_RE = re.compile(r"^\[fragment (\d+)(?: part \d+/\d+)?\]$")
+# Adjacent fragments are cheap insurance for distillation context (a decision
+# often reads one turn after the command that caused it). 0 disables it.
+NEIGHBOUR_FRAGMENTS = 1
+
+
+def window_prompt(prompt: str, indices, *, neighbours: int = NEIGHBOUR_FRAGMENTS) -> str:
+    """Return `prompt` carrying only the fragments that support `indices`.
+
+    Falls back to the unmodified prompt whenever the structure is not
+    recognisable or the selection would be empty: a partial prompt that lost
+    its skill contract, or one with no fragments at all, is far worse than a
+    slow complete one. Every part of a split fragment travels with its index.
+    """
+    wanted = {int(i) for i in indices if isinstance(i, (int, float)) or str(i).isdigit()}
+    if not wanted:
+        return prompt
+    if neighbours > 0:
+        wanted |= {i + offset for i in set(wanted)
+                   for offset in range(-neighbours, neighbours + 1)}
+
+    head_at = prompt.find(FRAGMENTS_HEADER)
+    if head_at < 0:
+        return prompt
+    body_at = head_at + len(FRAGMENTS_HEADER)
+    tail_at = prompt.find(OUTPUT_HEADER, body_at)
+    if tail_at < 0:
+        return prompt
+
+    preamble, fragments_text, trailer = (
+        prompt[:body_at], prompt[body_at:tail_at], prompt[tail_at:],
+    )
+
+    kept: list[str] = []
+    current_index: "int | None" = None
+    for line in fragments_text.splitlines():
+        label = _FRAGMENT_LABEL_RE.match(line.strip())
+        if label is not None:
+            current_index = int(label.group(1))
+        if current_index is not None and current_index in wanted:
+            kept.append(line)
+    if not kept:
+        return prompt
+
+    return preamble + "\n" + "\n".join(kept).strip("\n") + "\n\n" + trailer
+
+
+def build_write_message(prompt: str, concept: dict, siblings: list) -> str:
+    """Assemble the pass-2 user message for one concept.
+
+    Extracted so the windowing is covered by a test rather than living inline
+    in `main()`: reverting to the whole-payload form would otherwise be an
+    invisible one-token change (issue #74).
+    """
+    return (
+        WRITE_INSTRUCTION.format(
+            title=concept["title"],
+            kind=concept["artifact_kind"],
+            indices=concept["fragment_indices"],
+            siblings=", ".join(siblings),
+        )
+        + "\n\n"
+        + window_prompt(prompt, concept["fragment_indices"])
+    )
+
+
 def guided(payload: dict, name: str, schema: dict) -> dict:
     out = dict(payload)
     out["response_format"] = {
@@ -417,17 +503,7 @@ def main() -> None:
         write_payload = dict(base_payload)
         write_payload.update(thinking_off)
         write_payload["messages"] = [
-            {
-                "role": "user",
-                "content": WRITE_INSTRUCTION.format(
-                    title=concept["title"],
-                    kind=concept["artifact_kind"],
-                    indices=concept["fragment_indices"],
-                    siblings=", ".join(siblings),
-                )
-                + "\n\n"
-                + prompt,
-            }
+            {"role": "user", "content": build_write_message(prompt, concept, siblings)}
         ]
         item = request_json(
             base_url, api_key,
