@@ -8,7 +8,10 @@
 ## [Unreleased]
 
 ### Changed
-- 0.1.2 的 post-tag 發版證據（本身不含於 `v0.1.2` tag，故記於此而非上面已定稿的 `[0.1.2]` 段）：`reports/verify/release-readiness-matrix.json` 由 `f5df394` 重綁至 candidate `ddeba3a3`（wheel `919d685d…`），依 `bind_candidate()` 漂移語意作廢全部既有 `passed` 後逐 gate 重新 attest，**16/16 passed**；`reports/verify/release-0.1.2-closeout.md` 新增追加批次段，涵蓋 `f5df394..ddeba3a3` 期間關閉的 10 個 issue，closing PR 的 merge commit 逐筆以 `git merge-base --is-ancestor` 驗證為 candidate 祖先。
+- 0.1.2 的 post-tag 發版證據（本身不含於 `v0.1.2` tag，故記於此而非下面已定稿的 `[0.1.2]` 段）：`reports/verify/release-readiness-matrix.json` 由 `f5df394` 重綁至 candidate `ddeba3a3`（wheel `919d685d…`），依 `bind_candidate()` 漂移語意作廢全部既有 `passed` 後逐 gate 重新 attest，**16/16 passed**；`reports/verify/release-0.1.2-closeout.md` 新增追加批次段，涵蓋 `f5df394..ddeba3a3` 期間關閉的 10 個 issue，closing PR 的 merge commit 逐筆以 `git merge-base --is-ancestor` 驗證為 candidate 祖先。
+
+### Fixed
+- lifecycle 詞彙表改為記憶平面與治理平面的聯集，修復與 `paulsha-cortex` 的跨平面對齊 FAIL：`lib/lifecycle/schema.PHASES` 新增 cortex 的首階段 `claim`，成為 `("claim", "research", "define", "plan", "build", "verify", "review", "ship")`。`claim`（cortex 的 work item 認領）與 `research`（本平面記憶 slice 的調查階段）語意不同、不可互相改名，故採聯集——既有 235 個 `phase: research` slice 零遷移即維持合法。`PHASES` 在本平面只做成員資格檢查與 gates 產生、不決定順序，擴充不改變既有行為，`current_phase` 預設仍為 `research`。三套套件之間維持零 import 依賴，相等性續由 paulshaclaw 的消費端對齊測試守。**本項於 0.1.2 凍結後才落地，不含於 `v0.1.2`，隨 0.1.3 發布。**
 
 ## [0.1.2] - 2026-08-08
 

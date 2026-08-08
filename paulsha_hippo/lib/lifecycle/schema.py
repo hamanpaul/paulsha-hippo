@@ -7,7 +7,17 @@ import json
 import re
 
 
+# 記憶平面與治理平面**共用的 lifecycle 詞彙聯集**。本表只做成員資格檢查
+# （`schema.py` 的 phase 驗證、`events.py` 的 transition 驗證、`template.py`
+# 的 gates 產生），不決定順序，因此收錄兩平面各自的首階段：
+#   - `research`：本平面記憶 slice 的調查階段（`template.py` 的 current_phase 預設）
+#   - `claim`   ：paulsha-cortex 的 work item 認領（manager 決定性執行）
+# 兩者語意不同、不可互相改名。共用是靠「各自持有相同常數 + 消費端對齊測試」
+# 達成，三套套件之間不得建立 import 依賴（見 paulshaclaw
+# tests/test_cortex_alignment.py）。異動此表必須同步 paulsha-cortex 的
+# `persona/contract.PHASES`，否則對齊測試會 FAIL。
 PHASES = (
+    "claim",
     "research",
     "define",
     "plan",
