@@ -147,7 +147,7 @@ def test_installed_cli_runs_outside_checkout(installed_hippo: tuple[Path, Path],
         text=True,
     )
     payload = json.loads(result.stdout)
-    assert payload["version"] == "0.1.1"
+    assert payload["version"] == "0.1.2"
     assert payload["build_commit"] != "unknown"
     assert isinstance(payload["source_dirty"], bool)
     assert payload["install_root"]

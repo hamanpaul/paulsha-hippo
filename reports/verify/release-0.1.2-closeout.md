@@ -59,3 +59,37 @@
   - OpenSpec archive 對照：`ls openspec/changes/archive/` 全量列出後，逐 issue 以 `grep -rl "#<N>\b" openspec/` 交叉核對是否有專屬或被提及的 change 目錄；同時列出 `openspec/changes/`（非 archive）確認哪些 change 仍在 active 狀態未歸檔。
   - `changelog.d/` 目錄全量 `ls` 作為輔助佐證（非必要判準，僅用於交叉核對 R-09 碎片是否存在）。
   - 任何欄位無法由上述指令查得或需要人工推斷之處，均已於表格內以粗體註明「缺」或於文字說明中明列判斷依據；未見無法查得而未標註的欄位。
+
+---
+
+# 追加批次 closeout（candidate `ddeba3a3`，2026-08-08）
+
+> 上方報告的範圍是 candidate `f5df394`。matrix 於 0.1.2 發版時重綁至 `ddeba3a3`，其間又有 16 個 commit 落地並關閉 10 個 issue。本段補齊該區間，判準與上方一致：closing PR 的 merge commit 必須以 `git merge-base --is-ancestor <commit> ddeba3a3` 驗證為 candidate 祖先。
+
+## 追加總表（`f5df394..ddeba3a3` 期間關閉）
+
+| Issue | 一句話問題 | Closing PR | Merge commit | 祖先驗證 | OpenSpec archive | 驗收證據 |
+|---|---|---|---|---|---|---|
+| [#89](https://github.com/hamanpaul/paulsha-hippo/issues/89) | `FIXED_MAX_AGENT_CALLS=6` 未隨 #85 預算縮放，7+ chunk session 時間充足仍必然 park | **#100** | `14b985df…` | ✓ | 無獨立 change（沿用 #80 spec delta） | **已附**——全套 1709 passed, 4 skipped；9 個新測試含 7/8/13/21-chunk 邊界與顯式覆寫契約；紅綠雙向驗證（先革除修復確認 4 個縮放測試變紅再恢復）；reviewer 兩輪，v1 抓 1 BLOCKING（cap 12 在 ≥13 chunks 造成新的必 park 斷崖）後 v2 APPROVE |
+| [#101](https://github.com/hamanpaul/paulsha-hippo/issues/101) | LLM 產出的數字 tag（YAML int）通過 publication 驗證卻被 MOC index 拒絕——sticky partial 第五例 | **#103** | `63444577…` | ✓ | N/A | **已附**——全套 1722 passed, 4 skipped；13 個新測試 TDD 先紅後綠，含 YAML 往返與真實 MOC index/census 驗證鏈；policy_check 零 failure |
+| [#102](https://github.com/hamanpaul/paulsha-hippo/issues/102) | `_scalar()` 對數字樣字串不加引號，`update()` 往返把 `"264"` 還原成 YAML int | **#104** | `1299fa1c…` | ✓ | N/A | **已附**——全套 1726 passed, 4 skipped, 184 subtests；TDD 先紅 22 案後綠，含 write→read→write→read 往返與生產劇本整合測試；實作過程誤傷 datetime 往返並自抓自修（見測試序） |
+| [#107](https://github.com/hamanpaul/paulsha-hippo/issues/107) | entity hub 同步納入 MOC pipeline——mentions 物化斷鏈的常態維護 | **#108** | `111dff97…` | ✓ | N/A | **已附**——新增 14 例，全套 1739 passed + 184 subtests；對抗式審查 3 視角修正 5 項（錨點段落 append-once 凍結、空反向連結殘留、pass 2 外來檔防護缺席、`_yaml_quote` 未跳脫 `\n`、CLI apply 失敗 exit 0） |
+| [#105](https://github.com/hamanpaul/paulsha-hippo/issues/105) | proposal 帶未知欄位（如 `tags2`）即整份 LLM 回應判死，無 soft-repair | **#113** | `7e94f67f…` | ✓ | `issue-105-proposal-soft-repair` — **未歸檔** | **已附**——全套 1742 passed, 4 skipped, 188 subtests（96.75s）；openspec strict 15 passed；hard violation 判死語意一條未鬆（缺 title／非法 artifact_kind／空 body／空 source_fragment_indices 仍整份拋 `LlmOutputError`） |
+| [#106](https://github.com/hamanpaul/paulsha-hippo/issues/106) | 慢速 tier-1 timeout 吃掉大半 session 鏈預算，後段 profile 連嘗試機會都沒有 | **#114** | `3cb95f8b…` | ✓ | `issue-106-router-skipped-profile-provenance` — **未歸檔** | **已附**——全套 1746 passed, 4 skipped, 184 subtests（97.93s）；openspec strict 15 passed；policy_check 0 fail／1 warn（R-22 26 筆陳年懸空，非本 PR 引入） |
+| [#109](https://github.com/hamanpaul/paulsha-hippo/issues/109) | sticky partial 第六例——MOC index 舊資料裸數字 tag 未回填 | **#115** | `61f56c86…` | ✓ | `issue-109-normalize-tags-migration` — **未歸檔** | **已附**——全套 1748 passed, 4 skipped, 184 subtests（95.01s）；openspec strict 15 passed；安全邊界以測試鎖住（無條件過濾 `memory_layer != "knowledge"`，`--memory-root` 打錯不會改寫 inbox/episodic） |
+| [#98](https://github.com/hamanpaul/paulsha-hippo/issues/98) | `hippo search` 對現行 retrieval.db 報 `no such column: build` | **#111** | `52d6b937…` | ✓ | `issue-98-search-retrieval-schema` — **未歸檔** | **已附**——全套 1741 passed, 4 skipped, 184 subtests；openspec strict 15 passed；新測試正向 pin `build: f5df394` sanitize 後仍真的命中目標 slice（防 `return []` 式退化實作）。timeline 另有一個 null closer，即該 issue 曾被手動關閉一次後由 PR 正式關閉 |
+| [#119](https://github.com/hamanpaul/paulsha-hippo/issues/119) | dream 每 1–2 天一輪 partial——降級鏈全耗盡致 parked 累積，反覆重置 AR-11 soak 窗口 | **#121** | `4d2b1f23…` | ✓ | N/A | **已附**——`pytest tests/ -q` → 1728 passed, 4 skipped, 184 subtests；兩個新測試在「只提高單次上限、未動下限」時實測失敗過；`_write_profile()` 與 `stage2_integration_check.sh` 的硬編碼 300 改為引用 `FIXED_TIMEOUT_SECONDS`，常數一動即整批失敗（本次實際被它們擋下） |
+| [#74](https://github.com/hamanpaul/paulsha-hippo/issues/74) | map-reduce 只切輸出不切輸入，per-concept write 重送全量 payload | **無 closing PR**（code 由 PR **#110** 交付，issue 由作者手動關閉） | PR#110：`da12027…` | ✓ | `issue-74-local-harness-input-slicing` — **未歸檔** | **已附**——全套 1752 passed, 4 skipped, 184 subtests；新增 `contrib/local-harness/tests/test_harness_slicing.py` 12 passed；CI `tests.yml` 納入 contrib/local-harness 測試並由 `test_ci_workflow_contract.py` 鎖住契約。**誠實註記**：`~/.local/bin/local-vllm` 是 harness 的獨立部署副本、不隨 wheel 發布，本修復要靠手動 `cp` 才會生效（已於 2026-08-07 部署 `4d2b1f2` 時同步） |
+
+## 追加批次的例外與 follow-up
+
+- **OpenSpec 未歸檔擴大為 9 個 active change**：`issue-41`、`issue-64`、`issue-80`（上一批次已列）＋本批次的 `issue-74`、`issue-98`、`issue-99`、`issue-105`、`issue-106`、`issue-109`。其中 `issue-99` 對應的 issue **仍為 OPEN**（PR #112 只交付 fail-fast 半邊，大 payload 根因量測未做），故其 change 留在 active 是正確狀態；其餘 8 個屬「issue 已關但 change 未歸檔」，維持上一批次的處置——不補勾歷史、不強行歸檔，列為 pre-tag follow-up 由維護者裁定。全部 20 個 openspec item 於 candidate 上 `openspec validate --all --strict` 皆通過，未歸檔不影響 strict 有效性。
+- **#99 未關閉但其 PR #112 在快照內**：PR #112（`d4b8d3b…`）交付 cg profile 的 `max_session_chunks=6` fail-fast，issue 保留給大 payload 根因量測，屬刻意部分交付，非漏關。
+- **#116（cortex work items 註冊）與 #124（交接文件）無對應 issue**：治理／文件 commit，不在 issue closeout 範圍。
+- **candidate 排除 #126**：`96513bc`（lifecycle 詞彙表聯集）於凍結後落地且變更 `paulsha_hippo/lib/lifecycle/schema.py`，不在本 candidate 內，其 issue closeout 歸 0.1.3。
+
+## 追加批次的資料截止時間戳與產生方式
+
+- 資料查詢時間：2026-08-08T05:26:13Z（UTC）。
+- Repo 快照：非巢狀 sibling worktree `~/prj_pri/hippo-release-0-1-2`，`HEAD` 為 `ddeba3a3fc3aa5cceb500adfab158d76f69ab9ef`，`VERSION` 為 `0.1.2`，`git status` clean。
+- 產生方式：關閉清單以 `gh issue list --state closed` 依 `closedAt >= 2026-07-31` 篩選；closing PR 與 merge commit 以單次 `gh api graphql` 批次查詢 10 個 issue 的 `timelineItems(itemTypes:[CLOSED_EVENT])` 取得；祖先關係逐筆以 `git merge-base --is-ancestor <merge> HEAD` 在上述 worktree 驗證；驗收證據引自各 PR body 的「驗證」章節。

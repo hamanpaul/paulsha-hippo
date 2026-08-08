@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         commit = result.stdout.strip() if result.returncode == 0 else "unknown"
     manifest = {
         "schema_version": "1",
-        "version": os.environ.get("HIPPO_VERSION", "0.1.1"),
+        "version": os.environ.get("HIPPO_VERSION", "0.1.2"),
         "commit": commit or "unknown",
         "wheel": wheel.name,
         "wheel_sha256": _sha256(wheel),

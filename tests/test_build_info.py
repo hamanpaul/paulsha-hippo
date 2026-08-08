@@ -12,11 +12,11 @@ def test_build_identity_includes_version_and_explicit_build_commit(monkeypatch, 
     monkeypatch.setenv("HIPPO_BUILD_COMMIT", "candidate-commit")
     identity = build_info.build_identity(package_root=tmp_path / "site-packages" / "paulsha_hippo")
 
-    assert identity["version"] == __version__ == "0.1.1"
+    assert identity["version"] == __version__ == "0.1.2"
     assert identity["build_commit"] == "candidate-commit"
     assert identity["source_dirty"] is False
     assert identity["package_root"].endswith("site-packages/paulsha_hippo")
-    assert json.loads(build_info.version_json(package_root=tmp_path))["version"] == "0.1.1"
+    assert json.loads(build_info.version_json(package_root=tmp_path))["version"] == "0.1.2"
 
 
 def test_build_identity_reads_embedded_wheel_commit(monkeypatch, tmp_path):
@@ -25,7 +25,7 @@ def test_build_identity_reads_embedded_wheel_commit(monkeypatch, tmp_path):
     package.mkdir(parents=True)
     (package / "_build.json").write_text(
         json.dumps(
-            {"schema_version": "1", "version": "0.1.1", "build_commit": "abc123"}
+            {"schema_version": "1", "version": "0.1.2", "build_commit": "abc123"}
         ),
         encoding="utf-8",
     )
