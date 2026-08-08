@@ -938,7 +938,7 @@ class InstallServiceTests(unittest.TestCase):
             unit = Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.service"
             body = unit.read_text(encoding="utf-8")
             self.assertNotIn("paulsha-memory-dream", body)
-            self.assertIn("Environment=HIPPO_BUILD_VERSION=0.1.1", body)
+            self.assertIn("Environment=HIPPO_BUILD_VERSION=0.1.2", body)
             self.assertIn("Environment=HIPPO_BUILD_COMMIT=", body)
             self.assertTrue((Path(tmp) / ".config" / "systemd" / "user" / "paulsha-hippo-dream.timer").is_file())
 

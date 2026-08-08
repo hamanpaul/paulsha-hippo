@@ -9,16 +9,48 @@ down is kept as historical record of that release's readiness process.
 
 ## 0.1.2 release candidate readiness
 
-**Current state (2026-08-07) — release freeze in effect; matrix binding is
-knowingly stale; AR-11 soak restarted at 0/3.** Everything below this block is
-history, kept for the rebind/attestation trail. Read this block first: several
-statements further down (notably "`wheel_sha256` is `null`" and the 13-of-16
-attestation) were true when written and are no longer.
+**Current state (2026-08-08) — AR-11 soak passed 3/3, AR-05 passed, candidate
+cut for release.** Everything below this block is history, kept for the
+rebind/attestation trail. Read this block first: several statements further
+down (notably "`wheel_sha256` is `null`", the 13-of-16 attestation, and the
+2026-08-07 "soak 0/3" state) were true when written and are no longer.
 
-*Freeze.* `main` is frozen at `4d2b1f230a0160d6fe9d9d453bd47235ec9b5f93`
-(#121). No further `code_paths` changes land until 0.1.2 ships; subsequent
-fixes go to 0.1.3. Open at freeze time and deferred: #96, #117, #118 (0.1.3),
-plus #99 which stays open for the outstanding copilot large-payload root-cause
+*What "freeze" freezes (resolves #125, item 1).* The freeze target is the
+**code state**, not `main`'s HEAD pointer. `.project-policy.yml` puts
+`**/*.md` inside `code_paths`, so any release bookkeeping commit — a changelog
+mirror, a handoff doc, this paragraph — is literally a `code_paths` change; the
+previous wording ("no further `code_paths` changes land until 0.1.2 ships")
+was falsified by the very commit that wrote it (#124). Stated correctly: after
+the freeze commit, only commits whose diff touches no runtime code are
+accepted; behavioural fixes go to 0.1.3.
+
+*Candidate ⟷ deployed build (resolves #125, item 2).* Evidence gathered on a
+deployed build applies to a candidate commit when
+`git diff --name-only <deployed>..<candidate>` contains **only** paths that
+cannot change runtime behaviour, namely: `CHANGELOG.md`, `changelog.d/**`,
+`docs/**`, `reports/**`, plus — for a release commit — the version-identity
+strings (`VERSION`, `pyproject.toml`'s `version`, `__version__` in
+`paulsha_hippo/` and `paulsha_hippo/importer/`, the manifest default in
+`scripts/build_release_artifact.py`) and the tests that assert those literals.
+Any other path under `paulsha_hippo/**` or `scripts/**` is runtime code: the
+evidence does not carry, and the candidate must be deployed and re-soaked. The
+test is mechanical — run the `git diff` and read the file list — so the
+`VERSION` bump needs no fresh judgement call each release. This is why the
+0.1.2 candidate is cut from `38ee2f2` rather than from `main`: see below.
+
+*Freeze breach and what it cost.* The freeze commit is
+`4d2b1f230a0160d6fe9d9d453bd47235ec9b5f93` (#121), and `38ee2f2` (#124) sits on
+top of it with a CHANGELOG/changelog.d/docs-only diff — same code state, so
+either commit is an equally valid base. But `96513bc` (#126, lifecycle
+vocabulary union) then landed on `main` **after** the freeze and changed
+`paulsha_hippo/lib/lifecycle/schema.py`. Under the criterion above that is
+runtime code, so `main` is no longer a valid 0.1.2 candidate. Rather than
+redeploy and spend another soak window on it, the 0.1.2 candidate branches
+from `38ee2f2` and **excludes #126**, which ships in 0.1.3 instead. This costs
+nothing downstream: paulshaclaw pins hippo by commit SHA
+(`paulsha-hippo @ git+…@96513bc…`), not by release version, so it already has
+the fix. Open at freeze time and deferred: #96, #117, #118 (0.1.3), plus #99
+which stays open for the outstanding copilot large-payload root-cause
 measurement (its fail-fast half shipped in #112).
 
 *The matrix binding is stale, deliberately.*
@@ -30,11 +62,15 @@ commits have landed since** (#95, #97, #100, #103, #104, #108, #111, #112,
 rule, every `passed` gate in that file — including the 13-of-16 attestation
 recorded below — is therefore **zombie evidence attesting a code state that is
 no longer the candidate**, and the wheel hash is the wheel of a superseded
-commit. The rebind is deliberately deferred rather than done now: rebinding
-drops all evidence and forces a full re-attestation pass, which is only worth
-paying once, after AR-11 soak completes on the deployed build. Until then this
-paragraph — not the `passed` flags in the JSON — is the accurate statement of
-gate status.
+commit. The rebind was deliberately deferred rather than done earlier:
+rebinding drops all evidence and forces a full re-attestation pass, which is
+only worth paying once, after AR-11 soak completes on the deployed build. That
+condition is now met, so the rebind is paid in this release — but it lands in
+the **post-tag evidence commit**, not in this candidate commit, because the
+matrix must record the candidate's own SHA and the hash of the wheel built from
+it, neither of which exists until the candidate is committed. Until that
+evidence commit lands, this paragraph — not the `passed` flags in the JSON — is
+the accurate statement of gate status.
 
 *Deployment.* `4d2b1f2` was deployed on 2026-08-07 and verified:
 `HIPPO_BUILD_COMMIT` matches repo HEAD, `hippo doctor` reports no FAIL/WARN,
@@ -54,29 +90,47 @@ because hook scripts also carry the build commit and are not updated by `pipx
 install` (missing this surfaces only as `hippo doctor`'s
 `FAIL hooks build mismatch`).
 
-*AR-11 soak restarted.* The build change opened a new window at
-`2026-08-07T05:00:05Z`; that first cycle was `ok` with static regression
-markers and zero ingress, i.e. neutral. **Soak is 0/3 for this build.** The
-3/3 that build `1299fa1` completed in the `2026-08-04T03:00Z` →
-`2026-08-06T01:00Z` window is **not transferable** — same rule that voided the
-`76edb93` attestation. `~/.local/share/hippo-ops/soak-check.py` reproduces the
-window analysis from the append-only ledger at any time.
+*AR-11 soak — passed 3/3 on `4d2b1f2`.* The deployment opened a new window at
+`2026-08-07T05:00:05Z` (the 3/3 that build `1299fa1` had completed in the
+`2026-08-04T03:00Z` → `2026-08-06T01:00Z` window is **not transferable** — same
+rule that voided the `76edb93` attestation, so this window genuinely started at
+0/3). It reached 3/3 at `2026-08-08T04:00:30Z`, with **no window break in
+between**: all 24 executed cycles since the build change reported `ok` and no
+regression marker grew. The three qualifying cycles:
 
-*Remaining work, in order.* (1) accumulate 3 qualifying cycles on `4d2b1f2`;
-(2) re-run AR-05 — the codex quota that blocked it reset on 2026-08-05, so it
-is now runnable; (3) rebind the matrix to the shipping candidate and re-run the
-artifact-bound gates (AR-01 test counts have moved, AR-02/AR-03 need a wheel
-rebuilt from that commit); (4) AR-14 GitHub Release and assets. Note that the
-`VERSION` bump commit itself changes the candidate again — if that commit is
-deployed, the soak window reopens, so either bump without redeploying or budget
-for a fresh soak.
+| cycle | `split_sessions` | `slices` |
+|---|---|---|
+| `2026-08-07T08:00:05Z` | 1 | 22 |
+| `2026-08-07T12:00:06Z` | 1 | 5 |
+| `2026-08-08T04:00:30Z` | 1 | 23 |
+
+`~/.local/share/hippo-ops/soak-check.py` reproduces this window analysis from
+the append-only ledger at any time and is the rerun command of record.
+
+*AR-05 — passed.* Re-probed on 2026-08-08 against the deployed `4d2b1f2` copy.
+`hippo doctor --probe-profiles`: both tier-1 profiles green (`claude` and
+`codex` — the codex provider quota that blocked this gate on 2026-07-31 reset on
+2026-08-05), `cg` (tier-2) green, `local-vllm` (tier-3) green, `agy`
+`ineligible=task_class` and `claude-gem` `ineligible=disabled`, both by design.
+`hippo doctor --probe-live`: the selected distiller backend (`claude`) smoke
+probe exits 0 with a single JSON response. Two honest notes. First, the tier-3
+probe FAILed on the first attempt that day (`60s` timeout, fail-closed) purely
+because the operator-side vLLM host `192.168.199.199` was off the network
+(`ping` 100% loss); it passed on retry once the host was back, so the FAIL was
+an environment condition, never a candidate defect. Second, the `codex-headless`
+*backend preset* probe reports `rc=127: /usr/bin/env: 'node': No such file or
+directory` — that is the service-effective `PATH` for an unselected distiller
+preset, not the `codex` external-agent profile (which is green) and not the
+selected distiller backend; recorded here rather than omitted.
 
 *Watch item.* `02:00Z` has been a recurring `partial` slot (2026-07-31, 08-03,
 08-04, 08-06 — each one `parked` +1, every time the whole fallback chain
-exhausted). #110, #112 and #121 all target that failure shape and are now
-deployed for the first time; whether `02:00Z` stops parking is the first real
-signal that they worked. Tracked as #119, whose remaining scope is narrowed to
-the tier-1 per-call timeout sub-shape.
+exhausted). #110, #112 and #121 all target that failure shape. The first
+`02:00Z` cycle on the new build — `2026-08-08T02:00:30Z` — came back `ok` with
+`parked` static at 14. That is one clean data point, not a proof. #119 was
+closed by #121 on 2026-08-07; if `02:00Z` parks again on this build, reopen it
+rather than treating the fix as settled. The open issues at release time are
+#96, #99, #117 and #118, all deferred to 0.1.3.
 
 ---
 
