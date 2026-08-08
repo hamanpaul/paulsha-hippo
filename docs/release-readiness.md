@@ -9,11 +9,23 @@ down is kept as historical record of that release's readiness process.
 
 ## 0.1.2 release candidate readiness
 
-**Current state (2026-08-08) — AR-11 soak passed 3/3, AR-05 passed, candidate
-cut for release.** Everything below this block is history, kept for the
-rebind/attestation trail. Read this block first: several statements further
-down (notably "`wheel_sha256` is `null`", the 13-of-16 attestation, and the
-2026-08-07 "soak 0/3" state) were true when written and are no longer.
+**Current state (2026-08-08) — 0.1.2 SHIPPED. All 16 gates passed against
+candidate `ddeba3a3`; `v0.1.2` is tagged and released.** Everything below this
+block is history, kept for the rebind/attestation trail. Read this block first:
+several statements further down (notably "`wheel_sha256` is `null`", the
+13-of-16 attestation, the "binding is stale" paragraph, and the 2026-08-07
+"soak 0/3" state) were true when written and are no longer.
+
+| | |
+|---|---|
+| candidate commit | `ddeba3a3fc3aa5cceb500adfab158d76f69ab9ef` |
+| tag | `v0.1.2` (annotated, dereferences to the candidate) |
+| wheel sha256 | `919d685de88a35fc2dbee54c95c7341edd26737075a8942819d25bb633e857b5` |
+| manifest sha256 | `27da0183f0c14ff7570b8b7921daf643276c34567d95ed9a98352a56d5588728` |
+| gates | 16/16 `passed` |
+
+Per-gate evidence lives in `reports/verify/release-readiness-matrix.json`; the
+batch issue closeout (both batches) in `reports/verify/release-0.1.2-closeout.md`.
 
 *What "freeze" freezes (resolves #125, item 1).* The freeze target is the
 **code state**, not `main`'s HEAD pointer. `.project-policy.yml` puts
@@ -64,13 +76,30 @@ recorded below — is therefore **zombie evidence attesting a code state that is
 no longer the candidate**, and the wheel hash is the wheel of a superseded
 commit. The rebind was deliberately deferred rather than done earlier:
 rebinding drops all evidence and forces a full re-attestation pass, which is
-only worth paying once, after AR-11 soak completes on the deployed build. That
-condition is now met, so the rebind is paid in this release — but it lands in
-the **post-tag evidence commit**, not in this candidate commit, because the
-matrix must record the candidate's own SHA and the hash of the wheel built from
-it, neither of which exists until the candidate is committed. Until that
-evidence commit lands, this paragraph — not the `passed` flags in the JSON — is
-the accurate statement of gate status.
+only worth paying once, after AR-11 soak completes on the deployed build.
+**That bill was paid in this release** — the paragraph above describes the
+outcome; this one is kept only to explain why the JSON sat stale for so long.
+The rebind necessarily lands in a **post-tag evidence commit** rather than in
+the candidate itself, because the matrix records the candidate's own SHA and
+the hash of the wheel built from it, neither of which exists until the
+candidate is committed. That ordering is what the spec prescribes: "Release
+evidence SHALL then be recorded ... in a post-tag metadata commit that does not
+rebuild the artifact."
+
+*What the re-attestation actually cost.* Ten gates could not simply carry over.
+Artifact-bound ones (AR-02/AR-03/AR-14) were rerun against the new wheel by
+definition. For the rest the spec allows "source-only baseline evidence MAY
+remain passed only after applicability is revalidated", so each was checked
+against the actual drift (`f5df394..ddeba3a3` touched `agent_profiles.py`,
+`cli.py`, `tags_migration.py`, `atomizer/{config,llm_output,slice_frontmatter}`,
+`atomizer.yaml`, `moc/{entity_hub,frontmatter_io,runner,search}` and the
+local-harness). AR-04/06/07/09/10/12/13 and IC-01/IC-02 were rerun outright.
+Only one gate leaned on revalidation rather than a fresh run: **AR-08**, whose
+codex and copilot-cli halves had no session in the window — justified by the
+mechanical fact that `paulsha_hippo/hooks/**` is byte-identical across the
+drift, `importer/**` differs only in its version string, and the `cli.py` delta
+is purely two additive subcommands that hooks never call. Its claude-code half
+does have fresh end-to-end evidence on the deployed build.
 
 *Deployment.* `4d2b1f2` was deployed on 2026-08-07 and verified:
 `HIPPO_BUILD_COMMIT` matches repo HEAD, `hippo doctor` reports no FAIL/WARN,
