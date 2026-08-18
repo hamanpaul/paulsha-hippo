@@ -1,0 +1,51 @@
+{
+  "skill_name": "hippo-memory-kpi",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "以 2026-08-18T12:00:00Z 為 now，唯讀整理以下合成 Hippo 快照的 7 天與 30 天 KPI 表。排除目前稽核 session codex:audit。import 最終資料：claude:s1 captured_at=2026-08-17 status=written；claude:s2 2026-08-16 written；claude:s3 2026-08-15 written；claude:s4 2026-08-10 empty-skip；claude:s5 2026-08-01 written；claude:old 2026-07-10 written；codex:audit 2026-08-18 written。processing 最終狀態：s1 promoted accepted_slices=2；s2 no-findings；s3 parked；s5 promoted accepted_slices=1；old promoted；audit promoted。產出 note：s1/A 存在且 schema/checksum 有效、searchable、artifact_kind=research；s1/B 存在但 checksum invalid、not searchable、research；s5/C 存在且 schema/checksum 有效、not searchable、artifact_kind=review。請清楚定義 session→atomic-note 轉化率、atomic note 可讀性與參考價值，並以表格呈現分子、分母、比率及限制。",
+      "expected_output": "A 7/30-day table that separates final processing conversion, machine-valid quality, raw searchability, and adjusted non-review searchability.",
+      "files": [],
+      "expectations": [
+        "7-day conversion reports 3 non-empty sessions, 1 promoted session, and 33.33% promoted/non-empty conversion after excluding codex:audit.",
+        "30-day conversion reports 5 intake sessions, 1 empty-skip, 4 non-empty sessions, 2 promoted sessions, and 50.00% promoted/non-empty conversion.",
+        "Session conversion uses the final processing state promoted as its numerator; current file validity is reported separately and cannot redefine whether the session was promoted.",
+        "No-findings, parked, pending, empty-skip, and accepted-note counts remain visible rather than being silently removed from the report.",
+        "Readability is explicitly labeled a machine-verifiable schema/checksum proxy, not human semantic readability.",
+        "7-day note quality reports 2 produced, 1 valid (50.00%), and 1 searchable (50.00%).",
+        "30-day note quality reports 3 produced, 2 valid (66.67%), and 1 searchable (33.33%), with adjusted searchable reference value 1/1 (100.00%) after separating invalid and review-pool exclusions."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "以 2026-08-18T12:00:00Z 為 now，從下列合成 ledger 計算 7 天與 30 天 Agent 看過率及採用率，排除 processing 最終 state=no-findings 的 claude:s2，並排除目前稽核 session codex:audit。offers：2026-08-17 claude:s1 A/B 10:00；2026-08-17 claude:s2 C 10:00；2026-08-18 codex:audit E 10:00；2026-08-05 codex:s3 D 10:00；2026-07-25 copilot-cli:s4 F 10:00。reads：s1/A 10:01；s1/B 09:59；s2/C 10:01；audit/E 10:01；s3/D 10:01；s4/F 10:01；另有 2026-08-17 claude:sx G 10:01 但從未 offer。applied：s1/A 10:02；s1/B 10:03；s3/D 09:30；s4/F 10:03；sx/G 10:04。所有事件 tool/session/slice 與上述相同。請用 unique atomic notes 為主漏斗，表格列出分子、分母、比率、direct read、寬鬆 applied 與嚴格採用的差異。",
+      "expected_output": "An ordered unique-note usage funnel for both windows, with no-findings/audit exclusions, direct reads, loose offer-applied, strict adoption, and Codex limits.",
+      "files": [],
+      "expectations": [
+        "7-day main funnel uses A and B as the 2 offered-note denominator, counts only A as strictly viewed, and reports 1/2 = 50.00% viewed.",
+        "7-day strict adoption counts only A and reports 1/2 = 50.00%.",
+        "30-day main funnel excludes no-findings C and audit E, uses A/B/D/F as the 4-note denominator, and reports 3/4 = 75.00% viewed.",
+        "30-day strict adoption counts only A and F and reports 2/4 = 50.00%.",
+        "The output explains that B's pre-offer read and G's never-offered read are direct reads, while B/D/G applied events do not prove strict adoption.",
+        "Raw direct reads are reported as 3 unique notes in 7 days and 5 unique notes in 30 days after the stated exclusions.",
+        "Loose offer-then-applied still requires an earlier matching offer, so D and G are invalid loose applications; it is supplemental only and does not replace the strict offer-then-read-then-applied metric.",
+        "Loose offer-then-applied is reported as 2/2 = 100.00% for 7 days and 3/4 = 75.00% for 30 days.",
+        "The output labels Codex read attribution as an observable lower bound rather than equivalent coverage across agents."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "請把下列 Cortex/Hippo 行為逐列分類為 neither、offer、read 或 applied，並說明是否能納入 Agent 看過率／採用率：A. Cortex manager 把 source_material 直接組進 job prompt，未呼叫 Hippo；B. Hippo shortlist 注入 context 並追加 offered.jsonl；C. Claude 用 Read 開啟 shortlist 中的 knowledge note，PostToolUse 追加 source=read；D. Copilot 用 view 開啟 note 並追加 source=read；E. Codex job prompt 已含 note 摘要但沒有 offered/read ledger；F. 同 session/slice 已 offer、已 read 後執行 hippo usage mark-applied。請特別回答 Cortex 中 Agent『看的』通常算哪一種，並交代 Codex attribution 的限制。",
+      "expected_output": "A compact classification table that separates Cortex prompt material from Hippo telemetry and keeps strict adoption and Codex observability explicit.",
+      "files": [],
+      "expectations": [
+        "A and E are classified as neither Hippo offer nor read because prompt source_material alone writes no Hippo telemetry.",
+        "B is classified as offer, C and D as read, and F as applied.",
+        "The answer states that Cortex Agent actually opening a note via Read/view belongs to read, not offer or applied.",
+        "The answer distinguishes opening content from influencing a decision and requires explicit ordered acknowledgement for adoption.",
+        "The main adoption metric is strict offer-then-read-then-applied; any applied-only session metric is labeled supplemental rather than the standard adoption rate.",
+        "Codex attribution is described as inconclusive or a lower bound, while Claude/Copilot Read/view hooks are the proven telemetry path."
+      ]
+    }
+  ]
+}

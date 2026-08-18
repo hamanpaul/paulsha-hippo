@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 repo-local `custom-skills/hippo-memory-kpi/`：唯讀產生 7/30 天 session→atomic note、note machine-valid/searchable、Agent offer→read→applied KPI，固定排除 observer/no-findings 污染並區分 Cortex source material、offer、read、applied 與 Codex 可觀測下限。
+
 ### Changed
 - 0.1.2 的 post-tag 發版證據（本身不含於 `v0.1.2` tag，故記於此而非下面已定稿的 `[0.1.2]` 段）：`reports/verify/release-readiness-matrix.json` 由 `f5df394` 重綁至 candidate `ddeba3a3`（wheel `919d685d…`），依 `bind_candidate()` 漂移語意作廢全部既有 `passed` 後逐 gate 重新 attest，**16/16 passed**；`reports/verify/release-0.1.2-closeout.md` 新增追加批次段，涵蓋 `f5df394..ddeba3a3` 期間關閉的 10 個 issue，closing PR 的 merge commit 逐筆以 `git merge-base --is-ancestor` 驗證為 candidate 祖先。
 
