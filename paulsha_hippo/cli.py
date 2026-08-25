@@ -513,6 +513,38 @@ def _build_parser() -> argparse.ArgumentParser:
     show_p.add_argument("--session-id", default=None)
     show_p.set_defaults(func=_show)
 
+    followups_p = memory_subparsers.add_parser(
+        "followups", help="follow-up ledger：list/verify/close/extract（issue #136 fix 5）")
+    followups_subparsers = followups_p.add_subparsers(dest="followups_command", required=True)
+
+    followups_list = followups_subparsers.add_parser("list", help="列出 follow-up ledger 項目")
+    followups_list.add_argument("--memory-root", required=True)
+    followups_list.add_argument("--project", default=None)
+    followups_list.add_argument("--status", choices=["open", "all"], default="open")
+    followups_list.add_argument("--json", action="store_true")
+    followups_list.set_defaults(func=_followups_list)
+
+    followups_verify = followups_subparsers.add_parser(
+        "verify", help="唯讀重查每筆 follow-up 引用的 file:line，過時值已不在則自動關閉")
+    followups_verify.add_argument("--memory-root", required=True)
+    followups_verify.add_argument("--project", default=None)
+    followups_verify.set_defaults(func=_followups_verify)
+
+    followups_close = followups_subparsers.add_parser("close", help="手動關閉一筆 follow-up")
+    followups_close.add_argument("id")
+    followups_close.add_argument("--memory-root", required=True)
+    followups_close.add_argument("--reason", required=True)
+    followups_close.set_defaults(func=_followups_close)
+
+    followups_extract = followups_subparsers.add_parser(
+        "extract", help="從 knowledge notes 抽取可行動語句；預設 dry-run，--apply 才落 ledger")
+    followups_extract.add_argument("--memory-root", required=True)
+    followups_extract.add_argument("--project", default=None)
+    followups_extract_mode = followups_extract.add_mutually_exclusive_group()
+    followups_extract_mode.add_argument("--dry-run", action="store_true")
+    followups_extract_mode.add_argument("--apply", action="store_true")
+    followups_extract.set_defaults(func=_followups_extract)
+
     return parser
 
 
@@ -1503,6 +1535,82 @@ def _show(args: argparse.Namespace) -> int:
                 sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))
         except Exception as exc:
             print(f"warning: show: read 事件記錄失敗（略過，不影響輸出）：{exc}", file=sys.stderr)
+    return 0
+
+
+def _followups_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _followups_list(args: argparse.Namespace) -> int:
+    """列出 follow-up ledger 項目（issue #136 fix 5）：預設只列 open，--status all 含已關閉。"""
+    from . import followups as fu
+
+    root = Path(args.memory_root)
+    rows = []
+    for fid, state in sorted(fu.fold(root).items()):
+        if args.project and state.get("project") != args.project:
+            continue
+        if args.status == "open" and state.get("state") not in fu.OPEN_STATES:
+            continue
+        rows.append((fid, state))
+    if args.json:
+        print(json.dumps({fid: state for fid, state in rows}, ensure_ascii=False, sort_keys=True))
+        return 0
+    for fid, state in rows:
+        target = state.get("target")
+        target_str = f"{target['path']}:{target['line']}" if target else "-"
+        claim = str(state.get("claim") or "")[:60]
+        print(f"{fid}\t{state.get('state', '-')}\t{state.get('project', '-')}\t{target_str}\t{claim}")
+    return 0
+
+
+def _followups_verify(args: argparse.Namespace) -> int:
+    """對開單中的 follow-up 唯讀重查其引用的 file:line（issue #136 fix 5）。
+
+    roots 一律取自 projects.yaml（load_projects_config(default_projects_path(R))）；
+    純讀取，不寫入被查的 repo 檔案——只有 followups ledger 本身會多一筆事件。
+    """
+    from . import followups as fu
+    from .importer.config import default_projects_path, load_projects_config
+
+    root = Path(args.memory_root)
+    projects_cfg = load_projects_config(default_projects_path(root))
+    roots_by_project = {p.slug: p.roots for p in projects_cfg.projects}
+    summary = fu.verify(root, roots_by_project=roots_by_project, now=_followups_now(),
+                        project=args.project)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _followups_close(args: argparse.Namespace) -> int:
+    """手動關閉一筆 follow-up（issue #136 fix 5）；id 不存在時非零 exit。"""
+    from . import followups as fu
+
+    root = Path(args.memory_root)
+    if not fu.close(root, args.id, reason=args.reason, now=_followups_now()):
+        print(f"followups close: 找不到 id：{args.id}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _followups_extract(args: argparse.Namespace) -> int:
+    """從 knowledge notes 抽取可行動語句（issue #136 fix 5）；預設 dry-run，--apply 才落 ledger。
+
+    --apply 時仍受 runtime_flags.followups_enabled 閘門（Task 4）：config 關掉時降級為
+    dry-run 並提示，不悄悄開單。
+    """
+    from . import followups as fu
+    from .runtime_flags import load_flags
+
+    root = Path(args.memory_root)
+    apply = bool(args.apply)
+    if apply and not load_flags().followups_enabled:
+        print("followups extract: config（followups.enabled: false）已停用開單，改以 dry-run 執行",
+              file=sys.stderr)
+        apply = False
+    summary = fu.extract_all(root, apply=apply, now=_followups_now(), project=args.project)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
 
