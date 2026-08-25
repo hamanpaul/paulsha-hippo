@@ -185,7 +185,7 @@ def recall_guidance_hint(root: Path, tool: str, session_id: str, cwd: str | None
     return (
         "本平台不會在每次 prompt 自動浮現任務相關記憶；需要任務相關記憶時，執行：\n"
         f"`{format_recall_command(root, tool, session_id, cwd)}`\n"
-        "再用 Read 開啟輸出清單中的絕對路徑取全文。"
+        "再對輸出清單中的 slice_id 執行 `hippo show --agent <slice_id> --memory-root …` 取精簡全文。"
     )
 
 

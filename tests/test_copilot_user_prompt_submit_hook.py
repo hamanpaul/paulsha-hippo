@@ -32,7 +32,7 @@ def test_copilot_prompt_hook_injects_and_attributes_tool(tmp_path):
     out = _run(tmp_path, {"sessionId": "cp1", "cwd": str(proj_cwd),
                           "prompt": "SerialWrap 執行"})
     ctx = out.get("additionalContext", "")
-    assert "a.md" in ctx and "Read" in ctx
+    assert "a.md" in ctx and "show --memory-root" in ctx
     led = (tmp_path / "runtime" / "ledger" / "offered.jsonl").read_text(encoding="utf-8")
     ev = json.loads(led.splitlines()[0])
     assert ev["tool"] == "copilot-cli" and ev["session_id"] == "cp1"

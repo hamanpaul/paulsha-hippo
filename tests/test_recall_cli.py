@@ -25,7 +25,7 @@ def test_recall_prints_shortlist_and_records_offered_with_tool(tmp_path, monkeyp
     assert rc == 0
     out = capsys.readouterr().out
     note = str(tmp_path / "knowledge" / "proj" / "a.md")
-    assert note in out and "Read" in out
+    assert note in out and "show --memory-root" in out
     events = [json.loads(l) for l in
               (tmp_path / "runtime" / "ledger" / "offered.jsonl")
               .read_text(encoding="utf-8").splitlines() if l.strip()]

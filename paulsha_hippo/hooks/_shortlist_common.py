@@ -14,6 +14,7 @@ from pathlib import Path
 from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
 from paulsha_hippo.retrieval import format_shortlist, to_fts_query
+from paulsha_hippo.runtime_flags import load_flags
 from paulsha_hippo.hooks._wakeup_common import (
     hippo_invocation, log_warn, offered_map_path as _offered_map_path, validate_tool,
 )
@@ -413,7 +414,11 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                 return ""
             for h in claim:
                 h["summary"] = _summary(h.get("path", ""), str(h.get("title") or ""))
-            block = _redact(root, tool, project, session_id, format_shortlist(claim))
+            flags = load_flags()
+            show_cmd = " ".join(shlex.quote(a) for a in hippo_invocation(root) + [
+                "show", "--memory-root", str(root), "--agent", "--tool", tool, "--session-id", session_id])
+            block = _redact(root, tool, project, session_id,
+                            format_shortlist(claim, hint=flags.read_hint, show_command=show_cmd))
             if not block:
                 # fail-closed: redaction suppressed the shortlist -> inject nothing and do
                 # NOT record offered (nothing was surfaced to the agent).

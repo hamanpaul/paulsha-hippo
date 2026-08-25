@@ -24,6 +24,8 @@ _CJK_STOPWORDS = frozenset({
 })
 
 _SHORTLIST_HINT = "> 與當前任務相關的記憶（相關項用 Read 開啟下列絕對路徑取全文）："
+_SHORTLIST_HINT_SHOW = ("> 與當前任務相關的記憶（相關項執行 `{cmd} <slice_id>` 取精簡全文，"
+                        "比 Read 省約 70% token）：")
 
 
 def to_fts_query(prompt: str) -> str:
@@ -48,14 +50,22 @@ def to_fts_query(prompt: str) -> str:
     return " OR ".join(f'"{t}"' for t in toks)
 
 
-def format_shortlist(hits: list[dict]) -> str:
-    """Render hits ({title, summary, path}) as an injected shortlist block. [] -> ''."""
+def format_shortlist(hits: list[dict], *, hint: str = "read", show_command: str = "") -> str:
+    """Render hits ({title, summary, path, slice_id}) as an injected shortlist block. [] -> ''.
+
+    hint=="show" and show_command given: hint line 建議 `show_command <slice_id>`（省 token）
+    and each row carries its slice_id suffix so agents can copy it straight into the
+    command. Otherwise (default): unchanged legacy "Read 開啟絕對路徑" wording.
+    """
     if not hits:
         return ""
-    lines = [_SHORTLIST_HINT]
+    lines = [_SHORTLIST_HINT_SHOW.format(cmd=show_command) if hint == "show" and show_command else _SHORTLIST_HINT]
     for h in hits:
         title = (h.get("title") or "").strip() or "(untitled)"
         summary = (h.get("summary") or "").strip()
         path = h.get("path") or ""
-        lines.append(f"- [{title}] — {summary} — {path}")
+        line = f"- [{title}] — {summary} — {path}"
+        if h.get("slice_id"):
+            line += f" — {h['slice_id']}"
+        lines.append(line)
     return "\n".join(lines)

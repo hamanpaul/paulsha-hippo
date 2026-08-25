@@ -292,7 +292,7 @@ class SessionStartHooksTest(unittest.TestCase):
         self.assertIsInstance(brief, str)
         self.assertTrue(len(brief) > 0, "expected non-empty orientation when notes present")
         self.assertIn("記憶系統已啟用", brief)
-        self.assertIn("Read", brief)
+        self.assertIn("hippo show --agent", brief)
 
     def test_codex_session_start_exits_zero_on_non_object_json(self):
         result = _run_hook("codex_session_start.py", [], extra_env=self._env())
