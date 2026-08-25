@@ -18,16 +18,19 @@ from paulsha_hippo.moc import frontmatter_io as fio
 NOW = "2026-08-25T00:00:00Z"
 
 
-def _note(mr: Path, sid: str, project: str, title: str, at: str, checksum: str,
-          tags=(), aliases=(), related=()):
+def _note(mr: Path, sid: str, project: str, title: str, at, checksum: str,
+          tags=(), aliases=(), related=(), distilled_from=None):
+    """寫一則 knowledge note。``at=None`` 代表整個 captured_at 欄位缺席。"""
     p = mr / "knowledge" / project / f"n--{sid}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     tags_s = "".join(f"  - {t}\n" for t in tags)
     al = "".join(f"  - \"{a}\"\n" for a in aliases)
     rel = "".join(f"  - \"{r}\"\n" for r in related)
+    captured = f"captured_at: \"{at}\"\n" if at is not None else ""
+    distilled = f"distilled_from: \"{distilled_from}\"\n" if distilled_from is not None else ""
     p.write_text(
         f"---\nslice_id: {sid}\nmemory_layer: knowledge\nproject: {project}\n"
-        f"title: \"{title}\"\ncaptured_at: \"{at}\"\nchecksum: {checksum}\n"
+        f"title: \"{title}\"\n{captured}{distilled}checksum: {checksum}\n"
         f"supersedes: []\ntags:\n{tags_s}aliases:\n{al}related:\n{rel}---\nb\n",
         encoding="utf-8",
     )
@@ -87,6 +90,57 @@ def test_decayed_and_identical_checksum_are_not_candidates(tmp_path):
     assert sl.scan(tmp_path) == {"auto": [], "review": []}
 
 
+def test_decayed_note_is_not_a_superseder_either(tmp_path):
+    """decayed 過濾必須雙側：已退場的較新 note 不該吃掉還活著的舊 note。"""
+    _note(tmp_path, "sl-dk-old", "p", "T", "2026-08-01T00:00:00Z", "c1")
+    _note(tmp_path, "sl-dk-new", "p", "T", "2026-08-02T00:00:00Z", "c2")
+    lifecycle.append_event(
+        path=tmp_path / "runtime" / "ledger" / "lifecycle.jsonl", record_id="sl-dk-new",
+        event_type="decayed", source="janitor", reason="superseded", actor="hippo", ts=NOW,
+    )
+    assert sl.scan(tmp_path) == {"auto": [], "review": []}
+
+
+def test_tied_captured_at_same_session_siblings_are_skipped(tmp_path):
+    """同時間戳 ＋ 同 distilled_from ＝ 同一場 session 蒸出的兄弟，publish 當下已判過。"""
+    _note(tmp_path, "sl-sib-a", "p", "T", "2026-08-01T00:00:00Z", "c1", distilled_from="claude:s1")
+    _note(tmp_path, "sl-sib-b", "p", "T", "2026-08-01T00:00:00Z", "c2", distilled_from="claude:s1")
+    assert sl.scan(tmp_path) == {"auto": [], "review": []}
+
+
+def test_tied_captured_at_across_sessions_goes_to_review(tmp_path):
+    """同時間戳但不同 session：真的是兩個版本，方向卻無法從時間判定 -> review。"""
+    _note(tmp_path, "sl-tie-a", "p", "T", "2026-08-01T00:00:00Z", "c1", distilled_from="claude:s1")
+    _note(tmp_path, "sl-tie-b", "p", "T", "2026-08-01T00:00:00Z", "c2", distilled_from="claude:s2")
+    out = sl.scan(tmp_path)
+    # 永不進 auto；方向以 slice_id 字典序決定（大者當新），同一份輸入永遠同一個方向。
+    assert out["auto"] == []
+    assert [(x["new"], x["old"], x["reason"]) for x in out["review"]] == [
+        ("sl-tie-b", "sl-tie-a", "equal-captured_at")]
+
+
+def test_missing_or_unparseable_captured_at_never_pairs(tmp_path):
+    """缺值/無法解析的 captured_at 被壓到時間地板；地板上的並列不是「同時」。"""
+    _note(tmp_path, "sl-nd-none", "p", "T", None, "c1", distilled_from="claude:s1")
+    _note(tmp_path, "sl-nd-bad", "p", "T", "_unknown", "c2", distilled_from="claude:s2")
+    _note(tmp_path, "sl-nd-dated", "p", "T", "2026-08-01T00:00:00Z", "c3", distilled_from="claude:s3")
+    assert sl.scan(tmp_path) == {"auto": [], "review": []}
+
+
+def test_corrupt_lifecycle_ledger_warns_once(tmp_path, capsys):
+    """壞掉的 lifecycle ledger 不該靜悄悄地變成「沒有任何 decayed note」。"""
+    _note(tmp_path, "sl-w-old", "p", "T", "2026-08-01T00:00:00Z", "c1")
+    _note(tmp_path, "sl-w-new", "p", "T", "2026-08-02T00:00:00Z", "c2")
+    ledger = tmp_path / "runtime" / "ledger" / "lifecycle.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("{not json}\n", encoding="utf-8")
+    out = sl.scan(tmp_path)
+    assert [(x["new"], x["old"]) for x in out["auto"]] == [("sl-w-new", "sl-w-old")]
+    err = capsys.readouterr().err
+    assert err.count("warning: link-supersedes:") == 1
+    assert "lifecycle" in err
+
+
 def test_apply_writes_supersedes_edge_and_is_idempotent(tmp_path):
     _note(tmp_path, "sl-old", "p", "T", "2026-08-10T00:00:00Z", "c1")
     new = _note(tmp_path, "sl-new", "p", "T", "2026-08-20T00:00:00Z", "c2")
@@ -101,11 +155,13 @@ def test_apply_writes_supersedes_edge_and_is_idempotent(tmp_path):
 
 
 def test_apply_appends_to_existing_supersedes(tmp_path):
+    """既有 supersedes 的順序原樣保留，新前身接在最後（不做字典序重排）。"""
     _note(tmp_path, "sl-p1", "p", "T", "2026-08-01T00:00:00Z", "c1")
     new = _note(tmp_path, "sl-p2", "p", "T", "2026-08-02T00:00:00Z", "c2")
-    fio.update(new, {"supersedes": ["sl-earlier"]})
+    fio.update(new, {"supersedes": ["sl-zz-earlier", "sl-aa-earlier"]})
     assert sl.apply_pairs(tmp_path, [{"new": "sl-p2", "old": "sl-p1"}], now=NOW) == 1
-    assert fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == ["sl-earlier", "sl-p1"]
+    assert fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == [
+        "sl-zz-earlier", "sl-aa-earlier", "sl-p1"]
 
 
 def test_apply_never_self_links_or_targets_missing_slice(tmp_path):
@@ -143,8 +199,14 @@ def test_shared_tags_tier(tmp_path):
     assert [(x["new"], x["old"], x["reason"]) for x in out["review"]] == [("sl-t2", "sl-t1", "tags:2")]
 
 
-def test_mutual_related_tier(tmp_path):
-    _note(tmp_path, "sl-r1", "p", "alpha", "2026-08-01T00:00:00Z", "c1", related=("sl-r2",))
+def test_mutual_related_tier_resolves_real_wikilinks(tmp_path):
+    """`related` 實際寫的是 `[[<title-slug>--<slice_id>]]`（`moc/linker.py`），不是裸 slice_id。
+
+    兩種形狀都要認得：linker 產出的 wikilink（用 `--<slice_id>` 尾綴解析）與
+    手寫的裸 slice_id。認不得就等於整個 related tier 從來沒有生效過。
+    """
+    _note(tmp_path, "sl-r1", "p", "alpha", "2026-08-01T00:00:00Z", "c1",
+          related=("[[beta-title--sl-r2]]",))
     _note(tmp_path, "sl-r2", "p", "beta", "2026-08-02T00:00:00Z", "c2", related=("sl-r1",))
     out = sl.scan(tmp_path)
     assert [(x["new"], x["old"], x["reason"]) for x in out["review"]] == [("sl-r2", "sl-r1", "related")]
@@ -190,7 +252,9 @@ def test_cli_dry_run_writes_no_note_and_apply_then_dry_run_reports_zero(tmp_path
                      "--dry-run", "--now", NOW]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["auto"] == 1 and payload["review"] == 0
-    assert Path(payload["report"]).exists()
+    # 沒有 review 候選就沒有報表：乾淨 root 上的 dry-run 什麼都不寫。
+    assert payload["report"] is None
+    assert not (tmp_path / "runtime").exists()
     assert (old.read_bytes(), new.read_bytes()) == before
     assert relations.read_edges(tmp_path) == []
 

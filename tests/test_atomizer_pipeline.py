@@ -714,6 +714,75 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(frontmatter["distilled_from"], "claude:s2")
             self.assertEqual(frontmatter["supersedes"], [old_id])
 
+    def test_mixed_offset_captured_at_still_supersedes_at_publish(self):
+        """captured_at 的新舊比較必須先 parse：字串序會被時區偏移騙倒。
+
+        既存 note 的 ``2026-05-31T07:00:00+08:00`` 換算成 UTC 是
+        ``2026-05-30T23:00:00Z``，確實比新 slice 的 captured_at 舊；但字串序把它
+        判成「比較新」而整個漏掉。真實記憶庫同時混用 ``Z``、``+08:00``，以及
+        fragment YAML round-trip 之後的空白分隔寫法，三者字串序互不可比。
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "paulshaclaw"
+            existing.mkdir(parents=True)
+            (existing / "n--sl-offset.md").write_text(
+                "---\nslice_id: sl-offset\nmemory_layer: knowledge\nproject: paulshaclaw\n"
+                "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                "captured_at: \"2026-05-31T07:00:00+08:00\"\nchecksum: offset\nsupersedes: []\n---\nx\n",
+                encoding="utf-8",
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next(path for path in sorted(existing.glob("*.md"))
+                        if path.name != "n--sl-offset.md")
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            # 前提：這一組值在字串序下是「舊者比較新」，parse 之後才是對的。
+            self.assertFalse("2026-05-31T07:00:00+08:00" <= str(frontmatter["captured_at"]))
+            self.assertEqual(frontmatter["supersedes"], ["sl-offset"])
+
+    def test_two_older_same_title_notes_stay_parallel(self):
+        """同專案同標題有兩個較舊候選時不自動連：歧義交給 link-supersedes 的 review tier。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "paulshaclaw"
+            existing.mkdir(parents=True)
+            for sid, checksum in (("sl-amb-1", "amb1"), ("sl-amb-2", "amb2")):
+                (existing / f"n--{sid}.md").write_text(
+                    f"---\nslice_id: {sid}\nmemory_layer: knowledge\nproject: paulshaclaw\n"
+                    "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                    f"captured_at: \"2026-01-01T00:00:00Z\"\nchecksum: {checksum}\nsupersedes: []\n---\nx\n",
+                    encoding="utf-8",
+                )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next(path for path in sorted(existing.glob("*.md"))
+                        if not path.name.startswith("n--sl-amb-"))
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["supersedes"], [])
+
     def test_cross_project_same_title_stays_parallel(self):
         """跨專案同標題不得自動連結：immediate path 只認同一個 project。"""
         with TemporaryDirectory() as tmp:

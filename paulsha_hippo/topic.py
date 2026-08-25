@@ -77,6 +77,17 @@ def _recency_key(value: object) -> datetime:
     return parsed
 
 
+def recency_key(value: object) -> datetime:
+    """`_recency_key` 的公開名稱：把 captured_at 解析成可比較的 datetime。
+
+    模組外要比 captured_at 新舊的一律用這個，不要用字串序——真實記憶庫同時混用
+    ``...Z``、``...+08:00`` 與 YAML round-trip 後的 ``2026-05-31 00:00:00+00:00``
+    三種寫法，字串序在它們之間完全不成立（`atomizer/pipeline.py` 的 publish 路徑
+    就曾因此漏掉合法前身）。私名保留給既有呼叫端。
+    """
+    return _recency_key(value)
+
+
 def collapse_same_topic(hits: list[dict], *, families: Iterable[Iterable[str]] = ()) -> tuple[list[dict], dict[str, list[str]]]:
     """同主題折疊：recency 只決定「同組誰存活」，`kept` 的輸出順序仍是 `hits` 的相關度順序。
 

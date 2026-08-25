@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 from ..agent_profiles import AgentRunResult
 from ..ledger import processing, relations
 from ..noise import DocCorpus, classify_noise, episodic_reason
-from ..topic import canonical_title as _canonical_title
+from ..topic import canonical_title as _canonical_title, recency_key as _recency_key
 from . import slice_frontmatter, splitter
 from .config import AtomizerConfig, is_safe_path_component, project_directory_key, sanitize_project_component
 from .llm_promoter import LLMPromoter, PromoteError
@@ -738,7 +738,10 @@ def _attach_unambiguous_supersedes(
     重蒸」才連得上前身；跨 session 蒸出的更新版永遠與舊版平行存在，janitor 的
     ``decay_superseded`` 因此從未對它們觸發。這裡拿掉 ``distilled_from`` 條件，
     改用 ``topic.canonical_title``（含 aliases）比對，並要求前身的 ``captured_at``
-    不晚於新 slice——時間單調保證不會回頭連到更新的 note、也不會成環。
+    不晚於新 slice——時間單調保證不會回頭連到更新的 note、也不會成環。時間比較走
+    ``topic.recency_key`` 而不是字串序：既存 note 的 captured_at 混用 ``Z``、
+    ``+08:00`` 與 fragment YAML round-trip 後的 ``2026-05-31 00:00:00+00:00``，
+    字串序會把 ``07:00:00+08:00`` 判成晚於 ``00:00:00Z``，合法前身因此漏連。
 
     專案仍要求嚴格相等：跨專案配對只透過 ``projects.yaml`` 的 ``families:``
     開通，而 publish 這條路徑不讀 projects.yaml，所以它一律不跨專案（跨專案的
@@ -766,7 +769,7 @@ def _attach_unambiguous_supersedes(
             and item.get("project") == frontmatter.get("project")
             and title in _existing_names(item)
             and item.get("checksum") != frontmatter.get("checksum")
-            and str(item.get("captured_at", "")) <= str(frontmatter.get("captured_at", ""))
+            and _recency_key(item.get("captured_at")) <= _recency_key(frontmatter.get("captured_at"))
         ]
         if title and len(matches) == 1:
             predecessor = str(matches[0].get("slice_id") or "")

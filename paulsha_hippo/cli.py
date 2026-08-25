@@ -1037,7 +1037,8 @@ def _link_supersedes(args: argparse.Namespace) -> int:
     """`hippo knowledge link-supersedes` 的接線；配對邏輯全在 supersedes_link。
 
     dry-run（預設）只掃描並把 review 候選寫成報表（`runtime/reports/`，不碰任何
-    knowledge note、不寫 ledger），印 `{"auto": n, "review": m, "report": path}`；
+    knowledge note、不寫 ledger），印 `{"auto": n, "review": m, "report": path}`
+    （沒有 review 候選時不寫報表，`report` 為 `null`）；
     `--apply` 額外寫入 `--tier` 選定的那一層；`--accept` 只套報表中標成 true 的行。
     """
     from . import supersedes_link
@@ -1061,11 +1062,13 @@ def _link_supersedes(args: argparse.Namespace) -> int:
     except Exception:
         families = ()
     result = supersedes_link.scan(root, families=families)
-    report = supersedes_link.write_report(root, result["review"], now=now)
+    # 沒有 review 候選就不寫報表：乾淨的記憶庫上跑 dry-run 應該什麼都不留下，
+    # 而不是每跑一次就在 runtime/reports/ 多一個零筆的空檔。
+    report = supersedes_link.write_report(root, result["review"], now=now) if result["review"] else None
     payload: dict[str, object] = {
         "auto": len(result["auto"]),
         "review": len(result["review"]),
-        "report": str(report),
+        "report": str(report) if report is not None else None,
     }
     if getattr(args, "apply", False):
         payload["applied"] = supersedes_link.apply_pairs(root, result[args.tier], now=now)

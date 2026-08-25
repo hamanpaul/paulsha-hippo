@@ -20,15 +20,26 @@
 第二套啟發式；跨專案配對只透過 `projects.yaml` 的 `families:` 開通（opt-in），
 沒設 families 時不同專案永遠不成對。
 
-安全性：候選要求 `captured_at` 嚴格較新（`topic._recency_key` 的語意：缺值或無法
-解析視為最舊，因此永遠不會成為任何配對的一端），所以 scan 產出的關係是嚴格偏序、
-天生無環也無自連；`apply_pairs` 另外對手改過的報表再驗一次（self-link 與可達性
-成環都拒絕）。已經寫過的配對會被跳過，apply -> dry-run 回報 0 -> 再 apply 為
-no-op。
+`captured_at` 一律先經 `topic.recency_key` 解析再比大小（真實記憶庫混用 `Z`、
+`+08:00` 與 YAML round-trip 後的空白分隔寫法，字串序在它們之間不成立），分三態：
+
+- **缺值或無法解析**：被壓到時間地板（`datetime.min`）。地板上的兩則 note 不是
+  「同時」，只是同樣不知道時間，所以任何一端在地板上就兩層都不配對。
+- **嚴格較舊**：正常候選，依理由分 auto/review。
+- **完全相等**：`distilled_from` 相同者是同一場 session 蒸出的兄弟（publish 當下
+  已經判過彼此關係），跳過；不同者是兩個版本但時間分不出先後，一律進 review
+  （reason `equal-captured_at`），方向以 slice_id 字典序決定（大者當新）——任意
+  但決定性，讓人在報表上改方向，而不是每跑一次換一個方向。
+
+auto 只吃「嚴格較舊」那一態，所以它產出的關係是嚴格 recency 偏序、天生無環也無
+自連；`apply_pairs` 另外對手改過的報表再驗一次（self-link 與可達性成環都拒絕）。
+已經寫過的配對會被跳過，apply -> dry-run 回報 0 -> 再 apply 為 no-op。
 """
 from __future__ import annotations
 
 import json
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -40,9 +51,17 @@ from paulsha_hippo.moc import frontmatter_io as fio
 #: 而不是 atomizer 的 publish transaction。
 CONFIG_HASH = "link-supersedes"
 
-#: `fold_lifecycle` 判定為「已退場」的狀態；退場的 note 不再是 supersede 目標
-#: （已經 decay 過的東西沒必要再標一次前身）。
+#: `fold_lifecycle` 判定為「已退場」的狀態。退場的 note 兩側都不參與配對：
+#: 當舊者是因為「已經 decay 過的東西沒必要再標一次前身」，當新者是因為一個已經
+#: 退場的 note 沒有資格宣稱自己取代了還活著的 note。
 _DEAD_STATES = ("decayed", "archived")
+
+#: `topic.recency_key` 對缺值/無法解析的 captured_at 回傳的時間地板。地板上的
+#: note 之間沒有可比的先後，也不算「同時」，一律不配對。
+_TIME_FLOOR = datetime.min
+
+#: 時間戳完全相等、但來自不同 session 的配對理由（永遠只進 review）。
+_EQUAL_TIME_REASON = "equal-captured_at"
 
 
 def _load(root: Path) -> list[dict[str, Any]]:
@@ -70,9 +89,11 @@ def _load(root: Path) -> list[dict[str, Any]]:
             "title": str(fm.get("title") or fm.get("atom_title") or ""),
             "aliases": [str(a) for a in (fm.get("aliases") or []) if isinstance(a, str)],
             "tags": {str(t) for t in (fm.get("tags") or []) if isinstance(t, str)},
-            "related": {str(r).strip("[]") for r in (fm.get("related") or []) if isinstance(r, str)},
+            # related 原樣留著，等 `_resolve_related` 拿到全體 slice_id 才解得開。
+            "related": [str(r) for r in (fm.get("related") or []) if isinstance(r, str)],
             "captured_at": str(fm.get("captured_at") or ""),
             "checksum": str(fm.get("checksum") or ""),
+            "distilled_from": str(fm.get("distilled_from") or ""),
             "supersedes": [str(s) for s in (fm.get("supersedes") or [])],
             "path": path,
         })
@@ -80,16 +101,49 @@ def _load(root: Path) -> list[dict[str, Any]]:
 
 
 def _dead(root: Path) -> set[str]:
-    """已 decay/archive 的 slice_id 集合（讀不到 ledger 時視為空集合）。"""
+    """已 decay/archive 的 slice_id 集合。
+
+    讀不到或解不開 ledger 時退回空集合（掃描不該因為 ledger 壞掉就整個停擺），但
+    要在 stderr 講一聲：空集合的意思是「沒有任何 note 退場過」，而那正好會讓已經
+    decay 的 note 重新變成候選——靜悄悄吞掉這個差別會讓報表看起來莫名其妙變長。
+    """
+    ledger = root / "runtime" / "ledger" / "lifecycle.jsonl"
     try:
-        events = lifecycle.read_events(root / "runtime" / "ledger" / "lifecycle.jsonl")
-    except (OSError, UnicodeDecodeError, ValueError):
+        events = lifecycle.read_events(ledger)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"warning: link-supersedes: 讀不到 lifecycle ledger（{ledger}）：{exc}；"
+              "本次掃描視為沒有任何 decayed/archived note", file=sys.stderr)
         return set()
     return {
         record_id
         for record_id, state in lifecycle.fold_lifecycle(events).items()
         if state.get("last_state") in _DEAD_STATES
     }
+
+
+def _resolve_related(notes: list[dict[str, Any]]) -> None:
+    """把每則 note 的 `related` 解析成 slice_id 集合，結果放進 ``_related``。
+
+    `moc/linker.py:63-72` 實際寫進 frontmatter 的是 `[[<title-slug>--<slice_id>]]`
+    （entity 連結則是 `[[<ENTITY>]]`），不是裸 slice_id。所以解析要兩條路：先看
+    整串是不是既存的 slice_id（人手寫的舊格式），再用 `--` 尾綴去對——認不出來的
+    （entity 連結、指向已刪除 note 的死連結）就丟掉，related tier 只承認兩端都在
+    這批 note 裡的互指。
+    """
+    ids = {note["slice_id"] for note in notes}
+    for note in notes:
+        resolved: set[str] = set()
+        for raw in note["related"]:
+            target = raw.strip()
+            if target.startswith("[[") and target.endswith("]]"):
+                target = target[2:-2].strip()
+            # `[[target|display]]` 的顯示名不參與比對。
+            target = target.split("|", 1)[0].strip()
+            if target in ids:
+                resolved.add(target)
+            elif "--" in target and target.rsplit("--", 1)[-1] in ids:
+                resolved.add(target.rsplit("--", 1)[-1])
+        note["_related"] = resolved
 
 
 def _names(note: dict[str, Any]) -> set[str]:
@@ -112,7 +166,7 @@ def _can_be_fuzzy(new: dict[str, Any], old: dict[str, Any]) -> bool:
     的配對不必進到 `topic.is_same_topic` 的重算。
     """
     return bool(new["_tokens"] & old["_tokens"]) or bool(new["tags"] & old["tags"]) or (
-        old["slice_id"] in new["related"] and new["slice_id"] in old["related"])
+        old["slice_id"] in new["_related"] and new["slice_id"] in old["_related"])
 
 
 def _fuzzy_reason(new: dict[str, Any], old: dict[str, Any],
@@ -131,7 +185,7 @@ def _fuzzy_reason(new: dict[str, Any], old: dict[str, Any],
     shared_tags = new["tags"] & old["tags"]
     if len(shared_tags) >= 2:
         return f"tags:{len(shared_tags)}"
-    if old["slice_id"] in new["related"] and new["slice_id"] in old["related"]:
+    if old["slice_id"] in new["_related"] and new["slice_id"] in old["_related"]:
         return "related"
     if shared_tags and len(new["_tokens"] & old["_tokens"]) >= 2:
         return "tags+title"
@@ -158,15 +212,21 @@ def scan(memory_root: Path | str, *, families: Iterable[Iterable[str]] = ()) -> 
 
     純讀取：不寫任何檔案、不碰 ledger。``families`` 是 `projects.yaml` 的
     `families:`（同義專案分組）；不給就等同「不跨專案配對」。
+
+    掃描順序是 ``(recency_key, slice_id)``，內圈只看排在自己前面的 note，所以
+    「新 -> 舊」的方向對嚴格較新的配對來自時間、對時間相等的配對來自 slice_id
+    字典序（大者當新），兩者都是決定性的。
     """
     root = Path(memory_root)
     families = tuple(tuple(str(m) for m in fam) for fam in families)
     notes = _load(root)
     dead = _dead(root)
     # 每則 note 只算一次同主題判定需要的衍生值；掃描本身是 O(n²) 配對，把
-    # tokenize/parse 留在內圈會讓真實記憶庫（數千則）的一次 dry-run 慢到不可用。
+    # tokenize/parse/wikilink 解析留在內圈會讓真實記憶庫（數千則）的一次 dry-run
+    # 慢到不可用。
+    _resolve_related(notes)
     for note in notes:
-        note["_rk"] = topic._recency_key(note["captured_at"])
+        note["_rk"] = topic.recency_key(note["captured_at"])
         note["_names"] = _names(note)
         note["_tokens"] = topic.title_tokens(note["title"], note["project"])
         note["_fkey"] = topic.family_key(note["project"], families)
@@ -180,17 +240,31 @@ def scan(memory_root: Path | str, *, families: Iterable[Iterable[str]] = ()) -> 
         for old in notes[:index]:
             if old["slice_id"] == new["slice_id"]:
                 continue
-            if old["slice_id"] in dead or old["slice_id"] in new["supersedes"]:
+            # decayed 兩側都擋：退場的 note 既不值得再標前身，也沒資格宣稱自己
+            # 取代了還活著的 note。
+            if old["slice_id"] in dead or new["slice_id"] in dead:
                 continue
-            # 嚴格較舊才是候選：等值/缺值（_recency_key 視為最舊）一律不成對，
-            # 這同時保證整張圖是嚴格偏序 —— 不可能自連，也不可能成環。
-            if old["_rk"] >= new["_rk"]:
+            if old["slice_id"] in new["supersedes"]:
+                continue
+            # 任一端沒有可用的時間就不配對；地板上的並列不是「同時」。
+            if old["_rk"] == _TIME_FLOOR or new["_rk"] == _TIME_FLOOR:
+                continue
+            if old["_rk"] > new["_rk"]:  # 排序後不該發生，留著當不變式
+                continue
+            tied = old["_rk"] == new["_rk"]
+            # 同一場 session 蒸出的兄弟 note 共用 captured_at；它們之間的關係在
+            # publish 當下就決定過了，backfill 不該再插手。
+            if tied and old["distilled_from"] == new["distilled_from"]:
                 continue
             if old["checksum"] and old["checksum"] == new["checksum"]:
                 continue
             if old["_fkey"] != new["_fkey"]:
                 continue
             if new["_names"] & old["_names"]:
+                if tied:
+                    # 同名同時戳不同 session：是兩個版本，但誰取代誰得由人決定。
+                    fuzzy.append((new, old, _EQUAL_TIME_REASON))
+                    continue
                 same_title = topic.canonical_title(new["title"]) == topic.canonical_title(old["title"])
                 exact.append((new, old, "exact-title" if same_title else "alias"))
                 continue
@@ -198,7 +272,7 @@ def scan(memory_root: Path | str, *, families: Iterable[Iterable[str]] = ()) -> 
                 continue
             reason = _fuzzy_reason(new, old, families)
             if reason:
-                fuzzy.append((new, old, reason))
+                fuzzy.append((new, old, _EQUAL_TIME_REASON if tied else reason))
 
     # auto 要求雙向唯一：新者只有這一個較舊候選，舊者也只有這一個較新候選。
     olds_per_new: dict[str, int] = {}
@@ -257,7 +331,9 @@ def apply_pairs(memory_root: Path | str, pairs: list[dict[str, Any]], *, now: st
             continue
         if old_id in new["supersedes"] or _would_cycle(by_id, new_id, old_id):
             continue
-        merged = sorted(set(new["supersedes"] + [old_id]))
+        # 原有順序原樣保留、新前身接在最後：supersedes 是「這則 note 取代過誰」
+        # 的累積紀錄，重排會讓每次 backfill 都在既有 note 上製造無謂 diff。
+        merged = new["supersedes"] + [old_id]
         fio.update(new["path"], {"supersedes": merged})
         new["supersedes"] = merged
         relations.append_edge(root, type="supersedes", frm=f"slice:{new_id}",
