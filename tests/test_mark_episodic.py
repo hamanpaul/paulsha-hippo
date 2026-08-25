@@ -151,9 +151,13 @@ def test_project_filter_scopes_scan(tmp_path):
     _note(tmp_path, "sl-1", "session-handoff-2026-08-12", "x\n")
     other = tmp_path / "knowledge" / "other" / "n--sl-4.md"
     other.parent.mkdir(parents=True, exist_ok=True)
+    # 全支線 review I2：這筆 fixture 原本用裸字標題 `handoff`，靠的是舊版
+    # 「標題一擊即中」規則。裸 `handoff` 現在只是弱訊號（body `x\n` 無強訊號佐證
+    # → 不降層），本測試要驗的是 --project 過濾範圍、不是標題規則，故改用強形標題
+    # 讓它照舊成為候選。
     other.write_text(
         "---\nslice_id: sl-4\nmemory_layer: knowledge\nproject: other\n"
-        "title: \"handoff\"\n---\nx\n",
+        "title: \"session-handoff-2026-08-13\"\n---\nx\n",
         encoding="utf-8",
     )
     s, _ = em.run(tmp_path, apply=False, now=NOW, project="other")

@@ -267,11 +267,16 @@ _WEAK_STATE_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"目前", r"尚未", r"待辦")
 )
-# Title 規則維持 strong（單獨命中即整篇降層）；英文替代項加上 \b，避免比對到更長
-# 英文單字的子字串（中文「狀態$」本來就用 $ 錨定到字尾，不受影響）。
-# review round 2 (minor)：`^session-handoff\b` 是冗餘 alternative——"session-handoff"
-# 本身已含 "handoff"，"-" 前後皆非 word char，`\bhandoff\b` 單獨即可命中，故移除。
-_STATE_TITLE_RE = re.compile(r"\bhandoff\b|狀態$", re.IGNORECASE)
+# Title 規則同樣拆成 strong／weak（全支線 review I2）。舊規則
+# `\bhandoff\b|狀態$` 是「一擊即中、body 完全不看」，但這兩個形狀在耐久技術筆記的
+# 標題裡極常見——`CC2674 handoff register 對照`（硬體暫存器名）、`LED 燈號狀態`
+# （燈號對照表）都會整篇被降層、從檢索池消失，而它們的 body 全是可重用知識。
+#
+# strong 標題（`_STRONG_STATE_RE`，與 body 共用同一套措辭）只在描述 session／交接
+# 自身時才成立——`session-handoff-2026-08-12`、`session 交接`、`交接狀態`、
+# `handoff status:`——單獨命中即整篇降層，body 不必佐證。
+# weak 標題只是「可能相關」，需要 body 至少一行 strong 命中才降層。
+_WEAK_STATE_TITLE_RE = re.compile(r"\bhandoff\b|狀態$", re.IGNORECASE)
 EPISODIC_RATIO = 0.5
 
 _FENCE_LINE = re.compile(r"^(?:```|~~~)")
@@ -327,17 +332,25 @@ def _line_is_session_state(line: str) -> bool:
 def episodic_reason(title: object, body: str) -> str | None:
     """session 狀態句偵測：非 deletion-grade——命中只降層 episodic，不刪。
 
-    Precision over recall（review round 1）：
-    - 標題命中 `_STATE_TITLE_RE` → 整篇強訊號，直接降層。
+    Precision over recall（review round 1／全支線 review I2）：
+    - 標題命中 strong 措辭（`_STRONG_STATE_RE`，如 `session-handoff…`、`session 交接`、
+      `交接狀態`、`handoff status:`）→ 整篇強訊號，body 不必佐證，直接降層。
+    - 標題只命中 weak 形狀（`_WEAK_STATE_TITLE_RE`：裸 `handoff` 或以「狀態」結尾）
+      → 需 body 至少一行 strong 命中才降層。`CC2674 handoff register 對照`、
+      `LED 燈號狀態` 這類耐久標題否則會整篇被誤降、從檢索池消失。
     - body 只有 1 行 content line 時，只接受 strong 命中；weak 訊號組合在單行下
       統計意義不足，一律不降層（`_content_lines` 需先剔除 fenced code block）。
     - body ≥2 行 content line 時，走原本的 ratio 規則（session-state 行數 /
       content 行數 ≥ EPISODIC_RATIO），但「是否算 session-state 行」改用
       strong-one-hit / weak-two-distinct-hits 判定，而非舊版單一 bare-word regex。
     """
-    if _STATE_TITLE_RE.search(str(title or "").strip()):
+    title_text = str(title or "").strip()
+    if _STRONG_STATE_RE.search(title_text):
         return "title:session-state"
     lines = _episodic_content_lines(body or "")
+    if _WEAK_STATE_TITLE_RE.search(title_text) and any(
+            _STRONG_STATE_RE.search(line) for line in lines):
+        return "title:session-state+body"
     if not lines:
         return None
     if len(lines) == 1:

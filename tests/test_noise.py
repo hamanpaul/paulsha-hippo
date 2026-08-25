@@ -377,5 +377,44 @@ class EpisodicReasonTests(unittest.TestCase):
         )
 
 
+    # --- 全支線 review I2：標題規則太鬆 -------------------------------------------
+    # 舊規則 `\bhandoff\b|狀態$` 是「一擊即中、body 完全不看」，但這兩個形狀在耐久
+    # 技術筆記的標題裡極常見（硬體暫存器名、燈號/狀態對照表），整篇因此被誤降層、
+    # 從檢索池消失。改成兩級：強形（session-handoff…／session 交接／交接狀態／
+    # handoff status|state|note ＋分隔符或行尾）自己就算數；裸 `handoff`／`狀態$`
+    # 只是弱訊號，要 body 裡至少有一行強訊號佐證才降層。
+
+    def test_bare_handoff_title_with_durable_body_is_kept(self):
+        body = ("handoff register 在 CC2674 上位於 0x4008_1000。\n"
+                "此暫存器於開機時自動初始化，無須軟體介入。\n")
+        self.assertIsNone(episodic_reason("CC2674 handoff register 對照", body))
+
+    def test_status_suffix_title_with_durable_body_is_kept(self):
+        body = ("LED0 恆亮代表已連線，閃爍代表配對中。\n"
+                "燈號由 PWM0 驅動，週期 1 kHz。\n")
+        self.assertIsNone(episodic_reason("LED 燈號狀態", body))
+
+    def test_strong_title_forms_demote_on_their_own(self):
+        # body 完全是耐久內容也照降：這些措辭只在描述 session/交接自身時才成立。
+        durable = "cmake 版本鎖定 3.31.6。\n~/bin 必須先存在 PATH 才會生效。\n"
+        for title in ("session-handoff-2026-08-12", "handoff status:", "Handoff note:",
+                      "session 交接", "交接狀態"):
+            with self.subTest(title=title):
+                self.assertEqual(episodic_reason(title, durable), "title:session-state")
+
+    def test_weak_title_demotes_when_body_has_a_strong_line(self):
+        # 弱標題 ＋ body 有強訊號行（但比例 1/3 < EPISODIC_RATIO，body 規則自己不會降）。
+        body = ("LED0 恆亮代表已連線。\n燈號由 PWM0 驅動。\n本次修改僅限 README。\n")
+        self.assertIsNone(episodic_reason("LED 燈號", body))          # 標題無命中 → 不降
+        self.assertEqual(episodic_reason("LED 燈號狀態", body), "title:session-state+body")
+        self.assertEqual(episodic_reason("CC2674 handoff register", body),
+                         "title:session-state+body")
+
+    def test_weak_title_ignores_strong_phrases_inside_code_fence(self):
+        # body 的佐證一樣要走 `_episodic_content_lines`：圍籬內的字面文字不算佐證。
+        body = "LED0 恆亮代表已連線。\n```\n本次修改僅限 README。\n```\n"
+        self.assertIsNone(episodic_reason("LED 燈號狀態", body))
+
+
 if __name__ == "__main__":
     unittest.main()
