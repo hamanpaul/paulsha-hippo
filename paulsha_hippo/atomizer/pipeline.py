@@ -713,13 +713,36 @@ def _has_unsupported_semantic_relations(promoted: list[slice_frontmatter.Slice])
     return None
 
 
+def _existing_names(item: Mapping[str, Any]) -> set[str]:
+    """既存 note 的 canonical 名稱集合（title / atom_title / aliases），空值不算名字。
+
+    只認這個 note 自己的「主題名」：``title``/``atom_title`` 是同一個名字的兩個
+    欄位，``aliases`` 是它公開承認的別名。刻意不含 ``session_title``——那是來源
+    session 的標題，不是這則原子筆記的主題名，納入會讓「剛好出自同名 session」
+    的兩則不同主題誤判為前後版本。
+    """
+    candidates = [item.get("title"), item.get("atom_title")]
+    candidates.extend(a for a in (item.get("aliases") or []) if isinstance(a, str))
+    return {name for name in (_canonical_title(c) for c in candidates) if name}
+
+
 def _attach_unambiguous_supersedes(
     memory_root: Path,
     promoted: list[slice_frontmatter.Slice],
 ) -> list[slice_frontmatter.Slice]:
-    """Link a changed body only when source, project, and canonical title agree.
+    """Link a changed body only when project and canonical title/alias agree.
 
     Zero or multiple matches are intentionally left parallel for manual review.
+
+    fix 2b (#136)：舊條件多要求 ``distilled_from`` 相等，等於只有「同一場 session
+    重蒸」才連得上前身；跨 session 蒸出的更新版永遠與舊版平行存在，janitor 的
+    ``decay_superseded`` 因此從未對它們觸發。這裡拿掉 ``distilled_from`` 條件，
+    改用 ``topic.canonical_title``（含 aliases）比對，並要求前身的 ``captured_at``
+    不晚於新 slice——時間單調保證不會回頭連到更新的 note、也不會成環。
+
+    專案仍要求嚴格相等：跨專案配對只透過 ``projects.yaml`` 的 ``families:``
+    開通，而 publish 這條路徑不讀 projects.yaml，所以它一律不跨專案（跨專案的
+    同主題候選由 ``supersedes_link`` 的 review tier 出報表給人決定）。
     """
     existing: list[Mapping[str, Any]] = []
     knowledge = memory_root / "knowledge"
@@ -740,10 +763,10 @@ def _attach_unambiguous_supersedes(
             item
             for item in existing
             if item.get("slice_id") != slice_.slice_id
-            and item.get("distilled_from") == frontmatter.get("distilled_from")
             and item.get("project") == frontmatter.get("project")
-            and _canonical_title(item.get(title_key)) == title
+            and title in _existing_names(item)
             and item.get("checksum") != frontmatter.get("checksum")
+            and str(item.get("captured_at", "")) <= str(frontmatter.get("captured_at", ""))
         ]
         if title and len(matches) == 1:
             predecessor = str(matches[0].get("slice_id") or "")

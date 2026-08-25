@@ -659,6 +659,90 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(supersedes), 1)
             self.assertEqual(supersedes[0]["to"], f"slice:{old_id}")
 
+    def test_cross_session_same_title_supersedes_at_publish(self):
+        """fix 2b：不同 session 蒸餾出的同專案同 canonical title note 也要連 supersedes。
+
+        舊條件要求 ``distilled_from`` 相等，等於只有「同一場 session 重蒸」才連；
+        跨 session 的更新版永遠與舊版平行存在，janitor 的 decay_superseded 因此
+        永遠不會觸發。這裡兩輪用不同 inbox session（s1/s2）但同一個 canonical
+        title、不同 body（checksum 不同），第二輪必須把第一輪的 slice 標成前身。
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+
+            def canned(body: str) -> str:
+                return json.dumps(
+                    [{
+                        "title": "stable canonical title",
+                        "artifact_kind": "report",
+                        "project": "paulshaclaw",
+                        "tags": [],
+                        "body": body,
+                        "source_fragment_indices": [0, 1],
+                        "relations": [],
+                    }]
+                )
+
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(canned("body version one")),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            old_slice = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            old_fm, _ = pipeline._parse_frontmatter(old_slice.read_text(encoding="utf-8"))
+            old_id = str(old_fm["slice_id"])
+            self.assertEqual(old_fm["distilled_from"], "claude:s1")
+
+            # 第二輪用另一個 inbox session（s2 -> distilled_from: claude:s2）。
+            _seed_raw_s2(root)
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T02:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(canned("body version two")),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+
+            notes = sorted((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            self.assertEqual(len(notes), 2)
+            new_note = next(path for path in notes if path != old_slice)
+            frontmatter, _ = pipeline._parse_frontmatter(new_note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["distilled_from"], "claude:s2")
+            self.assertEqual(frontmatter["supersedes"], [old_id])
+
+    def test_cross_project_same_title_stays_parallel(self):
+        """跨專案同標題不得自動連結：immediate path 只認同一個 project。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "other-project"
+            existing.mkdir(parents=True)
+            (existing / "n--sl-foreign.md").write_text(
+                "---\nslice_id: sl-foreign\nmemory_layer: knowledge\nproject: other-project\n"
+                "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                "captured_at: \"2026-01-01T00:00:00Z\"\nchecksum: foreign\nsupersedes: []\n---\nx\n",
+                encoding="utf-8",
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["supersedes"], [])
+
     def test_llm_dangling_relates_to_warns_and_promotes(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

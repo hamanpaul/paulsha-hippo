@@ -445,6 +445,24 @@ def _build_parser() -> argparse.ArgumentParser:
     mgroup.add_argument("--apply", action="store_true")
     mark_episodic_p.set_defaults(func=_mark_episodic)
 
+    link_supersedes_p = knowledge_subparsers.add_parser(
+        "link-supersedes",
+        help="一次性回填跨 session 同主題 supersedes（auto/review 分層），fix 2b migration (#136)",
+    )
+    link_supersedes_p.add_argument("--memory-root", required=True)
+    link_supersedes_p.add_argument("--now", default=None)
+    link_supersedes_p.add_argument(
+        "--tier", choices=("auto", "review"), default="auto",
+        help="--apply 要寫入哪一層。auto（預設）＝雙向唯一的同名配對；review＝"
+             "接受報表中的全部候選（等同 accept 全部，只在人看過報表後使用）。")
+    lgroup = link_supersedes_p.add_mutually_exclusive_group()
+    lgroup.add_argument("--dry-run", action="store_true")
+    lgroup.add_argument("--apply", action="store_true")
+    lgroup.add_argument(
+        "--accept", default=None, metavar="REPORT.jsonl",
+        help="套用報表中 accept 為 true 的那幾行（與 --apply 互斥）。")
+    link_supersedes_p.set_defaults(func=_link_supersedes)
+
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
     # still errors with exit 2 when the flag is omitted.
@@ -1012,6 +1030,47 @@ def _mark_episodic(args: argparse.Namespace) -> int:
     print(json.dumps(summary, ensure_ascii=False))
     if warnings:
         return 1
+    return 0
+
+
+def _link_supersedes(args: argparse.Namespace) -> int:
+    """`hippo knowledge link-supersedes` 的接線；配對邏輯全在 supersedes_link。
+
+    dry-run（預設）只掃描並把 review 候選寫成報表（`runtime/reports/`，不碰任何
+    knowledge note、不寫 ledger），印 `{"auto": n, "review": m, "report": path}`；
+    `--apply` 額外寫入 `--tier` 選定的那一層；`--accept` 只套報表中標成 true 的行。
+    """
+    from . import supersedes_link
+    from .importer.config import default_projects_path, load_projects_config
+
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    accept = getattr(args, "accept", None)
+    if accept:
+        report = Path(accept)
+        if not report.is_file():
+            print(f"error: accept report not found: {report}", file=sys.stderr)
+            return 1
+        applied = supersedes_link.apply_accepted(root, report, now=now)
+        print(json.dumps({"applied": applied, "report": str(report)}, ensure_ascii=False))
+        return 0
+    # families 是跨專案配對的唯一開關（opt-in）；讀不到 projects.yaml 就退回
+    # 「不跨專案」，比照 hooks/_shortlist_common._families 的 best-effort 語意。
+    try:
+        families = tuple(load_projects_config(default_projects_path(root)).families)
+    except Exception:
+        families = ()
+    result = supersedes_link.scan(root, families=families)
+    report = supersedes_link.write_report(root, result["review"], now=now)
+    payload: dict[str, object] = {
+        "auto": len(result["auto"]),
+        "review": len(result["review"]),
+        "report": str(report),
+    }
+    if getattr(args, "apply", False):
+        payload["applied"] = supersedes_link.apply_pairs(root, result[args.tier], now=now)
+        payload["tier"] = args.tier
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
