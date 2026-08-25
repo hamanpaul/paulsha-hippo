@@ -28,9 +28,9 @@
 
 ## Usage
 
-日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
+日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo show --agent <slice_id>`（精簡 note 視圖，省 ~70% token）／`hippo followups list|verify|close|extract`（可行動語句 ledger）／`hippo knowledge backfill-provenance|link-supersedes|mark-episodic`（一次性 migration，先 dry-run）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
 跨 CLI 消費能力（codex/copilot 的 prompt-time／read attribution 實測）見 `docs/cross-cli-capability-matrix.md`。
-唯讀 7／30 天記憶 KPI 稽核可使用 repo-local `custom-skills/hippo-memory-kpi/`；它分開呈現 session→atomic note、machine-valid/searchable 與嚴格 `offer → read → applied` 漏斗，且不呼叫 `hippo recall` 污染分母。
+唯讀 7／30 天記憶 KPI 稽核可使用 repo-local `custom-skills/hippo-memory-kpi/`；它分開呈現 session→atomic note、machine-valid/searchable 與嚴格 `offer → read → applied` 漏斗，另含 `followups` 區塊統計每個 window 的 open／resolved-in-source 筆數，且不呼叫 `hippo recall` 污染分母。
 蒸餾失敗顯性化：backend 不可用／重試超限的 session 進 `parked`（證據在 `runtime/queue/_failed/`），修復後 `hippo requeue` 恢復；`dream run` 以 global lock 保證單一 writer，並發第二實例記 log 後跳過。
 維運：`hippo doctor`（含 dream lock 持鎖狀態與 dream/supervise 進程健康報告——PID/start/cmdline、非 canonical 標記，只報告不自動 kill）；`hippo locks cleanup-legacy --memory-root <root> [--apply]`（legacy per-session lock 一次性清理，預設 dry-run，僅維護窗口使用）。
 

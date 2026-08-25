@@ -1,0 +1,9 @@
+---
+type: feat
+---
+- Issue #136 fix 3a/3b（`show --agent` 精簡視圖與 read 歸因）：新增共用 `runtime_flags.load_flags()`（`HygieneFlags`：`collapse_same_topic`／`read_hint`／`followups_enabled`／`episodic_filter`，best-effort 讀 `paulsha_hippo/atomizer/atomizer.yaml`，缺鍵／壞檔一律預設）——本任務線與 `136-hygiene-supersedes.md`／`136-hygiene-episodic.md`／`136-hygiene-followups.md` 共用的讀取入口。
+- 新增 `hippo show <ref> --agent`：印精簡 header（不含 `distiller`/`checksum`/`publication_id`/`distilled_from` 等機器歸因欄位）＋原文 body，省下 Read 一筆 note 要多付的 token（約 70%）。`--tool`/`--session-id` 同時給時，經 `usage_read.append_read_event` 補記與 `hooks/claude_post_tool_use.py` 同 schema 的 read 事件，讓 memory-usage KPI（看過率）在 agent 改用 `show` 取代 `Read` 之後仍能正確歸因；輸出前一律先經 `redact_for_agent` 的 `check_boundary` 遮蔽（fail-closed：boundary 檢查失敗則不印任何內容、exit 非 0）。
+- 兩輪穩固化：(1) read 歸因寫入包 try/except，ledger mkdir/open/write 任一步例外只印 stderr warning、輸出與 exit code 不受影響，並補齊先前只有 `--agent` 有覆蓋、其餘 CLI 分支（預設整檔輸出、`--tool`/`--session-id` 需成對提供、ambiguous ref）缺的測試；(2) fail-closed 拆成兩段 try——讀檔／解析 frontmatter／渲染失敗印「讀取或解析 note 失敗」，`check_boundary` 失敗維持原本 boundary 訊息，兩種情境下 stdout 皆維持空字串、rc 皆非零，不再被誤標成同一種失敗。
+- shortlist hint 依 `runtime_flags.read_hint`（config `shortlist.read_hint`，值 `show`／`read`，預設 `show`）分流：預設建議執行帶 `--tool`/`--session-id` 的 `hippo show --agent` 換精簡全文並順手記 read 歸因，每行同時附上 `slice_id` 供指令直接代入；設回 `read` 則維持舊版「用 Read 開啟絕對路徑」文字。`SessionStart` orientation 的預設 retrieval hint 之後（fix 5 收尾）也跟著 `read_hint` 走，與 shortlist hint 保持一致，不再永遠講「用 Read」。
+- 設定：`shortlist.read_hint`（`paulsha_hippo/atomizer/atomizer.yaml`，預設 `show`）——完整新增鍵清單見 `136-hygiene-provenance.md`。
+- 建議 live migration 執行順序（皆先 `--dry-run` 看候選再 `--apply`）：`hippo knowledge backfill-provenance` → `hippo knowledge mark-episodic` → `hippo knowledge link-supersedes --tier auto`（review tier 候選人工勾選後 `--accept`）→ `hippo followups extract`。三支 SessionEnd hook 內容已變更（見 `136-hygiene-provenance.md`），既有安裝需重新 `hippo upgrade plan/prepare/apply`（wheel＋skill）並 `hippo install hooks`（冪等）套用，再以 `hippo doctor` 確認生效。
