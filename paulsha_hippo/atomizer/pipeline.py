@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from ..agent_profiles import AgentRunResult
 from ..ledger import processing, relations
 from ..noise import DocCorpus, classify_noise
+from ..topic import canonical_title as _canonical_title
 from . import slice_frontmatter, splitter
 from .config import AtomizerConfig, is_safe_path_component, project_directory_key, sanitize_project_component
 from .llm_promoter import LLMPromoter, PromoteError
@@ -711,10 +711,6 @@ def _has_unsupported_semantic_relations(promoted: list[slice_frontmatter.Slice])
             if relation_type not in {"relates_to", "mentions"}:
                 return f"slice {slice_.slice_id} has unsupported semantic relation type: {relation_type!r}"
     return None
-
-
-def _canonical_title(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
 def _attach_unambiguous_supersedes(

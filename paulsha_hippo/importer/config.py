@@ -24,6 +24,7 @@ class ProjectConfig:
 class ProjectsConfig:
     projects: tuple[ProjectConfig, ...] = ()
     aliases: dict[str, str] | None = None
+    families: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if self.aliases is None:
@@ -73,17 +74,29 @@ def _finalize_project(projects: list[ProjectConfig], current_name: str | None, c
 def parse_projects_config(text: str) -> ProjectsConfig:
     lines = _trimmed_lines(text)
     projects: list[ProjectConfig] = []
+    families: list[tuple[str, ...]] = []
     current_name: str | None = None
     current_data: dict[str, list[str] | str] = {}
     current_list_key: str | None = None
     in_projects = False
+    in_families = False
 
     for indent, line in lines:
         stripped = line.strip()
         if indent == 0 and stripped == "projects:":
             in_projects = True
+            in_families = False
             current_list_key = None
             continue
+        if indent == 0 and stripped == "families:":
+            in_projects = False
+            in_families = True
+            continue
+        if in_families and indent >= 2 and stripped.startswith("- "):
+            families.append(_inline_list(stripped[2:].strip()))
+            continue
+        if indent == 0:
+            in_families = False
         if not in_projects:
             continue
         if indent == 2 and stripped.endswith(":"):
@@ -128,7 +141,7 @@ def parse_projects_config(text: str) -> ProjectsConfig:
                 )
                 continue
             aliases[alias] = project.slug
-    return ProjectsConfig(projects=tuple(projects), aliases=aliases)
+    return ProjectsConfig(projects=tuple(projects), aliases=aliases, families=tuple(families))
 
 
 def load_projects_config(path: str | Path | None) -> ProjectsConfig:

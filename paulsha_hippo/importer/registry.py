@@ -412,4 +412,4 @@ def load_union_projects_config(
                     )
                 continue
             aliases[alias] = project.slug
-    return ProjectsConfig(projects=tuple(merged), aliases=aliases)
+    return ProjectsConfig(projects=tuple(merged), aliases=aliases, families=legacy.families)
