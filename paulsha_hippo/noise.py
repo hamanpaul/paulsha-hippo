@@ -236,9 +236,10 @@ _GENERIC_TITLE_PREFIX = re.compile(r"^(?:report|task|todo)-")
 # 故拆成 strong／weak 兩級：
 #   - strong：只有描述 session/commit 自身狀態時才通的措辭，一行命中即算
 #     session-state 行（不需佐證）。
-#   - weak：單獨出現在耐久技術文件裡也合理的字，需同一行內有 ≥2 個「不重疊」的
-#     不同 weak 訊號互相佐證才算一行命中；1 行 body 只接受 strong 命中，weak 訊號
-#     組合在單行下不成立（統計意義不足，且更容易被單一常見詞誤觸發）。
+#   - weak：單獨出現在耐久技術文件裡也合理的字，需同一行內有 ≥2 個「不同」weak
+#     pattern 互相佐證才算一行命中（同一 pattern 重複出現幾次都只算 1 個佐證，
+#     見 review round 2 finding／_weak_hit_count）；1 行 body 只接受 strong 命中，
+#     weak 訊號組合在單行下不成立（統計意義不足，且更容易被單一常見詞誤觸發）。
 _STRONG_STATE_RE = re.compile(
     r"尚未 ?(?:commit|push|合併|merge)"        # 尚未 commit／push／合併／merge
     r"|待 ?(?:push|commit|合併)"                # 待 push／commit／合併
@@ -255,14 +256,16 @@ _STRONG_STATE_RE = re.compile(
     r"|\bsession (?:ended|end|handoff)\b",
     re.IGNORECASE,
 )
-# weak 訊號各自獨立編譯，供逐行計算「不重疊命中數」使用（見 _weak_hit_count）。
+# weak 訊號各自獨立編譯，供逐行計算「不同 pattern 命中數」使用（見 _weak_hit_count）。
 _WEAK_STATE_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"\bstatus\b", r"目前", r"尚未", r"待辦")
 )
 # Title 規則維持 strong（單獨命中即整篇降層）；英文替代項加上 \b，避免比對到更長
 # 英文單字的子字串（中文「狀態$」本來就用 $ 錨定到字尾，不受影響）。
-_STATE_TITLE_RE = re.compile(r"^session-handoff\b|\bhandoff\b|狀態$", re.IGNORECASE)
+# review round 2 (minor)：`^session-handoff\b` 是冗餘 alternative——"session-handoff"
+# 本身已含 "handoff"，"-" 前後皆非 word char，`\bhandoff\b` 單獨即可命中，故移除。
+_STATE_TITLE_RE = re.compile(r"\bhandoff\b|狀態$", re.IGNORECASE)
 EPISODIC_RATIO = 0.5
 
 _FENCE_LINE = re.compile(r"^(?:```|~~~)")
@@ -288,31 +291,28 @@ def _episodic_content_lines(body: str) -> list[str]:
 
 
 def _weak_hit_count(line: str) -> int:
-    """該行內「不重疊」的 weak 訊號命中數。
+    """該行內命中的「不同」weak pattern 數（distinct pattern indices，非 span 數）。
 
-    子字串重疊（例如「目前」的比對範圍完全落在「目前狀態」的比對範圍裡）只算 1
-    次，避免單一詞出現（如僅「目前狀態」四字）就因規則列表冗餘而湊出 2 個命中。
+    review round 2 finding：舊版用「不重疊 span 數」計算，同一個 pattern 在同一行
+    內重複出現（如「目前目前都還好」「status status」）會各自產生不重疊 span，被
+    誤算成 2 次命中，湊出 session-state 判定。正確判準是「≥2 個不同 pattern」互相
+    佐證，同一 pattern 出現幾次都只算 1 次；故直接對每個 pattern 判斷「該行是否至
+    少命中一次」（不看次數、不看位置），再加總命中的 pattern 數。
+
+    注意（round 2 殘留案例，未完全解決）：reviewer 舉的第三個案例
+    「HANDOFF register（handoff status register）」在本次修正後 `_weak_hit_count`
+    仍回傳 2——因為 `\bhandoff\b` 與 `\bstatus\b` 是列表中兩個真正不同、且在該行
+    確實各自出現一次的 pattern（非重複），這不是本函式要修的「重複計數」問題；
+    同一行另外還會直接命中 `_STRONG_STATE_RE` 的 `\bhandoff (?:status|state|note)\b`
+    （brief 要求 strong path 維持不動，故未處理）。詳見 task-13-report.md round 2
+    fix report。
     """
-    spans = sorted(
-        (m.start(), m.end())
-        for pat in _WEAK_STATE_PATTERNS
-        for m in pat.finditer(line)
-    )
-    if not spans:
-        return 0
-    merged = [spans[0]]
-    for start, end in spans[1:]:
-        last_start, last_end = merged[-1]
-        if start < last_end:
-            merged[-1] = (last_start, max(last_end, end))
-        else:
-            merged.append((start, end))
-    return len(merged)
+    return sum(1 for pat in _WEAK_STATE_PATTERNS if pat.search(line))
 
 
 def _line_is_session_state(line: str) -> bool:
     """ratio 規則（≥2 行 body）下，單行是否算 session-state：strong 一擊即中；
-    weak 需同一行 ≥2 個不重疊訊號互相佐證。"""
+    weak 需同一行 ≥2 個不同 pattern 互相佐證。"""
     if _STRONG_STATE_RE.search(line):
         return True
     return _weak_hit_count(line) >= 2

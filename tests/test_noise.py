@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from paulsha_hippo.noise import build_corpus, classify_noise, episodic_reason
+from paulsha_hippo.noise import (
+    _weak_hit_count,
+    build_corpus,
+    classify_noise,
+    episodic_reason,
+)
 
 
 # A fake agent-instruction document (CLAUDE.md/AGENTS.md shape) used as verbatim corpus.
@@ -312,6 +317,31 @@ class EpisodicReasonTests(unittest.TestCase):
     # --- 2 行 body、1 行強訊號 → 剛好卡在 EPISODIC_RATIO=0.5 門檻上 --------------
     def test_two_line_body_one_strong_line_hits_ratio_floor(self):
         body = "cmake 版本鎖定 3.31.6。\n尚未 commit。\n"
+        self.assertEqual(episodic_reason("筆記", body), "body:session-state:1/2")
+
+    # --- review round 2 finding：同一 weak pattern 在同一行內重複出現（不重疊
+    # span）不該湊出 ≥2 命中。需要「≥2 個不同 pattern」佐證，而非「≥2 個不重疊
+    # span」——即使兩個 span 都來自同一個 pattern。 --------------------------
+    def test_weak_hit_count_dedupes_repeated_same_pattern(self):
+        self.assertEqual(_weak_hit_count("status status status"), 1)
+
+    def test_repeated_weak_word_alone_is_not_episodic(self):
+        # 「目前」重複兩次仍只是同一個 weak pattern，不構成兩個不同訊號佐證。
+        body = "此驅動目前運作正常，目前未發現異常。\ncmake 版本鎖定 3.31.6。\n"
+        self.assertIsNone(episodic_reason("驅動筆記", body))
+
+    def test_repeated_status_word_is_not_episodic(self):
+        # 「status」重複兩次仍只是同一個 weak pattern。
+        body = (
+            "The status field mirrors the status register bit for CM3.\n"
+            "This is unrelated durable prose line.\n"
+        )
+        self.assertIsNone(episodic_reason("Register notes", body))
+
+    def test_two_different_weak_words_still_counts(self):
+        # 佐證仍然成立的正例：同一行內有 2 個「不同」weak pattern（handoff／尚未），
+        # 且皆非 strong 命中。
+        body = "handoff 尚未確定，仍在討論中。\ncmake 版本鎖定 3.31.6。\n"
         self.assertEqual(episodic_reason("筆記", body), "body:session-state:1/2")
 
 
