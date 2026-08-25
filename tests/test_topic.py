@@ -97,3 +97,18 @@ def test_z_suffix_and_offset_forms_compare_correctly():
     kept, collapsed = topic.collapse_same_topic(hits)
     assert [h["slice_id"] for h in kept] == ["offset"]
     assert collapsed == {"offset": ["z", "naive"]}
+
+
+def test_collapse_tolerates_hit_without_slice_id():
+    """hits 來自 `search()` 的 row mapping；缺 `slice_id` 的那一筆用 `h["slice_id"]`
+    會丟 KeyError。這是 prompt-time hook 的路徑——一筆壞資料就讓整份 shortlist 消失
+    （外層 fail-closed 回 ''），而不是只影響那一筆。
+    """
+    hits = [
+        {"title": "alpha", "project": "p", "captured_at": "2026-08-02T00:00:00Z"},
+        {"slice_id": "sl-1", "title": "beta", "project": "p",
+         "captured_at": "2026-08-01T00:00:00Z"},
+    ]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert [h.get("slice_id") for h in kept] == [None, "sl-1"]
+    assert collapsed == {}

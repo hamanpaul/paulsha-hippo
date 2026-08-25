@@ -53,9 +53,12 @@ def to_fts_query(prompt: str) -> str:
 def format_shortlist(hits: list[dict], *, hint: str = "read", show_command: str = "") -> str:
     """Render hits ({title, summary, path, slice_id}) as an injected shortlist block. [] -> ''.
 
-    hint=="show" and show_command given: hint line 建議 `show_command <slice_id>`（省 token）
-    and each row carries its slice_id suffix so agents can copy it straight into the
-    command. Otherwise (default): unchanged legacy "Read 開啟絕對路徑" wording.
+    The `— <slice_id>` row suffix is unconditional. The spec fixes every row as
+    "title · one-line summary · absolute path · slice_id" regardless of hint mode,
+    and the offered ledger is keyed by slice_id either way. Only the hint line
+    switches on `hint`: "show" (with a `show_command`) suggests
+    `show_command <slice_id>` (cheaper than Read); otherwise the legacy
+    "Read 開啟絕對路徑" wording.
     """
     if not hits:
         return ""

@@ -88,6 +88,11 @@ def recency_key(value: object) -> datetime:
     return _recency_key(value)
 
 
+def _sid(hit: dict) -> str:
+    """hit 的 slice_id；缺鍵／None 一律回空字串（見 `collapse_same_topic`）。"""
+    return str(hit.get("slice_id") or "")
+
+
 def collapse_same_topic(hits: list[dict], *, families: Iterable[Iterable[str]] = ()) -> tuple[list[dict], dict[str, list[str]]]:
     """同主題折疊：recency 只決定「同組誰存活」，`kept` 的輸出順序仍是 `hits` 的相關度順序。
 
@@ -98,20 +103,24 @@ def collapse_same_topic(hits: list[dict], *, families: Iterable[Iterable[str]] =
     把 kept 重新排回相關度序——最小索引最小的組排最前，讓一個強相關組即使其最新成員
     在原始命中序中排得靠後，仍保住該組最靠前那個位置的名次。
     """
-    orig_index = {str(h["slice_id"]): i for i, h in enumerate(hits)}
+    # `slice_id` 一律走 `.get`：hits 來自 `search()` 的 row mapping，缺鍵的那一筆
+    # 用 `h["slice_id"]` 會丟 KeyError，而這是 prompt-time hook 的路徑——一筆壞資料
+    # 就讓整份 shortlist 消失（外層 fail-closed 回 ''）。缺鍵者共用空字串鍵，最多
+    # 只是彼此之間的名次退化為輸入順序（stable sort），不會中斷折疊。
+    orig_index = {_sid(h): i for i, h in enumerate(hits)}
     ordered = sorted(hits, key=lambda h: _recency_key(h.get("captured_at")), reverse=True)
     kept: list[dict] = []
     collapsed: dict[str, list[str]] = {}
     group_min_index: dict[str, int] = {}
     for h in ordered:
-        sid = str(h["slice_id"])
+        sid = _sid(h)
         owner = next((k for k in kept if is_same_topic(k, h, families=families)), None)
         if owner is None:
             kept.append(h)
             group_min_index[sid] = orig_index[sid]
         else:
-            owner_id = str(owner["slice_id"])
+            owner_id = _sid(owner)
             collapsed.setdefault(owner_id, []).append(sid)
             group_min_index[owner_id] = min(group_min_index[owner_id], orig_index[sid])
-    kept.sort(key=lambda h: group_min_index[str(h["slice_id"])])
+    kept.sort(key=lambda h: group_min_index[_sid(h)])
     return kept, collapsed

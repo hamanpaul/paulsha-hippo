@@ -14,7 +14,9 @@ def test_reads_keys_and_falls_back_per_key(tmp_path):
     f = rf.load_flags(p)
     assert f.collapse_same_topic is False and f.read_hint == "read"
     assert f.followups_enabled is True      # 型別錯 → 預設
-    assert f.episodic_filter is False
+    # `episodic_filter` 刻意不在 HygieneFlags 上：atomizer 自己讀那個鍵
+    # （AtomizerConfig.episodic_filter），這裡再存一份沒有讀取端。
+    assert not hasattr(f, "episodic_filter")
 
 
 def test_invalid_read_hint_falls_back(tmp_path):

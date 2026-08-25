@@ -14,7 +14,9 @@ class HygieneFlags:
     collapse_same_topic: bool = True
     read_hint: str = "show"
     followups_enabled: bool = True
-    episodic_filter: bool = True
+    # 刻意不含 `episodic_filter`：那個鍵由 atomizer 自己讀（`AtomizerConfig.
+    # episodic_filter` → `pipeline._publish` 的降層分支），這裡再放一份沒有任何
+    # 讀取端，只會讓人以為改這裡就會生效。`atomizer.yaml` 的鍵本身保留不動。
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -40,5 +42,4 @@ def load_flags(config_path: Path | None = None) -> HygieneFlags:
         collapse_same_topic=_bool(shortlist.get("collapse_same_topic"), True),
         read_hint=hint if hint in _READ_HINTS else "show",
         followups_enabled=_bool(followups.get("enabled"), True),
-        episodic_filter=_bool(data.get("episodic_filter"), True),
     )
