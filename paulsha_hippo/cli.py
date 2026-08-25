@@ -1597,19 +1597,15 @@ def _followups_close(args: argparse.Namespace) -> int:
 def _followups_extract(args: argparse.Namespace) -> int:
     """從 knowledge notes 抽取可行動語句（issue #136 fix 5）；預設 dry-run，--apply 才落 ledger。
 
-    --apply 時仍受 runtime_flags.followups_enabled 閘門（Task 4）：config 關掉時降級為
-    dry-run 並提示，不悄悄開單。
+    review round 1 finding 3：runtime_flags.followups_enabled 閘門已內建進
+    `followups.extract_all` 本身（`enabled=None` 時 best-effort 讀 config）——這裡不重複
+    判斷，直接把 `apply` 原樣傳下去；config 關掉時 summary 會帶 `"skipped":
+    "followups.disabled"`，落不落 ledger 一律以 `extract_all` 的決定為準。
     """
     from . import followups as fu
-    from .runtime_flags import load_flags
 
     root = Path(args.memory_root)
-    apply = bool(args.apply)
-    if apply and not load_flags().followups_enabled:
-        print("followups extract: config（followups.enabled: false）已停用開單，改以 dry-run 執行",
-              file=sys.stderr)
-        apply = False
-    summary = fu.extract_all(root, apply=apply, now=_followups_now(), project=args.project)
+    summary = fu.extract_all(root, apply=bool(args.apply), now=_followups_now(), project=args.project)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
