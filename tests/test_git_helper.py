@@ -116,6 +116,8 @@ class GitHelperTests(unittest.TestCase):
             self.assertIsNone(_git.git_head(None))
             self.assertIsNone(_git.git_head(tmp))  # 非 repo
 
+    # 迴歸覆蓋：self-review 發現 git_rev_before 缺真 repo 測試後才補上，是在
+    # 實作完成後才加的（未走 TDD RED→GREEN），見 task-10-report.md「Process exception」。
     def test_rev_before_returns_approx_commit_for_timestamp(self) -> None:
         # 真 repo、兩個帶明確 commit 日期的 commit（issue #136 fix 1b/1c backfill 用）：
         # rev-list --before= 近似值須落在正確的一側。

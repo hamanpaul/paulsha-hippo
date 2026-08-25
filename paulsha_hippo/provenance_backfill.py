@@ -12,11 +12,12 @@ path-escape（path 解析後不在 <memory_root>/archive/queue 之內，比照 r
 的 archive 圍籬，issue #136 review round 1 #1）、no-cwd、no-timestamp（archive
 payload 的 ended_at/timestamp 與 note 自身 captured_at 三者皆缺/空）、
 not-a-repo、no-commit-before-ts。ts 來源優先序 ended_at > timestamp >
-note.captured_at（回退，review round 1 #3）；哪個來源實際命中候選記在
-summary["ts_source"]。
+note.captured_at（回退，owner-approved fallback, 2026-08-25）；哪個來源實際
+命中候選記在 summary["ts_source"]。
 """
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 from typing import Callable
@@ -26,6 +27,24 @@ from paulsha_hippo.importer import _git
 from paulsha_hippo.moc import frontmatter_io as fio
 
 _UNKNOWN = ("", "_unknown", None)
+
+
+def _coerce_captured_at(value: object) -> str | None:
+    """把 note 自身 frontmatter 的 captured_at 轉成可餵給 git 的字串 ts。
+
+    frontmatter_io.read() 用的是純 yaml.safe_load：沒加引號的
+    ``captured_at: 2026-08-17T03:32:41Z`` 會被 YAML 隱式解析成
+    datetime.datetime，不是 str；舊版單純 isinstance(..., str) 守門會把這種
+    常見寫法誤判成缺 timestamp。比照 skillopt/valset.py:107
+    ``str(... or "_unknown")`` 的型別容忍慣例：datetime/date 用 .isoformat()，
+    其餘非空值一律 str()，None/空字串維持不回退。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    s = str(value)
+    return s if s.strip() else None
 
 
 def _archive_meta(path_value: object, root: Path) -> tuple[dict | None, str]:
@@ -85,22 +104,22 @@ def run(memory_root: Path | str, *, apply: bool = False, project: str | None = N
             meta, why = _archive_meta(prov.get("path"), root)
             if meta is not None:
                 cwd = meta.get("cwd")
-                captured_at = fm.get("captured_at")
+                captured_at = _coerce_captured_at(fm.get("captured_at"))
                 ts, ts_source = None, None
                 if meta.get("ended_at"):
                     ts, ts_source = meta.get("ended_at"), "ended_at"
                 elif meta.get("timestamp"):
                     ts, ts_source = meta.get("timestamp"), "timestamp"
-                elif isinstance(captured_at, str) and captured_at:
+                elif captured_at:
                     ts, ts_source = captured_at, "captured_at"
                 if not cwd:
                     why = "no-cwd"
                 elif not ts:
                     why = "no-timestamp"
                 else:
-                    # perf: git rev-parse --show-toplevel only spawns once ts is
-                    # known resolvable — no point probing cwd for a note we're
-                    # about to skip as no-timestamp anyway (review round 1 #4).
+                    # perf: defer toplevel until ts known — no point spawning
+                    # `git rev-parse --show-toplevel` for a note we're about to
+                    # skip as no-timestamp anyway.
                     top = toplevel(cwd)
                     if not top:
                         why = "not-a-repo"

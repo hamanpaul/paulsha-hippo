@@ -16,6 +16,24 @@ def _note(mr: Path, sid: str, commit: str, archive: str, body: str) -> Path:
     return p
 
 
+# captured_at 故意不加引號：yaml.safe_load（frontmatter_io.read() 用的解析器）會把
+# 這種寫法隱式解析成 datetime.datetime，而不是 str（review round 2 #1）。
+_FM_UNQUOTED_CAPTURED_AT = (
+    "---\nslice_id: {sid}\nmemory_layer: knowledge\nproject: proj\ntitle: T\n"
+    "captured_at: {captured_at}\nsupersedes: []\nprovenance:\n  repo: r\n  commit: {commit}\n"
+    "  path: {archive}\ndistiller:\n  profile_id: claude\n---\n"
+)
+
+
+def _note_unquoted_captured_at(mr: Path, sid: str, commit: str, archive: str, captured_at: str, body: str) -> Path:
+    p = mr / "knowledge" / "proj" / f"t--{sid}.md"; p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        _FM_UNQUOTED_CAPTURED_AT.format(sid=sid, commit=commit, archive=archive, captured_at=captured_at) + body,
+        encoding="utf-8",
+    )
+    return p
+
+
 def _archive(mr: Path, name: str, payload: dict) -> str:
     a = mr / "archive" / "queue" / "2026-08" / name; a.parent.mkdir(parents=True, exist_ok=True)
     a.write_text(json.dumps(payload)); return str(a)
@@ -130,3 +148,36 @@ def test_missing_ended_at_and_timestamp_falls_back_to_note_captured_at(tmp_path)
     assert fm["provenance"]["commit"] == head
     assert fm["provenance"]["commit_source"] == "backfill-approx"
     assert warnings == []
+
+
+def test_captured_at_fallback_accepts_unquoted_yaml_datetime(tmp_path):
+    # review round 2 #1：frontmatter_io.read() 用純 yaml.safe_load，未加引號的
+    # captured_at（如 `_note_unquoted_captured_at` 寫出的那種）會被解析成
+    # datetime.datetime，不是 str。舊版 `isinstance(captured_at, str)` 守門會把
+    # 這種常見寫法誤判成 no-timestamp，回退整條路徑實際上永遠打不到。
+    # 走真 git repo + 真 apply 端到端驗證，並補上這條路徑本身欠缺的冪等測試：
+    # apply → dry-run 回報 0 → 再 apply 一次逐位元不變。
+    repo = tmp_path / "repo"
+    head = _init_repo_with_commit(repo, "2026-08-01T00:00:00+00:00")
+    a = _archive(tmp_path, "s1.json", {"cwd": str(repo), "ended_at": None})
+    p = _note_unquoted_captured_at(tmp_path, "sl-1", "_unknown", a, "2026-08-17T03:32:41Z", "無引用\n")
+
+    summary1, warnings1 = pb.run(tmp_path, apply=True)
+    assert summary1["ts_source"] == {"captured_at": 1}
+    assert summary1["commit_candidates"] == 1 and summary1["updated"] == 1
+    assert summary1["commit_reasons"] == {}
+    assert warnings1 == []
+    fm, _ = fio.read(p.read_text(encoding="utf-8"))
+    assert fm["provenance"]["commit"] == head
+    assert fm["provenance"]["commit_source"] == "backfill-approx"
+    after_first_apply = p.read_bytes()
+
+    summary2, warnings2 = pb.run(tmp_path, apply=False)
+    assert summary2["commit_candidates"] == 0 and summary2["cites_candidates"] == 0
+    assert warnings2 == []
+    assert p.read_bytes() == after_first_apply
+
+    summary3, warnings3 = pb.run(tmp_path, apply=True)
+    assert summary3["updated"] == 0
+    assert warnings3 == []
+    assert p.read_bytes() == after_first_apply
