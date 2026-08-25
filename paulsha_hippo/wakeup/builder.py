@@ -72,6 +72,16 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
 
     See task description for behavior. This implementation is conservative and
     fail-open: unreadable files are skipped.
+
+    char_budget is a hard cap on len(result) — this includes the trailing
+    "## Follow-ups" line (open follow-ups count + `hippo followups list` hint)
+    appended when the flag is on and there is at least one open item. That line
+    is reserved and subtracted from the budget available to the rest of the
+    brief *before* any other truncation runs; but if the line alone would not
+    fit inside the caller's original char_budget, it is dropped entirely rather
+    than appended truncated — a half-written "## Follow-ups" fragment is worse
+    than no line at all, and appending it unclamped would let the result exceed
+    char_budget. See review round 1 finding 1.
     """
     memory_root = Path(memory_root)
 
@@ -80,11 +90,9 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
     # the right MOC but mismatch every slice's frontmatter and exclude them all.
     project = (project or "").strip()
 
-    # issue #136 fix 5：Follow-ups 一行永遠附在整段結果末尾——先算出這行文字、
-    # 從 char_budget 扣掉它的長度，讓下面既有的配置/截斷邏輯在扣除後的預算內
-    # 運作，最後每個 return 點統一用 _finish() 補上，確保總長度仍在呼叫端給的
-    # char_budget 之內。任何例外（flag 讀取失敗、open_count 失敗…）一律不附行
-    # ——fail-open，brief 本身的既有內容不受影響。
+    # issue #136 fix 5：Follow-ups 一行永遠附在整段結果末尾——先算出這行文字，最後
+    # 每個 return 點統一用 _finish() 補上。任何例外（flag 讀取失敗、open_count
+    # 失敗…）一律不附行——fail-open，brief 本身的既有內容不受影響。
     followups_block = ""
     try:
         from paulsha_hippo import followups as _fu
@@ -97,7 +105,26 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
                 )
     except Exception:
         followups_block = ""
-    char_budget = max(0, char_budget - len(followups_block))
+
+    # review round 1 finding 1：_finish() 把 followups_block 整段、不裁切地接在
+    # 每個 return 點的尾巴——原本只把它的長度從 char_budget 扣掉、再讓下面既有的
+    # 配置/截斷邏輯在扣除後的預算內運作，但當呼叫端給的 char_budget 本身很小
+    # （< len(followups_block)，例如短 char_budget 撞上長 memory_root/project）時，
+    # `max(0, char_budget - len(followups_block))` 會把扣除後的預算夾到 0——前段
+    # 內容確實被裁成空字串，followups_block 卻仍整段原封不動地附加，導致總長度
+    # 超過呼叫端給的 char_budget。
+    #
+    # 規則：block 放不下（len(followups_block) > 呼叫端原始 char_budget）就整段
+    # 丟棄——不附加、也不占用預算，讓後面的邏輯照原始 char_budget 裁切主體；放得
+    # 下才保留，並從 char_budget 扣除它的長度供後續邏輯運作。這樣 _finish() 加回
+    # 它之後，總長度必定 <= 呼叫端原始 char_budget：放得下時主體 <=
+    # char_budget - len(block)、加回 block 後恰為 char_budget；放不下時 block 為
+    # 空字串、主體本就在未扣除的原始 char_budget 內裁切，總長度不變。也不會出現
+    # 截斷到一半的「## Follow-ups」殘行——放不下就整行不出現。
+    if len(followups_block) > char_budget:
+        followups_block = ""
+    else:
+        char_budget = max(0, char_budget - len(followups_block))
 
     def _finish(text: str) -> str:
         return text + followups_block

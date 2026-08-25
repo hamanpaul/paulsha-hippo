@@ -386,6 +386,41 @@ class WakeupBuilderTests(unittest.TestCase):
             self.assertIn(f"--project p", out1)
             self.assertLessEqual(len(build_brief(root, "p", now="2026-08-25T00:00:00Z", char_budget=300)), 300)
 
+    def test_followups_line_respects_char_budget(self):
+        """Review round 1 finding 1: the "## Follow-ups" line must never itself push
+        the returned text past the caller's original char_budget. When the line alone
+        doesn't fit a small budget it must be dropped entirely (no partial/truncated
+        "## Follow-ups" fragment); a normal budget still yields the full line, last.
+        """
+        from paulsha_hippo import followups as fu
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "p", "alpha")
+            fu.append_event(root, {"id": "fu-1", "event": "opened", "slice_id": "sl-1", "project": "p",
+                                   "target": {"path": "a.md", "line": 1}, "expected_stale": "x", "claim": "c", "source": "regex"},
+                            now="2026-08-25T00:00:00Z")
+            # Mirrors the exact template build_brief formats (see build_brief docstring /
+            # Interfaces section of the task brief) — used only to compute the block's
+            # own length deterministically (it depends on the tmp root's path length),
+            # not to duplicate build_brief's logic.
+            expected_block = (
+                f"\n## Follow-ups\n\n- open follow-ups：1"
+                f"（`hippo followups list --memory-root {root} --project p`）\n"
+            )
+
+            # The block alone is longer than this budget: it must be dropped entirely
+            # rather than truncated mid-line, and the total length must still respect
+            # the caller's original char_budget.
+            small_budget = len(expected_block) - 1
+            out_small = build_brief(root, "p", now="2026-08-25T00:00:00Z", char_budget=small_budget)
+            self.assertLessEqual(len(out_small), small_budget)
+            self.assertNotIn("## Follow-ups", out_small)
+
+            # A normal (large) budget still fits the block, appended last, verbatim.
+            out_normal = build_brief(root, "p", now="2026-08-25T00:00:00Z", char_budget=8000)
+            self.assertTrue(out_normal.endswith(expected_block))
+            self.assertLessEqual(len(out_normal), 8000)
+
 
 def test_build_orientation_concise(tmp_path):
     from paulsha_hippo.wakeup.builder import build_orientation

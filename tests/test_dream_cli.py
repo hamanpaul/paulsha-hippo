@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -311,6 +312,83 @@ class DreamCliTests(unittest.TestCase):
             self.assertIn(out["status"], ("ok", "partial"))
             self.assertIn("error", out["passes"]["followups"])
             self.assertNotIn(secret, json.dumps(out["passes"]["followups"]))   # sanitize
+
+    def test_followups_fn_happy_path_runs_real_verify(self):
+        # Review round 1 finding 2: the failure-isolation test above always mocks
+        # followups.verify to raise — it never exercises the real followups_fn wiring
+        # (real ledger + real projects.yaml -> followups.verify actually running and
+        # succeeding). Build that real setup here: a real followups ledger entry whose
+        # target file genuinely still contains its expected_stale text (-> verified_open),
+        # and a real projects.yaml at the exact path dream/cli.py's followups_fn reads
+        # (importer.config.default_projects_path(memory_root)) declaring a root that
+        # contains that target file.
+        from paulsha_hippo import followups as fu
+        from paulsha_hippo.importer.config import default_projects_path
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # memory_root as a subdir of tmp (not tmp itself) so that
+            # default_projects_path(root) == root.parent/"config"/"projects.yaml"
+            # also lands inside tmp and is cleaned up with it (no host litter under /tmp).
+            root = tmp_path / "memory"
+            _seed(root)
+
+            target_repo = tmp_path / "src-repo"
+            target_repo.mkdir()
+            (target_repo / "doc.md").write_text("stale marker here\n", encoding="utf-8")
+
+            fu.append_event(
+                root,
+                {
+                    "id": "fu-happy-1",
+                    "event": "opened",
+                    "slice_id": "sl-x",
+                    "project": "paulshaclaw",
+                    "target": {"path": "doc.md", "line": 1},
+                    "expected_stale": "stale marker",
+                    "claim": "c",
+                    "source": "regex",
+                },
+                now="2026-07-10T00:00:00Z",
+            )
+
+            # Force "no PSC_CONFIG_ROOT override" regardless of the host environment,
+            # so default_projects_path(root) resolves deterministically relative to
+            # root and the projects.yaml written below is the one followups_fn reads.
+            with patch.dict(os.environ, {"PSC_CONFIG_ROOT": ""}):
+                projects_path = default_projects_path(root)
+                projects_path.parent.mkdir(parents=True, exist_ok=True)
+                projects_path.write_text(
+                    "projects:\n"
+                    "  paulshaclaw:\n"
+                    "    roots:\n"
+                    f"      - {target_repo}\n",
+                    encoding="utf-8",
+                )
+
+                with patch(
+                    "paulsha_hippo.dream.cli.load_flags",
+                    return_value=runtime_flags.HygieneFlags(),
+                ):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        rc = cli.main([
+                            "dream", "run",
+                            "--memory-root", str(root),
+                            "--now", "2026-07-10T00:00:00Z",
+                            "--promoter", "identity",
+                        ])
+            out = json.loads(buf.getvalue())
+            self.assertEqual(rc, 0)
+            followups_summary = out["passes"]["followups"]
+            self.assertNotIn("error", followups_summary)
+            self.assertNotIn("skipped", followups_summary)
+            self.assertEqual(
+                followups_summary,
+                {"checked": 1, "verified_open": 1, "resolved": 0, "unverifiable": 0},
+            )
+            # followups running for real must not degrade dream's overall status.
+            self.assertIn(out["status"], ("ok", "partial"))
 
     def test_status_reports_backlog(self):
         with TemporaryDirectory() as tmp:
