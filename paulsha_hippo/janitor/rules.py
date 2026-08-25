@@ -15,6 +15,7 @@ LINT_TITLE_UNTITLED = "title-untitled"
 LINT_RAW_REMOTE_KEY = "raw-remote-key"
 
 SourcePathCheck = Callable[[KnowledgeRecord], bool | None]
+SourceCommitCheck = Callable[[KnowledgeRecord], bool | None]
 
 
 def _default_source_path_exists(record: KnowledgeRecord) -> bool | None:
@@ -92,6 +93,7 @@ def _decide_decay(
     lc_info: dict[str, Any],
     source_path_exists: SourcePathCheck,
     last_read_at: "str | None" = None,
+    source_commit_exists: "SourceCommitCheck | None" = None,
 ) -> dict[str, Any] | None:
     """Decide if record should decay.
 
@@ -107,7 +109,7 @@ def _decide_decay(
             "detail": {"superseded_by": superseded_by[record.record_id]}
         }
 
-    # Priority 2: source_invalid
+    # Priority 2: source_invalid (path)
     if config.check_provenance_path:
         path_result = source_path_exists(record)
         if path_result is False:  # Only definite False triggers decay
@@ -115,6 +117,15 @@ def _decide_decay(
                 "reason": "source_invalid",
                 "detail": {"check": "provenance_path"}
             }
+
+    # Priority 2: source_invalid (commit) — behind the flag; only a definite
+    # False (dangling commit in a resolvable repo) triggers decay, never an
+    # unknown result (missing checker, unresolvable repo, `_unknown` commit).
+    if config.check_provenance_commit and source_commit_exists is not None and source_commit_exists(record) is False:
+        return {
+            "reason": "source_invalid",
+            "detail": {"check": "provenance_commit"}
+        }
 
     # Priority 3: ttl_expired
     ttl_result = _ttl_base(record, lc_info, last_read_at, now=now)
@@ -241,6 +252,7 @@ def plan_scan(
     config_hash: str,
     source_path_exists: SourcePathCheck = _default_source_path_exists,
     last_read_map: "dict[str, str] | None" = None,
+    source_commit_exists: "SourceCommitCheck | None" = None,
 ) -> list[dict[str, Any]]:
     """
     Plan decay/reactivation events for records.
@@ -258,6 +270,9 @@ def plan_scan(
         last_read_map: record_id -> ISO ``last_read_at`` (v5 requirement #9);
             only consulted for currently-active records, so a read can never
             reactivate an already-decayed record.
+        source_commit_exists: Callable to check if the recorded provenance
+            commit still exists (``check_provenance_commit``); ``None`` (no
+            checker) or an unknown result never decays a record.
 
     Returns:
         List of event dictionaries (decayed or reactivation)
@@ -293,6 +308,7 @@ def plan_scan(
             last_read_at = last_read_map.get(record.record_id)
             decision = _decide_decay(
                 record, superseded_by, config, now_dt, lc_info, source_path_exists, last_read_at,
+                source_commit_exists,
             )
             if decision:
                 events.append(_decayed_event(record, decision, now, config_hash))

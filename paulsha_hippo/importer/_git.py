@@ -102,3 +102,23 @@ def git_rev_before(toplevel: str | Path | None, iso_ts: str | None) -> Optional[
     if not toplevel or not iso_ts:
         return None
     return _run_git(["rev-list", "-1", f"--before={iso_ts}", "HEAD"], cwd=toplevel) or None
+
+
+def git_commit_exists(toplevel: str | Path | None, sha: str | None) -> Optional[bool]:
+    """`git cat-file -e <sha>^{commit}`：commit 存在→True；不存在→False；
+
+    toplevel/sha 缺、git 不可用或逾時 → None（unknown，best-effort、never raises）。
+    """
+    if not toplevel or not sha:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=str(toplevel),
+            capture_output=True,
+            text=True,
+            timeout=_DEFAULT_TIMEOUT,
+        )
+    except Exception:
+        return None
+    return proc.returncode == 0

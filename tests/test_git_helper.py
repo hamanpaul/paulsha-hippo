@@ -141,3 +141,13 @@ class GitHelperTests(unittest.TestCase):
             self.assertIsNone(_git.git_rev_before(str(repo), "2025-01-01T00:00:00+00:00"))
             self.assertIsNone(_git.git_rev_before(None, "2026-08-05T00:00:00+00:00"))
             self.assertIsNone(_git.git_rev_before(str(repo), None))
+
+    def test_git_commit_exists(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            head = _git.git_head(str(repo))
+            self.assertTrue(_git.git_commit_exists(str(repo), head))
+            self.assertFalse(_git.git_commit_exists(str(repo), "0" * 40))
+            self.assertIsNone(_git.git_commit_exists(None, head))

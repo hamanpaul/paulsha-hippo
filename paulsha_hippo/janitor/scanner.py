@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from paulsha_hippo.importer import _git
+from paulsha_hippo.importer.config import default_projects_path, load_projects_config
 from paulsha_hippo.janitor import record_source, rules
 from paulsha_hippo.janitor.config import JanitorConfig
 from paulsha_hippo.ledger import import_log, lifecycle
@@ -92,6 +94,20 @@ def _build_import_index(memory_root: Path) -> tuple[dict[str, list[dict[str, str
     return index, bad_line_count
 
 
+def _roots_by_project(memory_root: Path) -> dict[str, tuple[str, ...]]:
+    """Map project slug -> configured filesystem roots, for the default
+    ``source_commit_exists`` checker (``check_provenance_commit``).
+
+    Best-effort: any failure loading/parsing ``projects.yaml`` degrades to
+    ``{}`` (checks then resolve to unknown) rather than raising.
+    """
+    try:
+        cfg = load_projects_config(default_projects_path(memory_root))
+    except Exception:
+        return {}
+    return {project.slug: project.roots for project in cfg.projects}
+
+
 def _persist_event(memory_root: Path, event: dict[str, Any]) -> None:
     """
     Persist a rules event to lifecycle ledger.
@@ -134,6 +150,7 @@ def run_scan(
     now: str,
     dry_run: bool = False,
     source_path_exists: Callable[[record_source.KnowledgeRecord], bool | None] | None = None,
+    source_commit_exists: Callable[[record_source.KnowledgeRecord], bool | None] | None = None,
     *,
     usage_now: str | None = None,
 ) -> dict[str, Any]:
@@ -149,6 +166,9 @@ def run_scan(
             judgments and the ts recorded on persisted lifecycle events.
         dry_run: If True, compute plan but don't persist events
         source_path_exists: Optional callable to check source path existence
+        source_commit_exists: Optional callable to check that a record's
+            provenance commit still exists (``check_provenance_commit``).
+            Defaults to a closure built from ``projects.yaml`` roots.
         usage_now: Optional ISO timestamp used as the clock basis for usage
             ledger (offered/read) diagnostics only — everything else keeps
             using `now`. Defaults to real wall-clock time (the janitor's own
@@ -214,15 +234,31 @@ def run_scan(
         warnings.append(f"usage ledger diagnostics: {nonzero_usage_diag}")
 
     # Plan scan
+    if source_commit_exists is None:
+        roots_by_project = _roots_by_project(memory_root)  # load_projects_config 失敗 → {}
+
+        def source_commit_exists(record: record_source.KnowledgeRecord) -> bool | None:
+            sha = record.provenance.get("commit")
+            if sha in (None, "", "_unknown"):
+                return None
+            results = [_git.git_commit_exists(root, sha) for root in roots_by_project.get(record.project, ())]
+            if any(result is True for result in results):
+                return True
+            if results and all(result is False for result in results):
+                return False
+            return None
+
     if source_path_exists is None:
         events = rules.plan_scan(
             records, import_index, lc_state, config, now, config_hash,
             last_read_map=last_read_map,
+            source_commit_exists=source_commit_exists,
         )
     else:
         events = rules.plan_scan(
             records, import_index, lc_state, config, now, config_hash, source_path_exists,
             last_read_map=last_read_map,
+            source_commit_exists=source_commit_exists,
         )
     lint_findings = rules.plan_lint(records)
     for finding in lint_findings:

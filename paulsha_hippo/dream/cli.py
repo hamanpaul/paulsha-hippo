@@ -135,7 +135,8 @@ def _run(args: argparse.Namespace) -> int:
             # not checked out at the run CWD, so a CWD-relative path probe gives
             # false negatives and would spuriously decay freshly atomized knowledge.
             # Return None (cannot determine) so source_invalid decay is disabled here;
-            # TTL and supersede decay still apply.
+            # TTL and supersede decay still apply. Same reasoning for commit
+            # provenance: dream never runs git against the source repos here.
             return janitor_scanner.run_scan(
                 memory_root=memory_root,
                 knowledge_root=memory_root / "knowledge",
@@ -144,6 +145,7 @@ def _run(args: argparse.Namespace) -> int:
                 now=now,
                 dry_run=args.dry_run,
                 source_path_exists=lambda record: None,
+                source_commit_exists=lambda record: None,
             )
 
         def followups_fn() -> dict[str, object]:
