@@ -1,5 +1,5 @@
 from __future__ import annotations
-import subprocess, unittest
+import os, subprocess, unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from paulsha_hippo.importer import _git
@@ -115,3 +115,27 @@ class GitHelperTests(unittest.TestCase):
             self.assertRegex(head, r"^[0-9a-f]{40}$")
             self.assertIsNone(_git.git_head(None))
             self.assertIsNone(_git.git_head(tmp))  # 非 repo
+
+    def test_rev_before_returns_approx_commit_for_timestamp(self) -> None:
+        # 真 repo、兩個帶明確 commit 日期的 commit（issue #136 fix 1b/1c backfill 用）：
+        # rev-list --before= 近似值須落在正確的一側。
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+            def _commit(msg: str, when: str) -> str:
+                run_env = {**env, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+                subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", msg],
+                                check=True, env=run_env)
+                return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+
+            c1 = _commit("c1", "2026-08-01T00:00:00+00:00")
+            c2 = _commit("c2", "2026-08-10T00:00:00+00:00")
+
+            self.assertEqual(_git.git_rev_before(str(repo), "2026-08-05T00:00:00+00:00"), c1)
+            self.assertEqual(_git.git_rev_before(str(repo), "2026-08-31T00:00:00+00:00"), c2)
+            self.assertIsNone(_git.git_rev_before(str(repo), "2025-01-01T00:00:00+00:00"))
+            self.assertIsNone(_git.git_rev_before(None, "2026-08-05T00:00:00+00:00"))
+            self.assertIsNone(_git.git_rev_before(str(repo), None))

@@ -410,6 +410,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ngroup.add_argument("--apply", action="store_true")
     normalize_tags_p.set_defaults(func=_normalize_tags)
 
+    backfill_provenance_p = knowledge_subparsers.add_parser(
+        "backfill-provenance",
+        help="一次性回填 provenance.commit（近似）與 cites，fix 1b/1c migration (#136)",
+    )
+    backfill_provenance_p.add_argument("--memory-root", required=True)
+    backfill_provenance_p.add_argument(
+        "--project", default=None,
+        help="restrict backfill to this project slug; omit to scan all projects.")
+    bgroup = backfill_provenance_p.add_mutually_exclusive_group()
+    bgroup.add_argument("--dry-run", action="store_true")
+    bgroup.add_argument("--apply", action="store_true")
+    backfill_provenance_p.set_defaults(func=_backfill_provenance)
+
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
     # still errors with exit 2 when the flag is omitted.
@@ -901,6 +914,21 @@ def _normalize_tags(args: argparse.Namespace) -> int:
     root = Path(args.memory_root)
     apply = bool(getattr(args, "apply", False))
     summary, warnings = tags_migration.normalize_tags_migration(root, apply=apply)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False))
+    if warnings:
+        return 1
+    return 0
+
+
+def _backfill_provenance(args: argparse.Namespace) -> int:
+    from . import provenance_backfill
+
+    root = Path(args.memory_root)
+    apply = bool(getattr(args, "apply", False))
+    project = getattr(args, "project", None)
+    summary, warnings = provenance_backfill.run(root, apply=apply, project=project)
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False))

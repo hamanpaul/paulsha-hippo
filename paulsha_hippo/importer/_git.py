@@ -95,3 +95,10 @@ def git_head(toplevel: str | Path | None) -> Optional[str]:
     if not toplevel:
         return None
     return _run_git(["rev-parse", "HEAD"], cwd=toplevel)
+
+
+def git_rev_before(toplevel: str | Path | None, iso_ts: str | None) -> Optional[str]:
+    """`rev-list -1 --before=<ts> HEAD`：近似值（分支可能不同），呼叫端須標 backfill-approx。"""
+    if not toplevel or not iso_ts:
+        return None
+    return _run_git(["rev-list", "-1", f"--before={iso_ts}", "HEAD"], cwd=toplevel) or None
