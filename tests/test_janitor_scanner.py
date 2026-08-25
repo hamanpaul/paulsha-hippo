@@ -67,10 +67,12 @@ def _init_repo_with_commit(path: Path) -> str:
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _fresh_record(slice_id: str, project: str, commit: str) -> str:
+def _fresh_record(slice_id: str, project: str, commit: str,
+                  commit_source: str | None = None) -> str:
     # commit is YAML-quoted: an all-digit sha like "0"*40 is otherwise parsed
     # as an octal/int literal by PyYAML and silently dropped from provenance
     # (KnowledgeRecord.provenance keeps only str values).
+    source_line = f"\n  commit_source: {commit_source}" if commit_source else ""
     return f"""---
 memory_layer: knowledge
 slice_id: {slice_id}
@@ -82,7 +84,7 @@ captured_at: "2026-05-30T00:00:00Z"
 provenance:
   repo: {project}
   commit: "{commit}"
-  path: docs/x.md
+  path: docs/x.md{source_line}
 ---
 body
 """
@@ -295,6 +297,46 @@ class ScannerProvenanceCommitTests(unittest.TestCase):
             self.assertIn("sl-false", by_id)
             self.assertEqual(by_id["sl-false"]["reason"], "source_invalid")
             self.assertEqual(by_id["sl-false"]["detail"]["check"], "provenance_commit")
+            self.assertEqual(result["summary"]["decayed"], 1)
+
+    def test_backfill_approx_commit_never_triggers_source_invalid(self) -> None:
+        """spec `stage2-memory-governance`：`_unknown` 或 `backfill-approx` 來源的
+        commit MUST NOT 觸發 source_invalid。`backfill-provenance` 補的是
+        `git rev-list -1 --before=<ended_at> HEAD` 的**近似**值——它在該 repo 找不到
+        只代表近似失準（rebase／shallow clone／該 commit 已被 GC），不代表來源真的
+        消失。拿近似值當 dangling 證據會把一整批 backfill 過的 note 誤 decay 掉。
+        """
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            memory_root = base / "agents" / "memory"
+            kroot = base / "knowledge"
+            kroot.mkdir(parents=True)
+            repo = base / "repo"
+            repo.mkdir()
+            _init_repo_with_commit(repo)
+
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("PSC_CONFIG_ROOT", None)
+                _write_projects_yaml(base, {"proj": [str(repo)]})
+
+                absent_sha = "0" * 40
+                (kroot / "sl-approx.md").write_text(
+                    _fresh_record("sl-approx", "proj", absent_sha,
+                                  commit_source="backfill-approx"), encoding="utf-8")
+                # 對照組：同一個不存在的 sha，但來源是 hook（精確值）→ 仍須 source_invalid。
+                (kroot / "sl-hook.md").write_text(
+                    _fresh_record("sl-hook", "proj", absent_sha, commit_source="hook"),
+                    encoding="utf-8")
+
+                result = scanner.run_scan(
+                    memory_root, knowledge_root=kroot, config=_CFG_COMMIT_ONLY,
+                    config_hash="h", now="2026-05-31T00:00:00Z", dry_run=True,
+                )
+
+            by_id = {e["record_id"]: e for e in result["plan"]}
+            self.assertNotIn("sl-approx", by_id)
+            self.assertIn("sl-hook", by_id)
+            self.assertEqual(by_id["sl-hook"]["reason"], "source_invalid")
             self.assertEqual(result["summary"]["decayed"], 1)
 
     def test_default_closure_is_lazy_when_flag_off(self) -> None:

@@ -247,6 +247,14 @@ def run_scan(
             sha = record.provenance.get("commit")
             if sha in (None, "", "_unknown"):
                 return None
+            # spec stage2-memory-governance：`_unknown` 或 `backfill-approx` 來源的
+            # commit MUST NOT 觸發。backfill-provenance 寫進去的是
+            # `git rev-list -1 --before=<ended_at> HEAD` 的近似值——它在 repo 裡找不到
+            # 只代表近似失準（rebase／shallow clone／該 commit 已被 GC），不是「來源
+            # 檔案消失」的證據。以近似值當 dangling 依據會把整批 backfill 過的 note
+            # 一次誤 decay，且那批 note 正是最舊、最無法重建的那些。
+            if record.provenance.get("commit_source") == "backfill-approx":
+                return None
             if _roots_cache is None:
                 _roots_cache = _roots_by_project(memory_root)  # load_projects_config 失敗 → {}
             results = [_git.git_commit_exists(root, sha) for root in _roots_cache.get(record.project, ())]
