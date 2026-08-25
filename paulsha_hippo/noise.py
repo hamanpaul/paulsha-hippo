@@ -224,6 +224,31 @@ _GENERIC_EXACT_TITLES = frozenset(
 _GENERIC_TITLE_PREFIX = re.compile(r"^(?:report|task|todo)-")
 
 
+# --- episodic demotion (#136 fix 4): session-state句非 deletion-grade ---
+# 命中只把 memory_layer 從 knowledge 降層為 episodic（不刪檔），與 classify_noise
+# （刪檔）刻意分離：episodic 筆記仍在磁碟上，只是被 MOC index／wakeup／janitor
+# 依 `memory_layer != "knowledge"` 排除在檢索池外（見 moc/search.py）。
+SESSION_STATE_RE = re.compile(
+    r"尚未 ?commit|尚未 ?push|待 ?push|session 結束|本次修改僅限|目前狀態|handoff|下一步|session-handoff",
+    re.IGNORECASE,
+)
+_STATE_TITLE_RE = re.compile(r"^session-handoff|handoff|狀態$", re.IGNORECASE)
+EPISODIC_RATIO = 0.5
+
+
+def episodic_reason(title: object, body: str) -> str | None:
+    """session 狀態句偵測：非 deletion-grade——命中只降層 episodic，不刪。"""
+    if _STATE_TITLE_RE.search(str(title or "").strip()):
+        return "title:session-state"
+    lines = _content_lines((body or "").strip())
+    if not lines:
+        return None
+    hits = sum(1 for line in lines if SESSION_STATE_RE.search(line))
+    if hits and hits / len(lines) >= EPISODIC_RATIO:
+        return f"body:session-state:{hits}/{len(lines)}"
+    return None
+
+
 def is_generic_title(title: object) -> bool:
     """True when title normalizes to an exact generic label or allowed prefix.
 

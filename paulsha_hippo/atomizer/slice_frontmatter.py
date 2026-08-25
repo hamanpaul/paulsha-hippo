@@ -22,7 +22,7 @@ PROVENANCE_KEYS = ("repo", "commit", "path", "commit_source", "branch", "dirty")
 _SCALAR_ORDER = (
     "phase", "project", "slice_id", "artifact_kind", "version", "created_at",
     "created_by", "source_session", "gate_required", "checksum",
-    "memory_layer", "source_agent", "captured_at", "supersedes",
+    "memory_layer", "episodic_reason", "source_agent", "captured_at", "supersedes",
     "distilled_from", "fragment_ref", "session_title", "title", "atom_title", "tags", "source_fragments", "cites", "publication_id",
 )
 
@@ -201,8 +201,11 @@ def validate(frontmatter: dict[str, object], body: str) -> list[str]:
             errors.append(f"missing T4 contract field: {field}")
     if "distiller" not in frontmatter:
         errors.append("missing distiller provenance")
-    if frontmatter.get("memory_layer") != "knowledge":
-        errors.append("memory_layer must be 'knowledge'")
+    layer = frontmatter.get("memory_layer")
+    if layer not in ("knowledge", "episodic"):
+        errors.append("memory_layer must be 'knowledge' or 'episodic'")
+    if layer == "episodic" and not frontmatter.get("episodic_reason"):
+        errors.append("episodic slice requires episodic_reason")
     return errors
 
 

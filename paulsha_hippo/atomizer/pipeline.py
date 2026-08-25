@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from ..agent_profiles import AgentRunResult
 from ..ledger import processing, relations
-from ..noise import DocCorpus, classify_noise
+from ..noise import DocCorpus, classify_noise, episodic_reason
 from ..topic import canonical_title as _canonical_title
 from . import slice_frontmatter, splitter
 from .config import AtomizerConfig, is_safe_path_component, project_directory_key, sanitize_project_component
@@ -1080,6 +1080,17 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
             continue
 
         promoted = _attach_unambiguous_supersedes(memory_root, promoted)
+
+        if config.episodic_filter:
+            demoted = []
+            for slice_ in promoted:
+                reason = episodic_reason(slice_.frontmatter.get("title"), slice_.body)
+                if reason:
+                    fm = dict(slice_.frontmatter, memory_layer="episodic", episodic_reason=reason)
+                    slice_ = replace(slice_, frontmatter=fm)
+                    LOGGER.info("atomize: demoted slice %s to episodic (%s)", slice_.slice_id, reason)
+                demoted.append(slice_)
+            promoted = demoted
 
         # Phase 2: Validate all slices before any writes
         for slice_ in promoted:

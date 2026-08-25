@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from paulsha_hippo.noise import build_corpus, classify_noise
+from paulsha_hippo.noise import build_corpus, classify_noise, episodic_reason
 
 
 # A fake agent-instruction document (CLAUDE.md/AGENTS.md shape) used as verbatim corpus.
@@ -242,6 +242,22 @@ def test_pool_exclude_reason_generic_title():
     assert pool_exclude_reason(
         {"artifact_kind": "review", "title": "overview"}
     ) == "review-record"
+
+
+class EpisodicReasonTests(unittest.TestCase):
+    def test_mostly_status_lines_is_episodic(self):
+        body = "## 狀態\n本次修改僅限 README-ARC.md。\nsession 結束時尚未 commit。\n下一步：開 PR。\n"
+        self.assertEqual(episodic_reason("ot-ti-mirror 本地建置環境重現與 SOP", body), "body:session-state:3/3")
+        self.assertFalse(classify_noise({}, body).is_noise)   # 不是 deletion-grade
+
+    def test_status_minority_with_real_steps_is_kept(self):
+        body = ("用 docker create --rm 建容器。\ncmake 統一 3.31.6。\n~/bin 必須先存在 PATH 才會生效。\n"
+                "session 結束時尚未 commit。\n")
+        self.assertIsNone(episodic_reason("SOP", body))
+
+    def test_handoff_title_is_episodic(self):
+        self.assertEqual(episodic_reason("session-handoff-2026-08-12", "任何內容\n"), "title:session-state")
+        self.assertIsNone(episodic_reason("Release Button 現有角色", "DIO24 用途分析。\n"))
 
 
 if __name__ == "__main__":

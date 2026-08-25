@@ -1067,6 +1067,39 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(result["summary"]["slices"], 1)          # ## Real Topic kept
             self.assertFalse(list((root / "knowledge").rglob("*.md")))  # dry-run writes nothing
 
+    def test_session_state_finding_publishes_as_episodic_and_stays_out_of_index(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            promoter = llm_promoter.LLMPromoter(FakeAgentClient(json.dumps([{
+                "title": "session-handoff-2026-08-12", "artifact_kind": "report", "project": "paulshaclaw",
+                "tags": [], "body": "本次修改僅限 README（alpha）。\nsession 結束時尚未 commit。\n",
+                "source_fragment_indices": [0], "relations": []}])), skill_text="SKILL", known_projects=["paulshaclaw"])
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-08-25T00:00:00Z", promoter=promoter)
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            fm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(fm["memory_layer"], "episodic")
+            self.assertEqual(fm["episodic_reason"], "title:session-state")
+            from paulsha_hippo.moc import search as S
+            cov = S.build_index(root, link_weights={})
+            self.assertEqual(cov["pool_excluded"].get("non-knowledge-layer:episodic"), 1)
+
+    def test_episodic_filter_flag_off_keeps_knowledge_layer(self):
+        from dataclasses import replace as _replace
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            cfg = _replace(cfg, episodic_filter=False)
+            promoter = llm_promoter.LLMPromoter(FakeAgentClient(json.dumps([{
+                "title": "session-handoff-2026-08-12", "artifact_kind": "report", "project": "paulshaclaw",
+                "tags": [], "body": "本次修改僅限 README（alpha）。\nsession 結束時尚未 commit。\n",
+                "source_fragment_indices": [0], "relations": []}])), skill_text="SKILL", known_projects=["paulshaclaw"])
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-08-25T00:00:00Z", promoter=promoter)
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            fm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(fm["memory_layer"], "knowledge")
+            self.assertNotIn("episodic_reason", fm)
+
 
 _RAW_TITLED = """---
 memory_layer: inbox

@@ -462,3 +462,12 @@ class SessionDeadlineIsNotASilentKnobTests(unittest.TestCase):
                 load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=path)
         finally:
             path.unlink(missing_ok=True)
+
+
+def test_episodic_filter_default_true_and_parsed(tmp_path):
+    cfg, _ = load_config(default_dir=DEFAULT_CONFIG_DIR, override_path=None)
+    assert cfg.episodic_filter is True
+    d = tmp_path / "cfgdir"; d.mkdir()
+    src = DEFAULT_CONFIG_DIR / "atomizer.yaml"
+    (d / "atomizer.yaml").write_text(src.read_text().replace("episodic_filter: true", "episodic_filter: false"))
+    assert load_config(default_dir=d, override_path=None)[0].episodic_filter is False
