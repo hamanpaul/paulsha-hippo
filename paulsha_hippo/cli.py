@@ -423,6 +423,23 @@ def _build_parser() -> argparse.ArgumentParser:
     bgroup.add_argument("--apply", action="store_true")
     backfill_provenance_p.set_defaults(func=_backfill_provenance)
 
+    mark_episodic_p = knowledge_subparsers.add_parser(
+        "mark-episodic",
+        help="一次性把既存 session 狀態 knowledge note 降層 episodic（可 --revert），fix 4 migration (#136)",
+    )
+    mark_episodic_p.add_argument("--memory-root", required=True)
+    mark_episodic_p.add_argument("--now", default=None)
+    mark_episodic_p.add_argument(
+        "--project", default=None,
+        help="restrict mark-episodic to this project slug; omit to scan all projects.")
+    mark_episodic_p.add_argument(
+        "--revert", default=None, metavar="SLICE_ID",
+        help="還原單一 slice：episodic -> knowledge，移除 episodic_reason（找不到該 slice 時 exit 1）。")
+    mgroup = mark_episodic_p.add_mutually_exclusive_group()
+    mgroup.add_argument("--dry-run", action="store_true")
+    mgroup.add_argument("--apply", action="store_true")
+    mark_episodic_p.set_defaults(func=_mark_episodic)
+
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
     # still errors with exit 2 when the flag is omitted.
@@ -961,6 +978,27 @@ def _backfill_provenance(args: argparse.Namespace) -> int:
     apply = bool(getattr(args, "apply", False))
     project = getattr(args, "project", None)
     summary, warnings = provenance_backfill.run(root, apply=apply, project=project)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False))
+    if warnings:
+        return 1
+    return 0
+
+
+def _mark_episodic(args: argparse.Namespace) -> int:
+    from . import episodic_migration
+
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    revert_id = getattr(args, "revert", None)
+    if revert_id:
+        found = episodic_migration.revert(root, revert_id, now=now)
+        print(json.dumps({"reverted": found, "slice_id": revert_id}, ensure_ascii=False))
+        return 0 if found else 1
+    apply = bool(getattr(args, "apply", False))
+    project = getattr(args, "project", None)
+    summary, warnings = episodic_migration.run(root, apply=apply, now=now, project=project)
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False))

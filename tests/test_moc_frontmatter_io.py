@@ -188,5 +188,17 @@ class ProductionTagQuotingScenarioTests(unittest.TestCase):
                 self.assertFalse(moc_census._census_tags_invalid(fm["tags"]))
 
 
+def test_update_can_remove_keys(tmp_path):
+    # #136 fix 4 (mark-episodic revert): `update()` needs to drop a key (e.g.
+    # `episodic_reason`) while touching unrelated frontmatter/body byte-for-byte.
+    p = tmp_path / "n.md"
+    p.write_text("---\nslice_id: sl-a\nepisodic_reason: x\n---\nbody\n", encoding="utf-8")
+    fio.update(p, {"memory_layer": "knowledge"}, remove=("episodic_reason",))
+    fm, body = fio.read(p.read_text(encoding="utf-8"))
+    assert "episodic_reason" not in fm
+    assert fm["memory_layer"] == "knowledge"
+    assert body == "body\n"
+
+
 if __name__ == "__main__":
     unittest.main()

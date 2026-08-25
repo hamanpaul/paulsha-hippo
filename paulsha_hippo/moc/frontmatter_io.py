@@ -4,7 +4,7 @@ import functools
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def read(text: str) -> tuple[dict[str, Any], str]:
@@ -138,8 +138,10 @@ def dump(frontmatter: dict[str, Any], body: str) -> str:
     return "\n".join(lines) + "\n" + body
 
 
-def update(path: Path, updates: dict[str, Any]) -> None:
+def update(path: Path, updates: dict[str, Any], *, remove: Iterable[str] = ()) -> None:
     fm, body = read(path.read_text(encoding="utf-8"))
+    for key in remove:
+        fm.pop(key, None)
     fm.update(updates)
     # A target may already consume the complete NAME_MAX budget.  Deriving the
     # temporary name from ``path.name`` can then make the update itself fail
