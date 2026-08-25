@@ -105,3 +105,13 @@ class GitHelperTests(unittest.TestCase):
     def test_git_main_toplevel_non_repo_falls_back_to_input(self) -> None:
         with TemporaryDirectory() as tmp:
             self.assertEqual(_git.git_main_toplevel(tmp), str(tmp))
+
+    def test_git_head_returns_sha_or_none(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            head = _git.git_head(str(repo))
+            self.assertRegex(head, r"^[0-9a-f]{40}$")
+            self.assertIsNone(_git.git_head(None))
+            self.assertIsNone(_git.git_head(tmp))  # 非 repo

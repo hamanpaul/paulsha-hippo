@@ -88,3 +88,10 @@ def git_main_toplevel(toplevel: str | Path | None) -> Optional[str]:
         return str(toplevel)
     except Exception:
         return str(toplevel)
+
+
+def git_head(toplevel: str | Path | None) -> Optional[str]:
+    """Return HEAD sha for toplevel, or None（best-effort、never raises）。"""
+    if not toplevel:
+        return None
+    return _run_git(["rev-parse", "HEAD"], cwd=toplevel)

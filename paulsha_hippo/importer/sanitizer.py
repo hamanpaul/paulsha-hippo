@@ -35,7 +35,7 @@ def sanitize_session(session: NormalizedSession) -> NormalizedSession:
     """Return a sanitized copy while leaving the byte-preserved raw payload untouched."""
     sanitized: NormalizedSession = dict(session)
     session_ref = f"{session.get('tool', '')}:{session.get('session_id', '')}"
-    for key in ("assistant_summary", "session_title", "cwd", "repo", "commit"):
+    for key in ("assistant_summary", "session_title", "cwd", "repo", "commit", "git_branch"):
         value = sanitized.get(key)
         if isinstance(value, str):
             sanitized[key] = _sanitize_text(value, session_ref=session_ref)  # type: ignore[literal-required]

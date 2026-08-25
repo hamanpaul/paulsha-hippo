@@ -17,6 +17,8 @@ NORMALIZED_KEYS = {
     "cwd",
     "repo",
     "commit",
+    "git_branch",
+    "git_dirty",
     "turn_count",
     "user_prompts",
     "assistant_messages",
