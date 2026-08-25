@@ -1513,6 +1513,14 @@ def _show(args: argparse.Namespace) -> int:
     一律不印任何內容、一行 warning 到 stderr、exit code 1（issue #136 fix 11b）。
     `session_ref` 有 `--session-id` 就用它，否則退回 note 自身的 slice_id。
 
+    這個 fail-closed 的 try 只包 `redact_for_agent` 這一步（review round 1
+    修正）：讀檔（`path.read_text`）／解 frontmatter（`_fio.read`）／渲染
+    （`render_agent_view`）任何一步炸掉，都是 note 本身壞掉（編碼、權限、
+    malformed frontmatter 等），不是 boundary 檢查失敗，走自己的 try、印
+    另一行 stderr warning（不含「boundary」字樣）、非零 exit，同樣不印任何
+    內容到 stdout——不可被 boundary 的 fail-closed try 一起吃掉、誤標成
+    policy 失敗。
+
     read 歸因寫入是 best-effort：印出成功之後才嘗試補記事件；ledger
     mkdir/open/write 出的任何例外都吃掉、印一行 warning 到 stderr，不影響
     exit code（review round 1 / Important 1）——note 已經解出來、渲染出來
@@ -1533,7 +1541,11 @@ def _show(args: argparse.Namespace) -> int:
         raw = path.read_text(encoding="utf-8")
         fm, _ = _fio.read(raw)
         text = show_mod.render_agent_view(path) if args.agent else raw
-        session_ref = args.session_id or str(fm.get("slice_id", "")) or "_unknown"
+    except Exception as exc:
+        print(f"warning: show: 讀取或解析 note 失敗：{exc}", file=sys.stderr)
+        return 1
+    session_ref = args.session_id or str(fm.get("slice_id", "")) or "_unknown"
+    try:
         text = show_mod.redact_for_agent(
             text, project=str(fm.get("project", "")), session_ref=session_ref)
     except Exception as exc:

@@ -200,6 +200,23 @@ def test_agent_view_prints_redacted_text_when_check_boundary_alters_it(tmp_path,
     assert out == "[REDACTED]\n"
 
 
+def test_read_or_parse_failure_reports_distinct_message_not_boundary(tmp_path):
+    """review round 1（Important）：讀檔失敗（非合法 UTF-8）要落在讀取／解析路徑，
+    不可被 fail-closed 的 boundary try 一起吃掉、誤標成 boundary 檢查失敗。
+    """
+    kb = tmp_path / "knowledge" / "proj"
+    kb.mkdir(parents=True)
+    p = kb / "broken--sl-cccccccccccccccc.md"
+    p.write_bytes(b"---\ntitle: ok\n---\n\xff\xfe\x00broken utf-8 body\n")
+
+    rc, out, err = _run_full(["show", "sl-cccccccccccccccc", "--memory-root", str(tmp_path), "--agent"])
+
+    assert rc != 0
+    assert out == ""
+    assert "讀取或解析" in err
+    assert "boundary" not in err
+
+
 def test_show_passes_session_id_as_session_ref_to_check_boundary(tmp_path, monkeypatch):
     """給了 --session-id／--tool 時，check_boundary 的 session_ref 要用 --session-id，
     不是 note 自身的 slice_id。
