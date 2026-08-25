@@ -338,7 +338,7 @@ README-ARC.md… session 結束時尚未 commit」、`session-handoff-2026-08-12
 1. `followups extract --apply` 掃到 08-17 note 的行「README-ARC.md 記載的舊 FLASH 數字 `133,604 B`
    已與 fresh build 的 `133,372 B` 不符，需要更新（`README-ARC.md:108`）」→
    `fu-…` target `README-ARC.md:108`，`expected_stale` = `133,604`，`opened`。
-2. 下一次 dream `followups verify`：roots 含 `/home/build20/MCU-Octopus/ot-ti-mirror` → 讀 108±2 行
+2. 下一次 dream `followups verify`：roots 含 `<ot-ti-mirror 專案根目錄>` → 讀 108±2 行
    → 第 109 行含 `133,604` → `verified-open`。
 3. session start brief：「ot-ti-mirror open follow-ups：1」。使用者修 README 後下一輪 verify →
    `resolved-in-source` 自動關。

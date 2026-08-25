@@ -29,7 +29,7 @@ work_item: issue-136-knowledge-hygiene
 - janitor override 實際路徑是 `paths.config_path("janitor.override.yaml")` = `~/.config/paulshaclaw/janitor.override.yaml`（**不是** spec §10 寫的 `~/.config/paulsha-hippo/`）。
 - 交付治理（AGENTS.md）：每個 task 群一個 `changelog.d/<slug>.md` 碎片；新 CLI 命令要同步 `README.md` 第 31 行「日常命令」清單（R-16）；`python3 -m pytest tests/ -q`、`python3 -m policy_check --repo .`、`openspec validate --all --strict` 全綠。全套測試在非巢狀 sibling worktree 跑（巢狀下 `test_project_resolver` 2 個假失敗為已知）。
 - commit 前 `rm -rf .psc_tmp`；不要 `git add -A`。
-- 不碰 `/home/paul_chen/.agents/memory`（live 記憶庫）；所有測試用 `tmp_path`。
+- 不碰 `~/.agents/memory`（live 記憶庫）；所有測試用 `tmp_path`。
 
 ## File Structure
 
