@@ -174,6 +174,14 @@ class BuildFromProposalTests(unittest.TestCase):
         parsed = parse_artifact_text(slice_frontmatter.render(built))
         self.assertEqual(parsed.frontmatter["tags"], ["pwhm", "fsm"])
         self.assertEqual(parsed.frontmatter["source_fragments"], [0, 1])
+        self.assertEqual(parsed.frontmatter["cites"], [])
+
+    def test_rendered_proposal_round_trip_preserves_cites(self):
+        built = slice_frontmatter.build_from_proposal(
+            _proposal(body="見 README-ARC.md:108。"), _SESSION_META
+        )
+        parsed = parse_artifact_text(slice_frontmatter.render(built))
+        self.assertEqual(parsed.frontmatter["cites"], [{"path": "README-ARC.md", "line": 108}])
 
     def test_rendered_proposal_round_trip_preserves_tag_punctuation(self):
         proposal = SliceProposal(
