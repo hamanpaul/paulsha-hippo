@@ -16,7 +16,7 @@ class WakeupOrientationTests(unittest.TestCase):
         orientation = (
             "# 記憶 — proj\n\n記憶系統已啟用（本專案約 2 筆 knowledge）。"
             "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
-            "執行 `hippo show <slice_id> --memory-root /x --agent` 取精簡全文，比 Read 省約 70% token。"
+            "執行 `python3 -m paulsha_hippo show --memory-root /x --agent <slice_id>` 取精簡全文，比 Read 省約 70% token。"
         )
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

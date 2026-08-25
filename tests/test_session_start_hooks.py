@@ -292,7 +292,12 @@ class SessionStartHooksTest(unittest.TestCase):
         self.assertIsInstance(brief, str)
         self.assertTrue(len(brief) > 0, "expected non-empty orientation when notes present")
         self.assertIn("記憶系統已啟用", brief)
-        self.assertIn("hippo show --agent", brief)
+        # 全支線 review I1：show 指令改由 `hippo_invocation(root)` 組（`hippo` 未必在
+        # PATH 上），所以斷言子命令與旗標，而非寫死的 `hippo` 名稱；`--memory-root`
+        # 帶的是真實路徑、不再是字面省略號。
+        self.assertIn(" show --memory-root ", brief)
+        self.assertIn("--agent", brief)
+        self.assertNotIn("…", brief)
 
     def test_codex_session_start_exits_zero_on_non_object_json(self):
         result = _run_hook("codex_session_start.py", [], extra_env=self._env())

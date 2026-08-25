@@ -389,9 +389,14 @@ _ORIENTATION_RETRIEVAL_HINT = (
 # _SHORTLIST_HINT_SHOW），但 SessionStart orientation 的預設句子當時漏改，仍講
 # 「用 Read 開啟」。這裡補上對應的 show 版本，措辭與 _SHORTLIST_HINT_SHOW 同款
 # （保留共同前綴，比較 Read 省 token），供 build_orientation 依 read_hint flag 選用。
+#
+# 全支線 review I1：指令本體改由 `_wakeup_common.format_show_command(root)` 組出
+# （`hippo_invocation` ＋ 真實 `--memory-root`）。寫死 `hippo` 這個名字假設它在
+# PATH 上，而 wheel／venv／pipx 部署未必如此；`hippo_invocation` 正是為此存在，
+# prompt-time shortlist 的 hint（`_shortlist_common`）一直都是這樣組的。
 _ORIENTATION_RETRIEVAL_HINT_SHOW_TMPL = (
     "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
-    "執行 `hippo show <slice_id> --memory-root {memory_root} --agent` 取精簡全文，"
+    "執行 `{show_command} <slice_id>` 取精簡全文，"
     "比 Read 省約 70% token。"
 )
 
@@ -422,7 +427,10 @@ def build_orientation(memory_root, project: str, *, retrieval_hint: str | None =
     if retrieval_hint is not None:
         hint = retrieval_hint
     elif load_flags().read_hint == "show":
-        hint = _ORIENTATION_RETRIEVAL_HINT_SHOW_TMPL.format(memory_root=memory_root)
+        from ..hooks._wakeup_common import format_show_command
+
+        hint = _ORIENTATION_RETRIEVAL_HINT_SHOW_TMPL.format(
+            show_command=format_show_command(_Path(memory_root)))
     else:
         hint = _ORIENTATION_RETRIEVAL_HINT
     return (f"# 記憶 — {project}\n\n"

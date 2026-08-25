@@ -462,7 +462,12 @@ def test_build_orientation_default_follows_show_flag(tmp_path, monkeypatch):
     k.mkdir(parents=True)
     (k / "a.md").write_text("---\nmemory_layer: knowledge\n---\nx\n", encoding="utf-8")
     out = B.build_orientation(tmp_path, "proj")
-    assert f"hippo show <slice_id> --memory-root {tmp_path} --agent" in out
+    # 全支線 review I1：指令要用 `hippo_invocation(root)` 組（部署可能沒有 `hippo`
+    # 這支 PATH 執行檔），且不得留字面省略號——agent 只能照抄，抄到 `…` 就是抄不動。
+    from paulsha_hippo.hooks import _wakeup_common as wc
+    assert f"`{wc.format_show_command(tmp_path)} <slice_id>`" in out
+    assert "…" not in out
+    assert "`hippo show" not in out
     assert "每次 prompt 後以短清單浮現" in out
 
 
