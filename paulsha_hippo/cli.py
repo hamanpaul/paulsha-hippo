@@ -1446,6 +1446,11 @@ def _show(args: argparse.Namespace) -> int:
     ``--session-id`` 必須同時提供才記 read 事件——省下的 Read 仍要讓
     memory-usage KPI（看過率）看得到，用 usage_read.append_read_event 補記
     與 hooks/claude_post_tool_use.py 同 schema 的 read 事件。
+
+    read 歸因寫入是 best-effort：先印出 note，再嘗試補記事件；ledger
+    mkdir/open/write 出的任何例外都吃掉、印一行 warning 到 stderr，不影響
+    exit code（review round 1 / Important 1）——note 已經解出來、渲染出來
+    了，一筆記帳失敗不該讓整個指令當掉。
     """
     from . import show as show_mod
 
@@ -1459,14 +1464,17 @@ def _show(args: argparse.Namespace) -> int:
         print("show: --tool 與 --session-id 必須同時提供", file=sys.stderr)
         return 2
     text = show_mod.render_agent_view(path) if args.agent else path.read_text(encoding="utf-8")
+    sys.stdout.write(text)
     if args.tool and args.session_id:
         from .usage_read import append_read_event
 
-        fm, _ = _fio.read(path.read_text(encoding="utf-8"))
-        append_read_event(
-            root, tool=args.tool, session_id=args.session_id,
-            sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))
-    sys.stdout.write(text)
+        try:
+            fm, _ = _fio.read(path.read_text(encoding="utf-8"))
+            append_read_event(
+                root, tool=args.tool, session_id=args.session_id,
+                sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))
+        except Exception as exc:
+            print(f"warning: show: read 事件記錄失敗（略過，不影響輸出）：{exc}", file=sys.stderr)
     return 0
 
 
