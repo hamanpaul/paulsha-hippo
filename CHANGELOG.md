@@ -11,7 +11,7 @@
 - 新增 repo-local `custom-skills/hippo-memory-kpi/`：唯讀產生 7/30 天 session→atomic note、note machine-valid/searchable、Agent offer→read→applied KPI，固定排除 observer/no-findings 污染並區分 Cortex source material、offer、read、applied 與 Codex 可觀測下限。
 - Issue #136 knowledge 層衛生（provenance）：SessionEnd hook 補截 git commit/branch/dirty 快照，importer/atomizer 貫通六鍵 provenance（新增 `commit_source`/`branch`/`dirty`），新增一次性 migration `hippo knowledge backfill-provenance` 近似回填既有 slice 的 commit 與 cites，janitor 新增可選 `check_provenance_commit` 將 dangling commit 視為 `source_invalid`。
 - Issue #136 knowledge 層衛生（show --agent）：新增 `hippo show --agent <slice_id>` 精簡 note 視圖（省約 70% token）並記 read 歸因；shortlist hint 依新設定 `shortlist.read_hint` 改建議 `hippo show --agent` 換取全文。
-- Issue #136 knowledge 層衛生（supersedes）：新增 `paulsha_hippo/topic.py` 同主題判定與 `projects.yaml families:`；shortlist 依 `shortlist.collapse_same_topic` 同主題折疊只留最新；新增 `hippo knowledge link-supersedes` 一次性回填跨 session 同主題的 supersedes 連結（auto/review 分層，`--accept` 覆核）。
+- Issue #136 knowledge 層衛生（supersedes）：新增 `paulsha_hippo/topic.py` 同主題判定與 `projects.yaml families:`；shortlist 依 `shortlist.collapse_same_topic` 同主題折疊只留最新；新增 `hippo knowledge link-supersedes` 一次性回填跨 session 同主題的 supersedes 連結（auto/review 分層；只有 auto 可 `--apply`，`--apply --tier review` 拒絕並 exit 2，模糊配對一律經報表勾選後 `--accept` 覆核）。
 - Issue #136 knowledge 層衛生（episodic）：新增 session 狀態句分類器（`episodic_filter`），蒸餾時自動把純狀態陳述降層為 `memory_layer: episodic`（不進 MOC index、不刪檔）；新增一次性 migration `hippo knowledge mark-episodic` 降層既存 note（可 `--revert`）。
 - Issue #136 knowledge 層衛生（follow-ups）：body 內 `path:line` 引用抽成 `cites` frontmatter；新增可行動語句 ledger（`followups.enabled`）與 `hippo followups list|verify|close|extract`，接入 dream verify、wakeup brief 與 KPI report。
 

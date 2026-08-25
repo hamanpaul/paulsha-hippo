@@ -256,7 +256,11 @@ def scan(memory_root: Path | str, *, families: Iterable[Iterable[str]] = ()) -> 
             # publish 當下就決定過了，backfill 不該再插手。
             if tied and old["distilled_from"] == new["distilled_from"]:
                 continue
-            if old["checksum"] and old["checksum"] == new["checksum"]:
+            # checksum 相等即同一份內容，沒有「取代」可言。前綴 `old["checksum"] and`
+            # 曾讓「兩邊都缺 checksum」直接短路失效（`"" and ...` 為假），把同一份
+            # 內容的兩個副本當成不同版本配對。缺 checksum 是「無從判斷內容是否相同」
+            # ——守門一律跳過，寧可漏配也不要憑空造出一組取代關係。
+            if old["checksum"] == new["checksum"]:
                 continue
             if old["_fkey"] != new["_fkey"]:
                 continue
@@ -313,23 +317,46 @@ def _would_cycle(by_id: dict[str, dict[str, Any]], new_id: str, old_id: str) -> 
     return False
 
 
-def apply_pairs(memory_root: Path | str, pairs: list[dict[str, Any]], *, now: str) -> int:
-    """把配對寫進新者的 ``supersedes`` 並補一條 relations edge，回傳實際寫入筆數。
+def apply_pairs(memory_root: Path | str, pairs: list[dict[str, Any]], *,
+                now: str) -> tuple[int, list[dict[str, str]]]:
+    """把配對寫進新者的 ``supersedes`` 並補一條 relations edge。
+
+    回傳 ``(寫入筆數, 被跳過的配對)``；每筆跳過是
+    ``{"new", "old", "reason"}``，reason ∈ ``unknown-new``／``self-link``／
+    ``unknown-old``／``already-linked``／``would-cycle``。`--accept` 吃的是人手改過
+    的報表：只回一個筆數的話，打錯 id、自連、會成環三種情況都只呈現為
+    「applied: 0」，人無從判斷是自己改錯還是本來就 no-op。
 
     只走 `frontmatter_io.update()`（parse-equivalent、body 逐位元不變、atomic
     write）。已含該前身、自連、指向不存在的 slice、或會造成環的配對一律跳過，
-    所以重跑同一批配對必定回 0。
+    所以重跑同一批配對必定回 0（並把每筆記成 ``already-linked``）。
     """
     root = Path(memory_root)
     by_id = {n["slice_id"]: n for n in _load(root)}
     written = 0
+    skipped: list[dict[str, str]] = []
+
+    def _skip(new_id: str, old_id: str, reason: str) -> None:
+        skipped.append({"new": new_id, "old": old_id, "reason": reason})
+
     for pair in pairs:
         new_id = str(pair.get("new") or "")
         old_id = str(pair.get("old") or "")
         new = by_id.get(new_id)
-        if not new or not old_id or new_id == old_id or old_id not in by_id:
+        if not new:
+            _skip(new_id, old_id, "unknown-new")
             continue
-        if old_id in new["supersedes"] or _would_cycle(by_id, new_id, old_id):
+        if new_id == old_id:
+            _skip(new_id, old_id, "self-link")
+            continue
+        if not old_id or old_id not in by_id:
+            _skip(new_id, old_id, "unknown-old")
+            continue
+        if old_id in new["supersedes"]:
+            _skip(new_id, old_id, "already-linked")
+            continue
+        if _would_cycle(by_id, new_id, old_id):
+            _skip(new_id, old_id, "would-cycle")
             continue
         # 原有順序原樣保留、新前身接在最後：supersedes 是「這則 note 取代過誰」
         # 的累積紀錄，重排會讓每次 backfill 都在既有 note 上製造無謂 diff。
@@ -339,7 +366,7 @@ def apply_pairs(memory_root: Path | str, pairs: list[dict[str, Any]], *, now: st
         relations.append_edge(root, type="supersedes", frm=f"slice:{new_id}",
                               to=f"slice:{old_id}", now=now, config_hash=CONFIG_HASH)
         written += 1
-    return written
+    return written, skipped
 
 
 def _report_stem(now: str) -> str:
@@ -384,8 +411,10 @@ def _md_cell(text: str) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def apply_accepted(memory_root: Path | str, report: Path | str, *, now: str) -> int:
-    """套用報表中 ``accept: true`` 的配對，回傳實際寫入筆數。"""
+def apply_accepted(memory_root: Path | str, report: Path | str, *,
+                   now: str) -> tuple[int, list[dict[str, str]]]:
+    """套用報表中 ``accept: true`` 的配對；回傳與 `apply_pairs` 同形的
+    ``(寫入筆數, 被跳過的配對)``。"""
     lines = Path(report).read_text(encoding="utf-8").splitlines()
     accepted = []
     for line in lines:

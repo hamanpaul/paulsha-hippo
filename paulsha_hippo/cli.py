@@ -453,8 +453,9 @@ def _build_parser() -> argparse.ArgumentParser:
     link_supersedes_p.add_argument("--now", default=None)
     link_supersedes_p.add_argument(
         "--tier", choices=("auto", "review"), default="auto",
-        help="--apply 要寫入哪一層。auto（預設）＝雙向唯一的同名配對；review＝"
-             "接受報表中的全部候選（等同 accept 全部，只在人看過報表後使用）。")
+        help="--apply 要寫入哪一層。只有 auto（預設，雙向唯一的同名配對）可以 "
+             "--apply；--apply --tier review 一律拒絕（exit 2）——review 層是「要人"
+             "決定」的模糊配對，勾選報表後改用 --accept 套用。")
     lgroup = link_supersedes_p.add_mutually_exclusive_group()
     lgroup.add_argument("--dry-run", action="store_true")
     lgroup.add_argument("--apply", action="store_true")
@@ -1039,10 +1040,15 @@ def _link_supersedes(args: argparse.Namespace) -> int:
     dry-run（預設）只掃描並把 review 候選寫成報表（`runtime/reports/`，不碰任何
     knowledge note、不寫 ledger），印 `{"auto": n, "review": m, "report": path}`
     （沒有 review 候選時不寫報表，`report` 為 `null`）；
-    `--apply` 額外寫入 `--tier` 選定的那一層；`--accept` 只套報表中標成 true 的行。
+    `--apply` 額外寫入 auto 層；`--accept` 只套報表中標成 true 的行。
+
+    `--apply --tier review` 一律拒絕（exit 2）：review 層收的就是「機器判斷不了、
+    要人決定」的模糊配對（Jaccard／tags 交集／related 互指／等時戳），一次全寫等於
+    把那個判斷丟掉，而 supersedes 會讓舊筆被 janitor decay、退出檢索池——批次寫錯
+    的代價是靜默失去知識。報表照寫，人勾選後走 `--accept`。
     """
     from . import supersedes_link
-    from .importer.config import default_projects_path, load_projects_config
+    from .importer import config as importer_config
 
     root = Path(args.memory_root)
     now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
@@ -1052,27 +1058,48 @@ def _link_supersedes(args: argparse.Namespace) -> int:
         if not report.is_file():
             print(f"error: accept report not found: {report}", file=sys.stderr)
             return 1
-        applied = supersedes_link.apply_accepted(root, report, now=now)
-        print(json.dumps({"applied": applied, "report": str(report)}, ensure_ascii=False))
+        applied, skipped = supersedes_link.apply_accepted(root, report, now=now)
+        payload: dict[str, object] = {"applied": applied, "report": str(report)}
+        if skipped:
+            payload["skipped"] = skipped
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
     # families 是跨專案配對的唯一開關（opt-in）；讀不到 projects.yaml 就退回
     # 「不跨專案」，比照 hooks/_shortlist_common._families 的 best-effort 語意。
+    # 靜悄悄退回會讓報表莫名變短（跨專案候選全部消失），所以比照 `_dead` 的 ledger
+    # 失敗處理，在 stderr 講一聲。
+    projects_path = importer_config.default_projects_path(root)
     try:
-        families = tuple(load_projects_config(default_projects_path(root)).families)
-    except Exception:
+        families = tuple(importer_config.load_projects_config(projects_path).families)
+    except Exception as exc:
+        print(f"warning: link-supersedes: 讀不到 projects 設定（{projects_path}）：{exc}；"
+              "本次掃描視為沒有 families（不跨專案配對）", file=sys.stderr)
         families = ()
     result = supersedes_link.scan(root, families=families)
     # 沒有 review 候選就不寫報表：乾淨的記憶庫上跑 dry-run 應該什麼都不留下，
     # 而不是每跑一次就在 runtime/reports/ 多一個零筆的空檔。
     report = supersedes_link.write_report(root, result["review"], now=now) if result["review"] else None
-    payload: dict[str, object] = {
+    payload = {
         "auto": len(result["auto"]),
         "review": len(result["review"]),
         "report": str(report) if report is not None else None,
     }
     if getattr(args, "apply", False):
-        payload["applied"] = supersedes_link.apply_pairs(root, result[args.tier], now=now)
+        if args.tier == "review":
+            print(json.dumps(payload, ensure_ascii=False))
+            print("error: link-supersedes: --apply --tier review 會一次寫入全部模糊配對，"
+                  "而 review 層存在的理由就是這些配對要由人決定（寫錯會讓舊筆被 janitor "
+                  "decay、退出檢索池）。"
+                  + (f"報表已產出：{report}；" if report is not None else "本次沒有 review 候選；")
+                  + "把要套用的行改成 `\"accept\": true` 後改跑 "
+                    "`hippo knowledge link-supersedes --memory-root <root> --accept <報表>.jsonl`。",
+                  file=sys.stderr)
+            return 2
+        applied, skipped = supersedes_link.apply_pairs(root, result[args.tier], now=now)
+        payload["applied"] = applied
         payload["tier"] = args.tier
+        if skipped:
+            payload["skipped"] = skipped
     print(json.dumps(payload, ensure_ascii=False))
     return 0
 

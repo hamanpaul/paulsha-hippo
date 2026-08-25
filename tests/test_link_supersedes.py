@@ -144,13 +144,15 @@ def test_corrupt_lifecycle_ledger_warns_once(tmp_path, capsys):
 def test_apply_writes_supersedes_edge_and_is_idempotent(tmp_path):
     _note(tmp_path, "sl-old", "p", "T", "2026-08-10T00:00:00Z", "c1")
     new = _note(tmp_path, "sl-new", "p", "T", "2026-08-20T00:00:00Z", "c2")
-    n1 = sl.apply_pairs(tmp_path, sl.scan(tmp_path)["auto"], now=NOW)
-    assert n1 == 1 and fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == ["sl-old"]
+    n1, skipped1 = sl.apply_pairs(tmp_path, sl.scan(tmp_path)["auto"], now=NOW)
+    assert n1 == 1 and skipped1 == []
+    assert fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == ["sl-old"]
     edges = [e for e in relations.read_edges(tmp_path) if e["type"] == "supersedes"]
     assert len(edges) == 1
     assert edges[0]["from"] == "slice:sl-new" and edges[0]["to"] == "slice:sl-old"
     assert sl.scan(tmp_path)["auto"] == []
-    assert sl.apply_pairs(tmp_path, [{"new": "sl-new", "old": "sl-old"}], now=NOW) == 0
+    assert sl.apply_pairs(tmp_path, [{"new": "sl-new", "old": "sl-old"}], now=NOW) == (
+        0, [{"new": "sl-new", "old": "sl-old", "reason": "already-linked"}])
     assert len([e for e in relations.read_edges(tmp_path) if e["type"] == "supersedes"]) == 1
 
 
@@ -159,7 +161,7 @@ def test_apply_appends_to_existing_supersedes(tmp_path):
     _note(tmp_path, "sl-p1", "p", "T", "2026-08-01T00:00:00Z", "c1")
     new = _note(tmp_path, "sl-p2", "p", "T", "2026-08-02T00:00:00Z", "c2")
     fio.update(new, {"supersedes": ["sl-zz-earlier", "sl-aa-earlier"]})
-    assert sl.apply_pairs(tmp_path, [{"new": "sl-p2", "old": "sl-p1"}], now=NOW) == 1
+    assert sl.apply_pairs(tmp_path, [{"new": "sl-p2", "old": "sl-p1"}], now=NOW) == (1, [])
     assert fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == [
         "sl-zz-earlier", "sl-aa-earlier", "sl-p1"]
 
@@ -167,7 +169,9 @@ def test_apply_appends_to_existing_supersedes(tmp_path):
 def test_apply_never_self_links_or_targets_missing_slice(tmp_path):
     _note(tmp_path, "sl-solo", "p", "T", "2026-08-01T00:00:00Z", "c1")
     assert sl.apply_pairs(tmp_path, [{"new": "sl-solo", "old": "sl-solo"},
-                                     {"new": "sl-solo", "old": "sl-ghost"}], now=NOW) == 0
+                                     {"new": "sl-solo", "old": "sl-ghost"}], now=NOW) == (
+        0, [{"new": "sl-solo", "old": "sl-solo", "reason": "self-link"},
+            {"new": "sl-solo", "old": "sl-ghost", "reason": "unknown-old"}])
     assert relations.read_edges(tmp_path) == []
 
 
@@ -175,8 +179,9 @@ def test_apply_refuses_pair_that_would_close_a_cycle(tmp_path):
     # 手改過的報表可能夾帶回頭邊；scan 產出的配對本身是嚴格 recency 偏序、天生無環。
     old = _note(tmp_path, "sl-cy-old", "p", "T", "2026-08-01T00:00:00Z", "c1")
     _note(tmp_path, "sl-cy-new", "p", "T", "2026-08-02T00:00:00Z", "c2")
-    assert sl.apply_pairs(tmp_path, [{"new": "sl-cy-new", "old": "sl-cy-old"}], now=NOW) == 1
-    assert sl.apply_pairs(tmp_path, [{"new": "sl-cy-old", "old": "sl-cy-new"}], now=NOW) == 0
+    assert sl.apply_pairs(tmp_path, [{"new": "sl-cy-new", "old": "sl-cy-old"}], now=NOW) == (1, [])
+    assert sl.apply_pairs(tmp_path, [{"new": "sl-cy-old", "old": "sl-cy-new"}], now=NOW) == (
+        0, [{"new": "sl-cy-old", "old": "sl-cy-new", "reason": "would-cycle"}])
     assert fio.read(old.read_text(encoding="utf-8"))[0]["supersedes"] == []
 
 
@@ -223,16 +228,17 @@ def test_report_round_trip_accept(tmp_path):
                   "2026-08-02T00:00:00Z", "| p / p |"):
         assert token in markdown
     report.write_text(lines[0].replace('"accept": false', '"accept": true') + "\n", encoding="utf-8")
-    assert sl.apply_accepted(tmp_path, report, now=NOW) == 1
+    assert sl.apply_accepted(tmp_path, report, now=NOW) == (1, [])
     assert fio.read(new.read_text(encoding="utf-8"))[0]["supersedes"] == ["sl-a"]
-    # 再跑一次同一份報表 → no-op。
-    assert sl.apply_accepted(tmp_path, report, now=NOW) == 0
+    # 再跑一次同一份報表 → no-op（並把該筆記成 already-linked）。
+    assert sl.apply_accepted(tmp_path, report, now=NOW) == (
+        0, [{"new": "sl-b", "old": "sl-a", "reason": "already-linked"}])
 
 
 def test_applied_pair_decays_old_note_via_janitor(tmp_path):
     _note(tmp_path, "sl-j-old", "p", "T", "2026-08-10T00:00:00Z", "c1")
     _note(tmp_path, "sl-j-new", "p", "T", "2026-08-20T00:00:00Z", "c2")
-    assert sl.apply_pairs(tmp_path, sl.scan(tmp_path)["auto"], now=NOW) == 1
+    assert sl.apply_pairs(tmp_path, sl.scan(tmp_path)["auto"], now=NOW) == (1, [])
     records, _ = record_source.iter_records(tmp_path / "knowledge")
     config = JanitorConfig(schema_version="1", default_decay_age_days=90, by_artifact_kind={},
                            check_provenance_path=False, check_provenance_commit=False,
@@ -289,3 +295,110 @@ def test_cli_accept_report_and_missing_report_exits_one(tmp_path, capsys):
 
     assert cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
                      "--accept", str(tmp_path / "nope.jsonl"), "--now", NOW]) == 1
+
+
+# --- 全支線 review：I4 / HUMAN-DECISION / skipped 報表 --------------------------------
+
+
+def test_two_checksumless_notes_are_not_candidates(tmp_path):
+    """守門原本寫成 `old["checksum"] and old["checksum"] == new["checksum"]`——前綴讓
+    「兩邊都沒有 checksum」直接短路失效（`"" and ...` 為假），同一份內容的兩個副本
+    因此被當成不同版本配對。缺 checksum 是「無從判斷內容是否相同」，該跳過而非放行。
+    """
+    _note(tmp_path, "sl-nc-old", "p", "T", "2026-08-10T00:00:00Z", "")
+    _note(tmp_path, "sl-nc-new", "p", "T", "2026-08-20T00:00:00Z", "")
+    assert sl.scan(tmp_path) == {"auto": [], "review": []}
+
+
+def test_apply_pairs_reports_skipped_pairs_with_reasons(tmp_path):
+    """`apply_pairs` 以前只回寫入筆數，被跳過的配對完全無聲——人手改過的報表送進來
+    之後只看得到「applied: 0」，看不出是打錯 id、自連、還是會成環。
+    """
+    _note(tmp_path, "sl-sk-a", "p", "T", "2026-08-01T00:00:00Z", "c1")
+    _note(tmp_path, "sl-sk-b", "p", "T", "2026-08-02T00:00:00Z", "c2")
+    written, skipped = sl.apply_pairs(tmp_path, [
+        {"new": "sl-sk-a", "old": "sl-sk-a"},
+        {"new": "sl-sk-a", "old": "sl-ghost"},
+        {"new": "sl-ghost", "old": "sl-sk-a"},
+        {"new": "sl-sk-b", "old": "sl-sk-a"},
+        {"new": "sl-sk-b", "old": "sl-sk-a"},
+    ], now=NOW)
+    assert written == 1
+    assert [(s["new"], s["old"], s["reason"]) for s in skipped] == [
+        ("sl-sk-a", "sl-sk-a", "self-link"),
+        ("sl-sk-a", "sl-ghost", "unknown-old"),
+        ("sl-ghost", "sl-sk-a", "unknown-new"),
+        ("sl-sk-b", "sl-sk-a", "already-linked"),
+    ]
+
+
+def test_cli_apply_tier_review_refuses_and_points_at_report(tmp_path, capsys):
+    """HUMAN-DECISION：`--apply --tier review` 會把整批模糊配對一次寫進 note，
+    而 review tier 的存在理由就是「這些配對得由人決定」。改成 exit 2，並指出報表
+    路徑與 `--accept`——報表照寫（人勾選後才落地），但不動任何 note。
+    """
+    _note(tmp_path, "sl-r-a", "p", "dual profile build isolation contract",
+          "2026-08-01T00:00:00Z", "c3")
+    new = _note(tmp_path, "sl-r-b", "p", "dual build profile isolation gate",
+                "2026-08-02T00:00:00Z", "c4")
+    before = new.read_bytes()
+
+    rc = cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
+                   "--apply", "--tier", "review", "--now", NOW])
+    captured = capsys.readouterr()
+    assert rc == 2
+    payload = json.loads(captured.out)
+    assert payload["review"] == 1 and payload["report"] is not None
+    assert "applied" not in payload
+    assert payload["report"] in captured.err and "--accept" in captured.err
+    assert new.read_bytes() == before
+    assert relations.read_edges(tmp_path) == []
+
+    # 人勾選後的 --accept 路徑不受影響。
+    report = Path(payload["report"])
+    line = report.read_text(encoding="utf-8").splitlines()[0]
+    report.write_text(line.replace('"accept": false', '"accept": true') + "\n", encoding="utf-8")
+    assert cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
+                     "--accept", str(report), "--now", NOW]) == 0
+    assert json.loads(capsys.readouterr().out)["applied"] == 1
+
+
+def test_cli_accept_reports_skipped_pairs(tmp_path, capsys):
+    """CLI 要把 `apply_pairs` 的 skipped 清單印出來，不能吞掉——`--accept` 吃的是
+    人手改過的報表，打錯 id 只呈現「applied: 0」的話人無從判斷是改錯還是本來就 no-op。
+    """
+    _note(tmp_path, "sl-cs-a", "p", "dual profile build isolation contract",
+          "2026-08-01T00:00:00Z", "c3")
+    _note(tmp_path, "sl-cs-b", "p", "dual build profile isolation gate",
+          "2026-08-02T00:00:00Z", "c4")
+    assert cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
+                     "--dry-run", "--now", NOW]) == 0
+    report = Path(json.loads(capsys.readouterr().out)["report"])
+    pair = json.loads(report.read_text(encoding="utf-8").splitlines()[0])
+    pair.update({"accept": True, "old": "sl-typo-ghost"})
+    report.write_text(json.dumps(pair, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    assert cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
+                     "--accept", str(report), "--now", NOW]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] == 0
+    assert payload["skipped"] == [
+        {"new": "sl-cs-b", "old": "sl-typo-ghost", "reason": "unknown-old"}]
+
+
+def test_cli_warns_once_when_projects_config_unreadable(tmp_path, capsys, monkeypatch):
+    """families 讀取失敗時退回「不跨專案配對」是刻意的，但靜悄悄退回會讓報表莫名
+    變短——比照 `_dead` 的 lifecycle ledger 失敗處理，在 stderr 講一聲。
+    """
+    from paulsha_hippo.importer import config as importer_config
+
+    def _boom(_path):
+        raise RuntimeError("projects.yaml unreadable")
+
+    monkeypatch.setattr(importer_config, "load_projects_config", _boom)
+    _note(tmp_path, "sl-w-1", "p", "T", "2026-08-01T00:00:00Z", "c1")
+    assert cli.main(["knowledge", "link-supersedes", "--memory-root", str(tmp_path),
+                     "--dry-run", "--now", NOW]) == 0
+    err = capsys.readouterr().err
+    assert err.count("warning: link-supersedes:") == 1
+    assert "projects" in err and "families" in err
