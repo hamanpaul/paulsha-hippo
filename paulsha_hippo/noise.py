@@ -252,14 +252,20 @@ _STRONG_STATE_RE = re.compile(
     r"|目前狀態[：:]"                           # 冒號分隔的狀態標頭（「目前狀態：」）
     r"|本次修改僅限"                             # 本次修改僅限……（commit 訊息式範圍陳述）
     r"|\bnot yet (?:committed|pushed|merged)\b"
-    r"|\bhandoff (?:status|state|note)\b"
+    # round 2b：需要冒號／行尾分隔符才算強訊號，比照 `目前狀態：`——否則會誤觸發
+    # 「handoff status register」這類硬體暫存器複合名詞（真實 CC2674 案例，
+    # round 2 report 記錄為在該輪 scope 內無法修的第三個誤降級）。
+    r"|\bhandoff (?:status|state|note)\b(?:\s*[：:]|$)"
     r"|\bsession (?:ended|end|handoff)\b",
     re.IGNORECASE,
 )
 # weak 訊號各自獨立編譯，供逐行計算「不同 pattern 命中數」使用（見 _weak_hit_count）。
+# round 2b：移除裸字 `status`——英文硬體／韌體敘述常見「status register」「status
+# field」，過於通用，診斷語料的真正正例沒有一個是靠裸字 status 撐起來的（見
+# task-13-report.md round 2b fix report）。`handoff` 維持 weak。
 _WEAK_STATE_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
-    for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"\bstatus\b", r"目前", r"尚未", r"待辦")
+    for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"目前", r"尚未", r"待辦")
 )
 # Title 規則維持 strong（單獨命中即整篇降層）；英文替代項加上 \b，避免比對到更長
 # 英文單字的子字串（中文「狀態$」本來就用 $ 錨定到字尾，不受影響）。
@@ -299,12 +305,12 @@ def _weak_hit_count(line: str) -> int:
     佐證，同一 pattern 出現幾次都只算 1 次；故直接對每個 pattern 判斷「該行是否至
     少命中一次」（不看次數、不看位置），再加總命中的 pattern 數。
 
-    注意（round 2 殘留案例，未完全解決）：reviewer 舉的第三個案例
-    「HANDOFF register（handoff status register）」在本次修正後 `_weak_hit_count`
-    仍回傳 2——因為 `\bhandoff\b` 與 `\bstatus\b` 是列表中兩個真正不同、且在該行
-    確實各自出現一次的 pattern（非重複），這不是本函式要修的「重複計數」問題；
-    同一行另外還會直接命中 `_STRONG_STATE_RE` 的 `\bhandoff (?:status|state|note)\b`
-    （brief 要求 strong path 維持不動，故未處理）。詳見 task-13-report.md round 2
+    round 2b 更新：round 2 report 記錄的第三個殘留案例（「HANDOFF register
+    （handoff status register）」，`\bhandoff\b` 與 `\bstatus\b` 兩個不同 weak
+    pattern 皆命中，且同時撞上 strong 的 `\bhandoff (?:status|state|note)\b`）已在
+    round 2b 解決：`status` 已從 `_WEAK_STATE_PATTERNS` 移除（過於通用，見常數旁
+    註解），且 strong 的 handoff status/state/note 現在要求冒號／行尾分隔符，兩者
+    合力使這行不再命中 weak 也不再命中 strong。詳見 task-13-report.md round 2b
     fix report。
     """
     return sum(1 for pat in _WEAK_STATE_PATTERNS if pat.search(line))

@@ -323,7 +323,10 @@ class EpisodicReasonTests(unittest.TestCase):
     # span）不該湊出 ≥2 命中。需要「≥2 個不同 pattern」佐證，而非「≥2 個不重疊
     # span」——即使兩個 span 都來自同一個 pattern。 --------------------------
     def test_weak_hit_count_dedupes_repeated_same_pattern(self):
-        self.assertEqual(_weak_hit_count("status status status"), 1)
+        # round 2b：`status` 已從 weak pattern 移除（見下方 test_repeated_status_
+        # word_is_not_episodic），改用仍在清單中的 `handoff` 驗證同一 pattern 重複
+        # 出現只算 1 次佐證，不影響本測試原本要驗證的 dedup 語意。
+        self.assertEqual(_weak_hit_count("handoff handoff handoff"), 1)
 
     def test_repeated_weak_word_alone_is_not_episodic(self):
         # 「目前」重複兩次仍只是同一個 weak pattern，不構成兩個不同訊號佐證。
@@ -331,7 +334,9 @@ class EpisodicReasonTests(unittest.TestCase):
         self.assertIsNone(episodic_reason("驅動筆記", body))
 
     def test_repeated_status_word_is_not_episodic(self):
-        # 「status」重複兩次仍只是同一個 weak pattern。
+        # round 2b：`status` 已整個從 weak pattern 移除（過於通用，見常數旁註解），
+        # 這行現在沒有任何 weak 命中（0，並非「重複同一 pattern 只算 1」），仍應維持
+        # 不觸發——保留本測試作為 status 相關硬體敘述的回歸覆蓋。
         body = (
             "The status field mirrors the status register bit for CM3.\n"
             "This is unrelated durable prose line.\n"
@@ -343,6 +348,33 @@ class EpisodicReasonTests(unittest.TestCase):
         # 且皆非 strong 命中。
         body = "handoff 尚未確定，仍在討論中。\ncmake 版本鎖定 3.31.6。\n"
         self.assertEqual(episodic_reason("筆記", body), "body:session-state:1/2")
+
+    # --- review round 2b: reviewer 第三個未解案例（round 2 report 標記為
+    # structurally unreachable within round 2 scope）。「handoff status register」是
+    # CC2674 真實硬體暫存器名稱，複合名詞裡的 status/handoff 不該被當成 session
+    # 交接訊號。修法：strong 的 `handoff (?:status|state|note)` 改為需要冒號／行尾
+    # 分隔符才算（比照 `目前狀態：`），且把過於通用的 `status` 從 weak 移除
+    # （英文硬體／韌體敘述常見「status register」「status field」，診斷語料的真正
+    # 正例都不是靠裸字 `status` 撐起來的）。--------------------------------------
+    def test_handoff_status_register_compound_is_not_episodic(self):
+        # round 2 report 逐字引用的第三個誤降級案例：CM0/CM3 handoff 暫存器說明。
+        body = (
+            "HANDOFF register（handoff status register）位於 0x4008_1000，"
+            "用於 CM0 與 CM3 之間切換。\n"
+            "此暫存器於開機時自動初始化，無須軟體介入。\n"
+        )
+        self.assertIsNone(episodic_reason("CC2674 暫存器對照", body))
+
+    def test_handoff_status_colon_is_episodic(self):
+        # 冒號分隔的 handoff status/note 仍是強訊號（真正的 session 交接陳述）。
+        self.assertEqual(
+            episodic_reason("筆記", "handoff status: pending push\n"),
+            "body:session-state:1/1",
+        )
+        self.assertEqual(
+            episodic_reason("筆記", "Handoff note:\n"),
+            "body:session-state:1/1",
+        )
 
 
 if __name__ == "__main__":
