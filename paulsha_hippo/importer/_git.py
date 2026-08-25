@@ -107,9 +107,14 @@ def git_rev_before(toplevel: str | Path | None, iso_ts: str | None) -> Optional[
 def git_commit_exists(toplevel: str | Path | None, sha: str | None) -> Optional[bool]:
     """`git cat-file -e <sha>^{commit}`：commit 存在→True；不存在→False；
 
-    toplevel/sha 缺、git 不可用或逾時 → None（unknown，best-effort、never raises）。
+    toplevel/sha 缺、toplevel 無法解析成 git repo（含存在但非 git checkout 的目錄——
+    如 stale/misconfigured projects.yaml root）、git 不可用或逾時 → None（unknown，
+    best-effort、never raises）。「repo 不可解析」與「repo 可解析但 commit 確定不存在」
+    是兩種不同的失敗模式，不可回同一個 False。
     """
     if not toplevel or not sha:
+        return None
+    if git_toplevel(toplevel) is None:
         return None
     try:
         proc = subprocess.run(

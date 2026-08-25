@@ -235,13 +235,21 @@ def run_scan(
 
     # Plan scan
     if source_commit_exists is None:
-        roots_by_project = _roots_by_project(memory_root)  # load_projects_config 失敗 → {}
+        # Lazy + cached: `_roots_by_project` (a projects.yaml read) only runs on
+        # the checker's first actual invocation, not at closure-build time. When
+        # `check_provenance_commit` is False, `_decide_decay` never calls this
+        # checker at all (short-circuited), so a flag-off scan performs no
+        # projects.yaml read.
+        _roots_cache: dict[str, tuple[str, ...]] | None = None
 
         def source_commit_exists(record: record_source.KnowledgeRecord) -> bool | None:
+            nonlocal _roots_cache
             sha = record.provenance.get("commit")
             if sha in (None, "", "_unknown"):
                 return None
-            results = [_git.git_commit_exists(root, sha) for root in roots_by_project.get(record.project, ())]
+            if _roots_cache is None:
+                _roots_cache = _roots_by_project(memory_root)  # load_projects_config 失敗 → {}
+            results = [_git.git_commit_exists(root, sha) for root in _roots_cache.get(record.project, ())]
             if any(result is True for result in results):
                 return True
             if results and all(result is False for result in results):

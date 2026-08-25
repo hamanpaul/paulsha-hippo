@@ -151,3 +151,16 @@ class GitHelperTests(unittest.TestCase):
             self.assertTrue(_git.git_commit_exists(str(repo), head))
             self.assertFalse(_git.git_commit_exists(str(repo), "0" * 40))
             self.assertIsNone(_git.git_commit_exists(None, head))
+
+    # Review round 1, finding #1: an existing-but-non-git directory (stale or
+    # misconfigured projects.yaml root) must resolve to None ("unknown"), not
+    # be conflated with a definite "commit absent" (False) — a toplevel that
+    # can't be resolved as a git repo at all is a different failure mode from
+    # a resolvable repo that genuinely lacks the commit.
+    def test_git_commit_exists_requires_resolvable_toplevel(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plain = Path(tmp) / "plain"; plain.mkdir()  # 存在但非 git checkout
+            self.assertIsNone(_git.git_commit_exists(str(plain), "0" * 40))
+
+            missing = Path(tmp) / "missing"  # 完全不存在
+            self.assertIsNone(_git.git_commit_exists(str(missing), "0" * 40))
