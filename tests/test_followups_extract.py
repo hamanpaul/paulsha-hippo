@@ -184,3 +184,17 @@ def test_extract_all_real_default_policy_leaves_readme_fixture_unchanged(tmp_pat
     assert any("133,604 B" in c and "需要更新" in c for c in claims)
     stales = {v.get("expected_stale") for v in st.values()}
     assert "133,604 B" in stales
+
+
+def test_actionable_todo_requires_word_boundary():
+    """`TODO` 沒有 word boundary 時，`TODOS.md`／`todos`／`TodoList` 這種只是提到檔名或
+    型別名的句子會被憑空抽成一張待辦單（regex 是純字串比對，抽錯就是開錯單）。
+    """
+    assert fu.extract_followups(slice_id="sl-1", project="p",
+                                body="參考 TODOS.md 的清單即可。\n", cites=[]) == []
+    assert fu.extract_followups(slice_id="sl-1", project="p",
+                                body="TodoList 元件已經定版。\n", cites=[]) == []
+    # 真正的待辦仍要抽得到（大小寫不敏感、冒號／空白分隔皆可）。
+    items = fu.extract_followups(slice_id="sl-1", project="p",
+                                 body="TODO: 補上 guard（`a.py:3`）。\n", cites=[])
+    assert len(items) == 1 and items[0]["target"] == {"path": "a.py", "line": 3}

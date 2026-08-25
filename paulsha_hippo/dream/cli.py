@@ -7,7 +7,8 @@ from pathlib import Path
 
 from ..atomizer import cli as atomizer_cli
 from ..atomizer import pipeline as atomizer_pipeline
-from ..importer.config import default_projects_path, load_projects_config
+from ..importer.config import default_projects_path
+from ..importer.registry import default_registry_path, load_union_projects_config
 from ..instruction_corpus import corpus_for_roots
 from ..janitor import config as janitor_config
 from ..janitor import scanner as janitor_scanner
@@ -157,7 +158,11 @@ def _run(args: argparse.Namespace) -> int:
             if not load_flags().followups_enabled:
                 return {"summary": {"skipped": "disabled"}, "warnings": []}
             try:
-                cfg = load_projects_config(default_projects_path(memory_root))
+                # registry-aware union 讀取（手寫 projects.yaml ∪ generated
+                # project-hippo.yaml），比照 importer/project_resolver：只登記在
+                # registry 的專案否則拿不到 root，整批 follow-up 只會得到 no-root。
+                cfg = load_union_projects_config(
+                    default_projects_path(memory_root), default_registry_path(memory_root))
                 roots = {p.slug: p.roots for p in cfg.projects}
                 return {"summary": followups.verify(memory_root, roots_by_project=roots, now=now), "warnings": []}
             except Exception as exc:  # noqa: BLE001 — followups 失敗不得改變 dream 等級

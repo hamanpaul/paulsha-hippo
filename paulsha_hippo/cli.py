@@ -1700,16 +1700,23 @@ def _followups_list(args: argparse.Namespace) -> int:
 
 
 def _followups_verify(args: argparse.Namespace) -> int:
-    """對開單中的 follow-up 唯讀重查其引用的 file:line（issue #136 fix 5）。
+    """對未解決的 follow-up 唯讀重查其引用的 file:line（issue #136 fix 5）。
 
-    roots 一律取自 projects.yaml（load_projects_config(default_projects_path(R))）；
+    roots 取自 registry-aware 的 union 讀取（手寫 `projects.yaml` ∪ generated
+    `project-hippo.yaml`），比照 `importer/project_resolver`：只登記在 registry 而
+    沒進手寫檔的專案否則一律拿不到 root，整批 follow-up 只會得到 `no-root`。
     純讀取，不寫入被查的 repo 檔案——只有 followups ledger 本身會多一筆事件。
+
+    `followups.enabled` 的 gate 內建在 `followups.verify` 本身（比照 extract_all），
+    這裡不重複判斷；停用時 summary 會帶 `"skipped": "followups.disabled"`。
     """
     from . import followups as fu
-    from .importer.config import default_projects_path, load_projects_config
+    from .importer.config import default_projects_path
+    from .importer.registry import default_registry_path, load_union_projects_config
 
     root = Path(args.memory_root)
-    projects_cfg = load_projects_config(default_projects_path(root))
+    projects_cfg = load_union_projects_config(
+        default_projects_path(root), default_registry_path(root))
     roots_by_project = {p.slug: p.roots for p in projects_cfg.projects}
     summary = fu.verify(root, roots_by_project=roots_by_project, now=_followups_now(),
                         project=args.project)

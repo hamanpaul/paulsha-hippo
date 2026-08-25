@@ -1,7 +1,16 @@
+import json
+import os
 from pathlib import Path
+
+from paulsha_hippo import cli
 from paulsha_hippo import followups as fu
+from paulsha_hippo.importer import registry
 
 NOW = "2026-08-25T00:00:00Z"
+
+
+def _ledger_lines(root: Path) -> list[str]:
+    return fu.ledger_path(root).read_text(encoding="utf-8").splitlines()
 
 
 def _open(root: Path, fid: str, path: str, line: int, stale: str | None, project="ot-ti-mirror"):
@@ -24,7 +33,9 @@ def test_verify_state_transitions(tmp_path):
     st = fu.fold(tmp_path)
     assert st["fu-a"]["state"] == "verified-open" and st["fu-c"]["state"] == "resolved-in-source"
     assert readme.stat().st_mtime_ns == mtime
-    assert fu.open_count(tmp_path, "ot-ti-mirror") == 2
+    # 2 筆 verified-open ＋ 2 筆 unverifiable 都還沒解決；只有 resolved-in-source
+    # 的 fu-c 離開 open_count（unverifiable 是可重查狀態，見 OPEN_STATES）。
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 4
     # review round 1, finding 5: distinct `reason` per unverifiable cause, surfaced via fold().
     assert st["fu-d"]["detail"]["reason"] == "missing-file"
     assert st["fu-e"]["detail"]["reason"] == "no-expected-stale"
@@ -185,4 +196,135 @@ def test_composed_extract_then_verify_open_then_edit_then_resolved(tmp_path):
                    now="2026-08-25T00:01:00Z")
     assert s3["resolved"] == 1
     assert fu.fold(tmp_path)[fid]["state"] == "resolved-in-source"
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 0
+
+
+# --- 全支線 review：`unverifiable` 是可重查狀態，不是終局 ---------------------------
+
+
+def test_unverifiable_is_rechecked_and_recovers_when_root_appears(tmp_path):
+    """`no-root`／`missing-file` 這類 unverifiable 只描述「這一輪查不到」，不是
+    「這筆待辦不成立」。舊版把它排除在重查集合外，等於一次 dream run 撞到 roots
+    還沒設定就讓該筆永久退場——root 補上之後再也不會被重查，靜默遺失。
+    """
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "note.md").write_text("line1\nstale value 133,604 B here\nline3\n", encoding="utf-8")
+    _open(tmp_path, "fu-nr", "note.md", 2, "133,604 B")
+
+    s1 = fu.verify(tmp_path, roots_by_project={}, now=NOW)
+    assert s1["unverifiable"] == 1
+    st = fu.fold(tmp_path)
+    assert st["fu-nr"]["state"] == "unverifiable" and st["fu-nr"]["detail"]["reason"] == "no-root"
+    # 未解決就是未解決：unverifiable 必須計入 open_count（wakeup brief／KPI 的分子）。
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 1
+
+    s2 = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)},
+                   now="2026-08-25T00:01:00Z")
+    assert s2 == {"checked": 1, "verified_open": 1, "resolved": 0, "unverifiable": 0}
+    assert fu.fold(tmp_path)["fu-nr"]["state"] == "verified-open"
+
+
+def test_unverifiable_recheck_can_resolve_in_source(tmp_path):
+    """重查也可能直接關單：root 補上後過時值已經不在 → resolved-in-source。"""
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "note.md").write_text("line1\nfresh value 133,372 B here\nline3\n", encoding="utf-8")
+    _open(tmp_path, "fu-res", "note.md", 2, "133,604 B")
+    fu.verify(tmp_path, roots_by_project={}, now=NOW)
+    s2 = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)},
+                   now="2026-08-25T00:01:00Z")
+    assert s2["resolved"] == 1
+    assert fu.fold(tmp_path)["fu-res"]["state"] == "resolved-in-source"
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 0
+
+
+def test_repeated_identical_unverifiable_reason_appends_nothing(tmp_path):
+    """重查是每輪 dream 都會跑的；同一個原因每輪各記一筆會讓 append-only ledger
+    以 dream 頻率無界成長，`fold` 的成本也跟著漲。結果與現況相同時不記事件。
+    """
+    repo = tmp_path / "repo"; repo.mkdir()
+    roots = {"ot-ti-mirror": (str(repo),)}
+    _open(tmp_path, "fu-dup", "nope.md", 1, "x")
+
+    fu.verify(tmp_path, roots_by_project=roots, now=NOW)
+    after_first = _ledger_lines(tmp_path)
+    assert len(after_first) == 2                      # opened ＋ 第一次 unverifiable
+
+    s2 = fu.verify(tmp_path, roots_by_project=roots, now="2026-08-25T00:01:00Z")
+    assert _ledger_lines(tmp_path) == after_first     # 逐位元不變：完全沒 append
+    # 仍然照實回報「這一輪查過、結果是 unverifiable」，只是沒有新事件。
+    assert s2["checked"] == 1 and s2["unverifiable"] == 1
+    assert s2["unverifiable_unchanged"] == 1
+    assert fu.fold(tmp_path)["fu-dup"]["updated_at"] == NOW
+
+
+def test_changed_unverifiable_reason_still_appends(tmp_path):
+    """原因變了就是新資訊（no-root → missing-file），必須留下事件。"""
+    repo = tmp_path / "repo"; repo.mkdir()
+    _open(tmp_path, "fu-chg", "nope.md", 1, "x")
+    fu.verify(tmp_path, roots_by_project={}, now=NOW)
+    assert fu.fold(tmp_path)["fu-chg"]["detail"]["reason"] == "no-root"
+
+    s2 = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)},
+                   now="2026-08-25T00:01:00Z")
+    assert s2["unverifiable"] == 1 and "unverifiable_unchanged" not in s2
+    assert len(_ledger_lines(tmp_path)) == 3
+    assert fu.fold(tmp_path)["fu-chg"]["detail"]["reason"] == "missing-file"
+
+
+def test_verify_is_noop_when_followups_disabled(tmp_path):
+    """spec：`followups.enabled` 關閉時 extract／verify／dream 階段 SHALL 為 no-op。
+    先前只有 extract_all 有這道 gate，verify 照跑並照樣 append 事件。
+    """
+    repo = tmp_path / "repo"; repo.mkdir()
+    _open(tmp_path, "fu-off", "nope.md", 1, "x")
+    before = _ledger_lines(tmp_path)
+
+    s = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)}, now=NOW,
+                  enabled=False)
+    assert s["skipped"] == "followups.disabled"
+    assert s["checked"] == 0
+    assert _ledger_lines(tmp_path) == before
+
+
+def test_cli_verify_honours_followups_disabled_flag(tmp_path, capsys):
+    """CLI 這一層也要吃到 flag（gate 內建在 `followups.verify` 本身，比照 extract_all）。"""
+    Path(os.environ["HIPPO_CONFIG_ROOT"], "config.yaml").write_text(
+        "followups:\n  enabled: false\n", encoding="utf-8")
+    repo = tmp_path / "repo"; repo.mkdir()
+    _open(tmp_path, "fu-cli-off", "nope.md", 1, "x")
+    before = _ledger_lines(tmp_path)
+
+    assert cli.main(["followups", "verify", "--memory-root", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] == "followups.disabled"
+    assert _ledger_lines(tmp_path) == before
+
+
+def test_cli_verify_resolves_roots_from_registry_only_project(tmp_path, capsys, monkeypatch):
+    """roots 解析要走 registry-aware 的 union 讀取：只登記在 generated registry
+    （`project-hippo.yaml`）而沒進手寫 `projects.yaml` 的專案，先前一律拿不到 root，
+    整批 follow-up 只會得到 `no-root`。
+    """
+    monkeypatch.setenv("PSC_CONFIG_ROOT", "")
+    memory_root = tmp_path / "agents" / "memory"
+    memory_root.mkdir(parents=True)
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "note.md").write_text("line1\nstale value 133,604 B here\nline3\n", encoding="utf-8")
+    registry.record_discovery(slug="ot-ti-mirror", roots=[str(repo)],
+                              registry_path=registry.default_registry_path(memory_root))
+    _open(memory_root, "fu-reg", "note.md", 2, "133,604 B")
+
+    assert cli.main(["followups", "verify", "--memory-root", str(memory_root)]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "checked": 1, "verified_open": 1, "resolved": 0, "unverifiable": 0}
+
+
+def test_fold_survives_non_utf8_ledger_bytes(tmp_path):
+    """撕裂寫入／外部工具塞進非 UTF-8 bytes 時 `read_text` 丟的是 UnicodeDecodeError
+    （ValueError 子類，不是 OSError）。`fold` 是每個讀取端的入口（open_count／list／
+    verify／wakeup brief／KPI），漏接等於整條 follow-up 路徑被一個壞 byte 炸掉。
+    """
+    path = fu.ledger_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"id": "fu-1", "event": "opened"}\n\xff\xfe\xfa\n')
+    assert fu.fold(tmp_path) == {}
     assert fu.open_count(tmp_path, "ot-ti-mirror") == 0

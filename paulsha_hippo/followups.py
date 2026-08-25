@@ -5,10 +5,11 @@ extract：從 knowledge notes body 逐行抽取可行動語句＋其 `path:line`
 writer／reader（比照 _shortlist_common._append_offered_ledger 的 flush＋fsync 落盤慣例、
 ledger/processing.py 的 fold-by-last-event 慣例：事件依 (ts, original_index) 排序後折疊，
 較晚的 ts 勝出，即使該事件在檔案中被較早 append；缺／無法解析的 ts 排最前，視為最舊）。
-verify：對 fold 後仍 open 的項目唯讀重讀其引用的 file:line（±window），確認 expected_stale
+verify：對 fold 後仍未解決的項目唯讀重讀其引用的 file:line（±window），確認 expected_stale
 是否還在——在→ verified-open，不在→ resolved-in-source（自動關閉），缺檔／缺 root／路徑
-逃逸／無預期值／行號越界→ unverifiable（並在 detail.reason 標明原因）。close：使用者手動
-關閉一筆。
+逃逸／無預期值／行號越界→ unverifiable（並在 detail.reason 標明原因）。`unverifiable` 下一輪
+仍會被重查（原因消失即可回到 verified-open／resolved-in-source），只有結果與現況完全相同
+時不重複記事件。close：使用者手動關閉一筆。
 
 Task 12（後續）才把這裡接進 dream/wakeup/KPI；本模組獨立可用，不依賴那些迴路。
 """
@@ -25,8 +26,11 @@ from paulsha_hippo.atomizer.slice_frontmatter import CITE_RE
 from paulsha_hippo.ledger.integrity import ledger_dir
 from paulsha_hippo.moc import frontmatter_io as fio
 
+# `TODO` 加 word boundary：沒有邊界時 `todos`／`kanban-todo-list`／`TODOS.md` 這類
+# 字串會把整行當成待辦抽出來（regex 是純字串比對，抽錯就是憑空開一張單）。其餘
+# 中文詞本來就沒有 word char 邊界問題，維持原樣。
 ACTIONABLE_RE = re.compile(
-    r"需要更新|需加|缺口|TODO|should be updated|尚未修|需修正|待補", re.IGNORECASE
+    r"需要更新|需加|缺口|\bTODO\b|should be updated|尚未修|需修正|待補", re.IGNORECASE
 )
 STALE_VALUE_RE = re.compile(r"`([^`]{1,64})`|(\d[\d,\.]{2,})")
 _BACKTICK_VALUE_RE = re.compile(r"`([^`]{1,64})`")
@@ -37,7 +41,15 @@ _BARE_DIGIT_RE = re.compile(r"\d[\d,\.]{2,}")
 _CITE_BACKTICKED_RE = re.compile(r"`" + CITE_RE.pattern + r"`")
 _FENCE_MARKERS = ("```", "~~~")
 
-OPEN_STATES = ("opened", "verified-open")
+#: 「仍未解決」的狀態集合——`verify` 的重查對象、`open_count` 的分子、
+#: `hippo followups list --status open` 的過濾條件都用它。
+#:
+#: `unverifiable` 也在裡面：它描述的是「這一輪查不到」（缺 root／缺檔／無預期值／
+#: 行號越界），不是「這筆待辦不成立」。把它排除在外會讓一次 `dream run` 撞到
+#: roots 還沒設定就永久退場——root 補上之後再也不會被重查，該筆 follow-up 靜默
+#: 消失且不計入任何 open 指標。唯一的終局狀態是 `resolved-in-source`（來源已修）
+#: 與 `closed-manual`（人手關閉）。
+OPEN_STATES = ("opened", "verified-open", "unverifiable")
 VALID_EVENTS = ("opened", "verified-open", "resolved-in-source", "closed-manual", "unverifiable")
 
 
@@ -186,7 +198,11 @@ def fold(root: Path) -> dict[str, dict]:
     state: dict[str, dict] = {}
     try:
         raw = ledger_path(root).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # 撕裂寫入／外部工具塞進非 UTF-8 bytes 時，`read_text` 丟的是
+        # UnicodeDecodeError（ValueError 子類、不是 OSError）。fold 是每個讀取端
+        # 的入口（open_count、list、verify、wakeup brief、KPI report），這裡漏接
+        # 等於整條 follow-up 路徑因為 ledger 的一個壞 byte 全部炸掉。
         return state
     events: list[dict] = []
     for line in raw.splitlines():
@@ -366,19 +382,41 @@ def _verify_outcome(target: dict, expected_stale: object, resolved_path: Path | 
     return ("verified-open", None) if found else ("resolved-in-source", None)
 
 
+def _current_reason(state: dict) -> str | None:
+    """該筆 fold 後狀態目前記著的 `detail.reason`（沒有／型別不對時回 None）。"""
+    detail = state.get("detail")
+    return detail.get("reason") if isinstance(detail, dict) else None
+
+
 def verify(root: Path, *, roots_by_project: dict, now: str, project: str | None = None,
-           window: int = 2) -> dict:
-    """對 fold 後狀態為 open（opened／verified-open）且有 target 的項目，唯讀重讀其
-    file:line（±window，1-based，越界裁切）判定 expected_stale 是否仍在。從不寫 repo 檔案、
+           window: int = 2, enabled: bool | None = None) -> dict:
+    """對 fold 後仍未解決（`OPEN_STATES`）且有 target 的項目，唯讀重讀其 file:line
+    （±window，1-based，越界裁切）判定 expected_stale 是否仍在。從不寫 repo 檔案、
     從不 raise——缺檔／out-of-range／路徑逃逸／無 expected_stale 一律歸 unverifiable，
     並在該筆 ledger 事件的 `detail.reason` 記下區分成因。
+
+    重查對象含 `unverifiable`（見 `OPEN_STATES` 註解）：那是「這一輪查不到」，不是
+    終局。為了不讓每輪 dream 都替同一個成因重記一筆，結果與目前折疊狀態完全相同
+    （同樣 unverifiable ＋ 同樣 reason）時 **不 append 任何事件**；該筆仍照實計入
+    `checked`／`unverifiable`，另以 `unverifiable_unchanged` 回報有幾筆被去重。
+
+    `enabled` 為 None 時 best-effort 讀 `runtime_flags.load_flags().followups_enabled`；
+    停用時整個 verify 為 no-op（不讀 repo、不落 ledger），summary 帶
+    `"skipped": "followups.disabled"`——spec：flag 關閉時 extract／verify／dream
+    階段 SHALL 為 no-op。gate 內建在本函式而非只擋在 CLI，比照 `extract_all`。
     """
     summary = {"checked": 0, "verified_open": 0, "resolved": 0, "unverifiable": 0}
+    if enabled is None:
+        enabled = _followups_enabled_default()
+    if not enabled:
+        summary["skipped"] = "followups.disabled"
+        return summary
     event_to_stat = {
         "verified-open": "verified_open",
         "resolved-in-source": "resolved",
         "unverifiable": "unverifiable",
     }
+    unchanged = 0
     for fid, state in fold(root).items():
         if state.get("state") not in OPEN_STATES:
             continue
@@ -392,11 +430,17 @@ def verify(root: Path, *, roots_by_project: dict, now: str, project: str | None 
         resolved_path, resolve_reason = _resolve(target, item_project, roots_by_project)
         outcome, reason = _verify_outcome(
             target, state.get("expected_stale"), resolved_path, resolve_reason, window)
+        summary[event_to_stat[outcome]] += 1
+        if (outcome == "unverifiable" and state.get("state") == "unverifiable"
+                and _current_reason(state) == reason):
+            unchanged += 1
+            continue
         detail = {"path": str(resolved_path) if resolved_path else None}
         if reason:
             detail["reason"] = reason
         append_event(root, {"id": fid, "event": outcome, "detail": detail}, now=now)
-        summary[event_to_stat[outcome]] += 1
+    if unchanged:
+        summary["unverifiable_unchanged"] = unchanged
     return summary
 
 
