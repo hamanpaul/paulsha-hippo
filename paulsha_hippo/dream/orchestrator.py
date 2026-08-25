@@ -79,6 +79,7 @@ def run_dream(
     *,
     atomize_fn: Callable[[], dict[str, Any]],
     janitor_fn: Callable[[], dict[str, Any]],
+    followups_fn: Callable[[], dict[str, Any]] | None = None,
     moc_fn: Callable[[], dict[str, Any]] | None = None,
     now: str,
     config_hash: str = "",
@@ -91,6 +92,14 @@ def run_dream(
 
     atomize_clean = _run_pass("atomize", atomize_fn, passes, errors)
     janitor_clean = _run_pass("janitor", janitor_fn, passes, errors)
+    # Task 12 (#136 fix 5)：followups verify 為獨立、可選階段，跑在 janitor 之後、
+    # moc 之前。followups_fn 的呼叫端（dream/cli.py）已把任何例外自行接住並轉成
+    # summary.error（不 raise、warnings 恆空），故 _run_pass 現有的 clean 判斷
+    # （只看 warnings／summary["skipped"]）不會因 followups 失敗而把 clean 拉成
+    # False——followups 失敗因此不會讓一個原本 ok 的 dream 退化成 partial/failed。
+    followups_clean = True
+    if followups_fn is not None:
+        followups_clean = _run_pass("followups", followups_fn, passes, errors)
     moc_clean = True
     if moc_fn is not None:
         moc_clean = _run_pass("moc", moc_fn, passes, errors)
@@ -127,7 +136,7 @@ def run_dream(
     if errors:
         status = "failed"
     else:
-        status = "ok" if (atomize_clean and janitor_clean and moc_clean) else "partial"
+        status = "ok" if (atomize_clean and janitor_clean and followups_clean and moc_clean) else "partial"
 
     record: dict[str, Any] = {
         "ts": now,

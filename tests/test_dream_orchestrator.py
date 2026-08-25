@@ -282,6 +282,20 @@ class TestDreamOrchestrator(unittest.TestCase):
             self.assertEqual(record["status"], "partial")
             self.assertIn("indexed", record["passes"]["moc"])
 
+    def test_followups_pass_runs_between_janitor_and_moc_and_is_optional(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            res = orchestrator.run_dream(
+                root, atomize_fn=lambda: (calls.append("a") or {}), janitor_fn=lambda: (calls.append("j") or {}),
+                followups_fn=lambda: (calls.append("f") or {"summary": {"checked": 0}, "warnings": []}),
+                moc_fn=lambda: (calls.append("m") or {}), now="2026-08-25T00:00:00Z")
+            self.assertEqual(calls, ["a", "j", "f", "m"])
+            self.assertEqual(res["status"], "ok")
+            self.assertIn("followups", res["passes"])
+            res2 = orchestrator.run_dream(root, atomize_fn=lambda: {}, janitor_fn=lambda: {}, now="2026-08-25T00:00:01Z")
+            self.assertNotIn("followups", res2["passes"])
+
     def test_global_disable_rules_override_cannot_weaken_dream_ledger(self):
         """Codex 複驗 blocking：override 全域 disable_rules 停用規則後，dream ledger
         的 error_message／warnings 強制 scrub 不得弱化——credential 原文不得落

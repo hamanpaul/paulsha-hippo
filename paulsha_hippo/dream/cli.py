@@ -7,12 +7,16 @@ from pathlib import Path
 
 from ..atomizer import cli as atomizer_cli
 from ..atomizer import pipeline as atomizer_pipeline
+from ..importer.config import default_projects_path, load_projects_config
 from ..instruction_corpus import corpus_for_roots
 from ..janitor import config as janitor_config
 from ..janitor import scanner as janitor_scanner
 from ..ledger import dream as dream_ledger
+from ..ledger import processing
 from ..moc import runner as moc_runner
 from ..lib import idle
+from ..runtime_flags import load_flags
+from .. import followups
 from . import lock as dream_lock
 from . import orchestrator
 
@@ -142,6 +146,21 @@ def _run(args: argparse.Namespace) -> int:
                 source_path_exists=lambda record: None,
             )
 
+        def followups_fn() -> dict[str, object]:
+            # 獨立、可選的 verify 階段（issue #136 fix 5）：任何例外都在此接住，
+            # 絕不上拋——orchestrator._run_pass 才不會把它算進 errors，followups
+            # 失敗因此不會拉低 dream 的整體 status。
+            if args.dry_run:
+                return {"summary": {"skipped": "dry-run"}, "warnings": []}
+            if not load_flags().followups_enabled:
+                return {"summary": {"skipped": "disabled"}, "warnings": []}
+            try:
+                cfg = load_projects_config(default_projects_path(memory_root))
+                roots = {p.slug: p.roots for p in cfg.projects}
+                return {"summary": followups.verify(memory_root, roots_by_project=roots, now=now), "warnings": []}
+            except Exception as exc:  # noqa: BLE001 — followups 失敗不得改變 dream 等級
+                return {"summary": {"error": processing.sanitize_error_text(str(exc))}, "warnings": []}
+
         def moc_fn() -> dict[str, object]:
             if args.dry_run:
                 return {"summary": {"skipped": "dry-run"}, "warnings": []}
@@ -188,6 +207,7 @@ def _run(args: argparse.Namespace) -> int:
             memory_root,
             atomize_fn=atomize_fn,
             janitor_fn=janitor_fn,
+            followups_fn=followups_fn,
             moc_fn=moc_fn,
             now=now,
             config_hash=(

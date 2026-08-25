@@ -370,6 +370,22 @@ class WakeupBuilderTests(unittest.TestCase):
 
             self.assertEqual(requested_limits, [64, 50])
 
+    def test_brief_appends_followups_line_only_when_open(self):
+        from paulsha_hippo import followups as fu
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _slice(root, "sl-1", "p", "alpha")
+            out0 = build_brief(root, "p", now="2026-08-25T00:00:00Z")
+            self.assertNotIn("Follow-ups", out0)
+            fu.append_event(root, {"id": "fu-1", "event": "opened", "slice_id": "sl-1", "project": "p",
+                                   "target": {"path": "a.md", "line": 1}, "expected_stale": "x", "claim": "c", "source": "regex"},
+                            now="2026-08-25T00:00:00Z")
+            out1 = build_brief(root, "p", now="2026-08-25T00:00:00Z")
+            self.assertIn("## Follow-ups", out1)
+            self.assertIn("open follow-ups：1", out1)
+            self.assertIn(f"--project p", out1)
+            self.assertLessEqual(len(build_brief(root, "p", now="2026-08-25T00:00:00Z", char_budget=300)), 300)
+
 
 def test_build_orientation_concise(tmp_path):
     from paulsha_hippo.wakeup.builder import build_orientation
@@ -397,6 +413,35 @@ def test_build_orientation_custom_retrieval_hint(tmp_path):
     assert "每次 prompt 後以短清單浮現" not in out
     default = build_orientation(tmp_path, "proj")
     assert "每次 prompt 後以短清單浮現" in default
+
+
+def test_build_orientation_default_follows_show_flag(tmp_path, monkeypatch):
+    """issue #136 plan-gap（Task 6 reviewer finding）：預設 hint 要跟著
+    runtime_flags.load_flags().read_hint 走，跟 Task 6 已經改掉的 prompt-time
+    shortlist hint（_SHORTLIST_HINT_SHOW）保持一致——不是永遠講「用 Read」。
+    """
+    from paulsha_hippo.wakeup import builder as B
+    from paulsha_hippo import runtime_flags as rf
+    monkeypatch.setattr(B, "load_flags", lambda: rf.HygieneFlags(read_hint="show"))
+    k = tmp_path / "knowledge" / "proj"
+    k.mkdir(parents=True)
+    (k / "a.md").write_text("---\nmemory_layer: knowledge\n---\nx\n", encoding="utf-8")
+    out = B.build_orientation(tmp_path, "proj")
+    assert f"hippo show <slice_id> --memory-root {tmp_path} --agent" in out
+    assert "每次 prompt 後以短清單浮現" in out
+
+
+def test_build_orientation_follows_read_hint_flag_off(tmp_path, monkeypatch):
+    """flag-off：read_hint == "read" 時預設句子要與舊版 byte-identical。"""
+    from paulsha_hippo.wakeup import builder as B
+    from paulsha_hippo import runtime_flags as rf
+    monkeypatch.setattr(B, "load_flags", lambda: rf.HygieneFlags(read_hint="read"))
+    k = tmp_path / "knowledge" / "proj"
+    k.mkdir(parents=True)
+    (k / "a.md").write_text("---\nmemory_layer: knowledge\n---\nx\n", encoding="utf-8")
+    out = B.build_orientation(tmp_path, "proj")
+    assert out.endswith(B._ORIENTATION_RETRIEVAL_HINT)
+    assert "hippo show" not in out
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from paulsha_hippo import cli
+from paulsha_hippo import cli, runtime_flags
 from paulsha_hippo.dream import lock as dream_lock
 from paulsha_hippo.ledger import dream
 
@@ -291,6 +291,26 @@ class DreamCliTests(unittest.TestCase):
                 payload = json.loads(buf.getvalue())
                 self.assertNotIn("skipped", payload)  # 第二輪未被殘留鎖擋住
                 self.assertIn("passes", payload)
+
+    def test_followups_failure_does_not_downgrade_dream(self):
+        # 秘密字面量刻意選用 policy 的 github_pat 規則能命中的樣式（比照
+        # test_dream_orchestrator.py::test_global_disable_rules_override_cannot_weaken_dream_ledger），
+        # 這樣 assertNotIn 才是在驗證真正的 secret redaction，而不是巧合地對
+        # 一句普通錯誤訊息（例如 "boom"）斷言其不出現。
+        secret = "ghp_" + "A1b2C3d4" * 5
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed(root)
+            with patch("paulsha_hippo.dream.cli.followups.verify",
+                       side_effect=RuntimeError(f"token {secret} rejected")), \
+                 patch("paulsha_hippo.dream.cli.load_flags", return_value=runtime_flags.HygieneFlags()):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cli.main(["dream", "run", "--memory-root", str(root), "--promoter", "identity"])
+            out = json.loads(buf.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertIn(out["status"], ("ok", "partial"))
+            self.assertIn("error", out["passes"]["followups"])
+            self.assertNotIn(secret, json.dumps(out["passes"]["followups"]))   # sanitize
 
     def test_status_reports_backlog(self):
         with TemporaryDirectory() as tmp:

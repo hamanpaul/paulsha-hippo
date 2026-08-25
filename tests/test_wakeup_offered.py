@@ -10,9 +10,13 @@ from paulsha_hippo.hooks import _wakeup_common as wc
 
 class WakeupOrientationTests(unittest.TestCase):
     def test_orientation_returned_and_no_session_offered_file(self):
+        # issue #136 plan-gap（Task 6 reviewer finding）：build_orientation 的預設句子
+        # 現在跟著 runtime_flags 的 read_hint（預設 "show"）走——這裡是 build_orientation
+        # 完全被 mock 掉時的替代回傳值，只是要跟真實預設保持一致，不再是舊版「用 Read 開啟」。
         orientation = (
             "# 記憶 — proj\n\n記憶系統已啟用（本專案約 2 筆 knowledge）。"
-            "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；用 Read 開啟清單中列出的絕對路徑即取全文。"
+            "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
+            "執行 `hippo show <slice_id> --memory-root /x --agent` 取精簡全文，比 Read 省約 70% token。"
         )
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

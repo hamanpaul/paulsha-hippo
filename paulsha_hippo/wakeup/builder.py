@@ -9,6 +9,7 @@ from ..ledger import lifecycle
 from ..ledger import retrieval_set
 from ..moc import frontmatter_io as fio
 from ..moc.moc_builder import alias_link
+from ..runtime_flags import load_flags
 
 # Memory layer name (factored out to avoid policy-consumer lint false positive)
 _KNOWLEDGE_LAYER = "knowledge"
@@ -79,9 +80,31 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
     # the right MOC but mismatch every slice's frontmatter and exclude them all.
     project = (project or "").strip()
 
+    # issue #136 fix 5：Follow-ups 一行永遠附在整段結果末尾——先算出這行文字、
+    # 從 char_budget 扣掉它的長度，讓下面既有的配置/截斷邏輯在扣除後的預算內
+    # 運作，最後每個 return 點統一用 _finish() 補上，確保總長度仍在呼叫端給的
+    # char_budget 之內。任何例外（flag 讀取失敗、open_count 失敗…）一律不附行
+    # ——fail-open，brief 本身的既有內容不受影響。
+    followups_block = ""
+    try:
+        from paulsha_hippo import followups as _fu
+        if load_flags().followups_enabled:
+            n = _fu.open_count(memory_root, project)
+            if n > 0:
+                followups_block = (
+                    f"\n## Follow-ups\n\n- open follow-ups：{n}"
+                    f"（`hippo followups list --memory-root {memory_root} --project {project}`）\n"
+                )
+    except Exception:
+        followups_block = ""
+    char_budget = max(0, char_budget - len(followups_block))
+
+    def _finish(text: str) -> str:
+        return text + followups_block
+
     # guard empty or unknown project
     if project in ("_unknown", ""):
-        return ""
+        return _finish("")
 
     # project is rich metadata (may contain '/'); sanitize for the on-disk paths,
     # matching where moc_builder/atomizer actually write per-project MOC and slices.
@@ -143,7 +166,7 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
 
     # Per spec: empty only when both MOC and active slices are absent
     if moc_body is None and not slices:
-        return ""
+        return _finish("")
 
     # Compute active slices and lifecycle state
     events = lifecycle.read_events(memory_root)
@@ -158,7 +181,7 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
     
     # Per spec: empty only when both MOC and active slices are absent
     if moc_body is None and not active_slices:
-        return ""
+        return _finish("")
 
     # Attach last_event_ts for sorting
     for s in active_slices:
@@ -256,7 +279,7 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
             else:
                 map_block = map_header + "\n\n(truncated)\n"
         result = header + map_block
-        return clamp(result, char_budget)
+        return _finish(clamp(result, char_budget))
     
     # Handle Recent-only case (no MOC)
     if not moc_body and active_slices:
@@ -275,7 +298,7 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
                 # Can't fit any recent entries, just header
                 recent_block = clamp(recent_header, remaining_after_header)
         result = header + recent_block
-        return clamp(result, char_budget)
+        return _finish(clamp(result, char_budget))
 
     # Handle both MOC and Recent present
     recent_block = recent_header + "\n".join(recent_lines) + "\n\n"
@@ -297,12 +320,12 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
                 # no recent lines left; try to include minimal map marker first
                 minimal_map_section = map_header + "\n\n(truncated)\n"
                 if len(minimal_map_section) <= remaining_after_header:
-                    return clamp(header + minimal_map_section, char_budget)
+                    return _finish(clamp(header + minimal_map_section, char_budget))
                 # if minimal map doesn't fit, prefer keeping Recent header for continuity if possible
                 if len(recent_header) <= remaining_after_header:
-                    return clamp(header + recent_header, char_budget)
+                    return _finish(clamp(header + recent_header, char_budget))
                 # as an extreme fallback, return a clamped header (do not append newlines that could re-grow)
-                return clamp(header, char_budget)
+                return _finish(clamp(header, char_budget))
         else:
             # we have room for map header and current recent block; allocate remaining to map body
             allowed_body = remaining_after_header - len(current_recent_block) - len(map_header)
@@ -326,22 +349,34 @@ def build_brief(memory_root: Path, project: str, *, now: str, k: int = 8, char_b
                     recent_lines_mut.pop()
                     continue
                 # as last resort, truncate the result to budget
-                return clamp(result, char_budget)
-            return result
+                return _finish(clamp(result, char_budget))
+            return _finish(result)
 
 
 _ORIENTATION_RETRIEVAL_HINT = (
     "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
     "用 Read 開啟清單中列出的絕對路徑即取全文。"
 )
+# issue #136 plan-gap（Task 6 reviewer finding）：Task 6 已把 prompt-time shortlist
+# 的預設 hint 換成 `hippo show <slice_id> --agent`（見 retrieval.py
+# _SHORTLIST_HINT_SHOW），但 SessionStart orientation 的預設句子當時漏改，仍講
+# 「用 Read 開啟」。這裡補上對應的 show 版本，措辭與 _SHORTLIST_HINT_SHOW 同款
+# （保留共同前綴，比較 Read 省 token），供 build_orientation 依 read_hint flag 選用。
+_ORIENTATION_RETRIEVAL_HINT_SHOW_TMPL = (
+    "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
+    "執行 `hippo show <slice_id> --memory-root {memory_root} --agent` 取精簡全文，"
+    "比 Read 省約 70% token。"
+)
 
 
 def build_orientation(memory_root, project: str, *, retrieval_hint: str | None = None) -> str:
     """Concise SessionStart orientation (no MOC dump). '' when project has no notes.
 
-    retrieval_hint：檢索方式說明句。None → 預設「prompt 後自動浮現」（Claude 的
-    prompt-time hook 行為）；無 prompt-time hook 的平台傳入顯式 recall 指引，
-    不假裝 orientation 等同 task retrieval。
+    retrieval_hint：檢索方式說明句。None → 依 `runtime_flags.load_flags().read_hint`
+    決定預設句子（"show" → 建議 `hippo show <slice_id> --agent`；"read" → 舊版
+    「用 Read 開啟」，byte-identical）；無 prompt-time hook 的平台傳入顯式 recall
+    指引時（本參數非 None），該顯式值一律優先，不假裝 orientation 等同 task
+    retrieval。
     """
     from pathlib import Path as _Path
     from ..atomizer.config import project_directory_key, sanitize_project_component
@@ -357,6 +392,11 @@ def build_orientation(memory_root, project: str, *, retrieval_hint: str | None =
             n += sum(1 for p in pdir.rglob("*.md") if not p.name.endswith("-moc.md"))
     if n == 0:
         return ""
-    hint = retrieval_hint if retrieval_hint is not None else _ORIENTATION_RETRIEVAL_HINT
+    if retrieval_hint is not None:
+        hint = retrieval_hint
+    elif load_flags().read_hint == "show":
+        hint = _ORIENTATION_RETRIEVAL_HINT_SHOW_TMPL.format(memory_root=memory_root)
+    else:
+        hint = _ORIENTATION_RETRIEVAL_HINT
     return (f"# 記憶 — {project}\n\n"
             f"記憶系統已啟用（本專案約 {n} 筆 knowledge）。{hint}")

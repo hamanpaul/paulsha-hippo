@@ -509,6 +509,33 @@ def _usage_metrics(
     }
 
 
+def _followups_metrics(root: Path, *, start: datetime, now: datetime) -> dict[str, int]:
+    """Follow-up ledger 計數（issue #136 fix 5）：open 是 fold 後的目前快照（跨全部
+    project，非 window 限定）；resolved_in_source 是本 window 內 resolved-in-source
+    事件數。委派給 followups.py 本身的 fold/ledger_path/OPEN_STATES，不在這裡重做
+    折疊邏輯；任何例外（模組不存在、ledger 壞檔…）一律 fail-soft 回零，不讓唯讀
+    報表因為 follow-up ledger 的問題整份掛掉。"""
+    try:
+        from paulsha_hippo import followups as fu
+        state = fu.fold(root)
+        resolved = 0
+        ledger_path = fu.ledger_path(root)
+        lines = ledger_path.read_text(encoding="utf-8").splitlines() if ledger_path.exists() else []
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("event") == "resolved-in-source" and _in_window(_parse_time(ev.get("ts")), start, now):
+                resolved += 1
+        return {
+            "open": sum(1 for s in state.values() if s.get("state") in fu.OPEN_STATES),
+            "resolved_in_source": resolved,
+        }
+    except Exception:
+        return {"open": 0, "resolved_in_source": 0}
+
+
 def build_report(
     root: Path,
     *,
@@ -575,6 +602,7 @@ def build_report(
                 offered_diagnostics=diagnostics["offered.jsonl"],
                 usage_diagnostics=diagnostics["memory_usage.jsonl"],
             ),
+            "followups": _followups_metrics(root, start=start, now=now),
         }
 
     try:
@@ -655,6 +683,14 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"| {name} | " + " | ".join(_fraction(metric) for metric in metrics) + f" | {definition} |"
         )
+    lines.append(
+        "| Follow-ups open／resolved(window) | "
+        + " | ".join(
+            f"{payload['followups']['open']}／{payload['followups']['resolved_in_source']}"
+            for payload in windows.values()
+        )
+        + " | fold 後仍 open（跨全部 project）／window 內 resolved-in-source 事件數 |"
+    )
 
     lines.extend(["", "## 狀態與排除", ""])
     for key, payload in windows.items():
