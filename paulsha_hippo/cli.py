@@ -491,6 +491,15 @@ def _build_parser() -> argparse.ArgumentParser:
     recall_p.add_argument("--session-id", required=True)
     recall_p.set_defaults(func=_recall)
 
+    show_p = memory_subparsers.add_parser(
+        "show", help="印出一筆 knowledge note；--agent 只印精簡 header＋body（省 ~70% token）")
+    show_p.add_argument("ref", help="slice_id 或檔案路徑")
+    show_p.add_argument("--memory-root", required=True)
+    show_p.add_argument("--agent", action="store_true")
+    show_p.add_argument("--tool", default=None)
+    show_p.add_argument("--session-id", default=None)
+    show_p.set_defaults(func=_show)
+
     return parser
 
 
@@ -1427,6 +1436,37 @@ def _recall(args: argparse.Namespace) -> int:
         bypass_early_stop=True)
     if block:
         print(block)
+    return 0
+
+
+def _show(args: argparse.Namespace) -> int:
+    """印出一筆 knowledge note（issue #136 fix 3b）。
+
+    ``--agent`` 印精簡 header＋body（省 token）；否則印整檔。``--tool``／
+    ``--session-id`` 必須同時提供才記 read 事件——省下的 Read 仍要讓
+    memory-usage KPI（看過率）看得到，用 usage_read.append_read_event 補記
+    與 hooks/claude_post_tool_use.py 同 schema 的 read 事件。
+    """
+    from . import show as show_mod
+
+    root = Path(args.memory_root)
+    try:
+        path = show_mod.resolve_ref(root, args.ref)
+    except show_mod.ShowError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if bool(args.tool) != bool(args.session_id):
+        print("show: --tool 與 --session-id 必須同時提供", file=sys.stderr)
+        return 2
+    text = show_mod.render_agent_view(path) if args.agent else path.read_text(encoding="utf-8")
+    if args.tool and args.session_id:
+        from .usage_read import append_read_event
+
+        fm, _ = _fio.read(path.read_text(encoding="utf-8"))
+        append_read_event(
+            root, tool=args.tool, session_id=args.session_id,
+            sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))
+    sys.stdout.write(text)
     return 0
 
 

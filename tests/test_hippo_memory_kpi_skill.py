@@ -5,8 +5,10 @@ import json
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from paulsha_hippo import usage_read
 from paulsha_hippo.lib.lifecycle import schema as lifecycle_schema
 from paulsha_hippo.moc import frontmatter_io, search
 
@@ -407,3 +409,35 @@ def test_report_marks_missing_sources_and_zero_denominators_as_unavailable(tmp_p
     assert markdown.returncode == 0, markdown.stderr
     assert "## 資料診斷" in markdown.stdout
     assert "missing_file=1" in markdown.stdout
+
+
+def test_show_agent_read_event_counts_toward_viewed_kpi(tmp_path):
+    """`hippo show --agent` 取代 Read 之後，記下的 read 事件仍要餵得動看過率 KPI。
+
+    fix 3b 的重點：省下的 Read 不能讓 KPI 看不到——offered.jsonl 先有一筆
+    shortlist offer，usage_read.append_read_event（show 的 read 歸因寫入器）
+    補一筆同 schema 的 read 事件後，report 的 usage.viewed 就要把它算進去。
+    """
+    root = tmp_path
+    note = root / "knowledge" / "proj" / "note--sl-aaaaaaaaaaaaaaaa.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "---\nslice_id: sl-aaaaaaaaaaaaaaaa\nproject: proj\n---\nbody\n", encoding="utf-8"
+    )
+    offer_ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_jsonl(root, "offered.jsonl", [
+        {"ts": offer_ts, "tool": "claude-code", "session_id": "s1", "offered": ["sl-aaaaaaaaaaaaaaaa"]},
+    ])
+
+    usage_read.append_read_event(
+        root, tool="claude-code", session_id="s1",
+        sl_id="sl-aaaaaaaaaaaaaaaa", path=note, project="proj",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REPORT_SCRIPT), "--memory-root", str(root), "--format", "json"],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["windows"]["7d"]["usage"]["viewed"]["count"] == 1
