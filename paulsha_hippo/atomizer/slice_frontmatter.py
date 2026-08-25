@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from .llm_output import SliceProposal
 
 _T4_FIELDS = ("memory_layer", "source_agent", "captured_at", "provenance", "supersedes")
+# provenance sub-keys: repo/commit/path always render, the rest only when present
+# (see importer/frontmatter.py::render_markdown, the upstream producer of this shape).
+PROVENANCE_KEYS = ("repo", "commit", "path", "commit_source", "branch", "dirty")
 # Stage 3 ordered fields first, then T4 + provenance handled specially in render().
 _SCALAR_ORDER = (
     "phase", "project", "slice_id", "artifact_kind", "version", "created_at",
@@ -199,8 +202,9 @@ def render(slice_: Slice) -> str:
     provenance = fm.get("provenance") or {}
     if isinstance(provenance, dict):
         lines.append("provenance:")
-        for pkey in ("repo", "commit", "path"):
-            lines.append(f"  {pkey}: {json.dumps(str(provenance.get(pkey, '')), ensure_ascii=False)}")
+        for pkey in PROVENANCE_KEYS:
+            if pkey in ("repo", "commit", "path") or provenance.get(pkey):
+                lines.append(f"  {pkey}: {json.dumps(str(provenance.get(pkey, '')), ensure_ascii=False)}")
     distiller = fm.get("distiller") or {}
     if isinstance(distiller, dict):
         lines.append("distiller:")

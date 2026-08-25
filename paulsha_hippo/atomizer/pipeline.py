@@ -853,7 +853,8 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
                 continue
         captured_at = str(data.get("captured_at", now))
         provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
-        provenance = {k: str(provenance.get(k, "")) for k in ("repo", "commit", "path")}
+        provenance = {k: str(provenance[k]) for k in slice_frontmatter.PROVENANCE_KEYS
+                      if provenance.get(k) not in (None, "")}
         source_artifact = str(data.get("source_artifact", "session"))
         session_title = str(data.get("title", ""))
 
@@ -897,12 +898,14 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
 
 
 def _render_fragment(project, agent, session, source_artifact, captured_at, provenance, index, body, session_title="") -> str:
+    prov_lines = ["provenance:"] + [f"  {k}: {json.dumps(str(provenance.get(k, '')), ensure_ascii=False)}"
+                                    for k in slice_frontmatter.PROVENANCE_KEYS
+                                    if k in ("repo", "commit", "path") or provenance.get(k)]
     lines = ["---", "memory_layer: inbox", f"project: {project}",
              f"source_agent: {agent}", f"source_session: {session}",
              f"source_artifact: {source_artifact}", f"captured_at: {captured_at}",
              f"session_title: {json.dumps(session_title, ensure_ascii=False)}",
-             "provenance:", f"  repo: {provenance.get('repo', '')}",
-             f"  commit: {provenance.get('commit', '')}", f"  path: {provenance.get('path', '')}",
+             *prov_lines,
              f"fragment_index: {index}", f"parent_session_ref: {agent}:{session}", "---"]
     return "\n".join(lines) + "\n" + body
 
@@ -920,7 +923,8 @@ def _read_fragment(path: Path) -> Fragment | None:
     if not all(is_safe_path_component(value) for value in (agent, session)):
         return None
     provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
-    provenance = {k: str(provenance.get(k, "")) for k in ("repo", "commit", "path")}
+    provenance = {k: str(provenance[k]) for k in slice_frontmatter.PROVENANCE_KEYS
+                  if provenance.get(k) not in (None, "")}
     return Fragment(project=project, source_agent=agent,
                     source_session=session,
                     source_artifact=str(data.get("source_artifact", "session")),

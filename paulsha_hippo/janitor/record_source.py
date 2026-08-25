@@ -121,7 +121,7 @@ def _build_record(path: Path, data: Mapping[str, Any]) -> tuple[KnowledgeRecord 
     if isinstance(prov_raw, dict):
         provenance = MappingProxyType({
             k: cleaned for k, v in prov_raw.items()
-            if k in ("repo", "commit", "path")
+            if k in ("repo", "commit", "path", "commit_source", "branch", "dirty")
             and isinstance(v, str)
             and (cleaned := _clean_string(v)) is not None
         })

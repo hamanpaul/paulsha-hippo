@@ -220,6 +220,30 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(list((root / "knowledge").rglob("*.md")))
             self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
 
+    def test_split_and_promote_preserve_six_key_provenance(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "inbox" / "research" / "claude" / "2026-06-02" / "s1.md"
+            raw.parent.mkdir(parents=True)
+            raw.write_text(_RAW.replace(
+                "  path: docs/x.md\n",
+                "  path: docs/x.md\n  commit_source: hook\n  branch: main\n  dirty: \"true\"\n"),
+                encoding="utf-8")
+            cfg, h = atomizer_config.load_config(override_path=None)
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-06-03T00:00:00Z",
+                         promoter=pipeline.IdentityPromoter())
+            # A successful identity-promote run archives fragments out of
+            # inbox/_slices (see test_flow_through_empties_working_layers);
+            # the rendered fragment content survives the move unchanged, so
+            # this is where _render_fragment's output can still be inspected.
+            frag = next((root / "archive" / "fragments").rglob("*.md"))
+            ffm, _ = pipeline._parse_frontmatter(frag.read_text(encoding="utf-8"))
+            self.assertEqual(ffm["provenance"]["branch"], "main")
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            nfm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(nfm["provenance"]["commit_source"], "hook")
+            self.assertEqual(nfm["provenance"]["dirty"], "true")
+
     def test_one_to_one_slice_count_matches_fragments(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

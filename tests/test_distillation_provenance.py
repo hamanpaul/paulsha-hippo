@@ -198,3 +198,22 @@ def test_explicit_provenance_build_overrides_runtime_identity(monkeypatch):
     value = provenance_from_result(None, build="explicit-commit")
 
     assert value["build_commit"] == "explicit-commit"
+
+
+def test_six_key_provenance_round_trips_through_atom_frontmatter():
+    prov = {"repo": "github.com/o/r", "commit": "a" * 40, "path": "/q.json",
+            "commit_source": "hook", "branch": "main", "dirty": "false"}
+    slice_ = slice_frontmatter.Slice(
+        slice_id="sl-x", body="b\n",
+        frontmatter={"provenance": prov, "distiller": {"profile_id": "claude"}, "slice_id": "sl-x",
+                     "memory_layer": "knowledge", "supersedes": []})
+    fm, _ = frontmatter_io.read(slice_frontmatter.render(slice_))
+    assert fm["provenance"] == prov
+
+
+def test_three_key_provenance_renders_without_optional_keys():
+    prov = {"repo": "r", "commit": "_unknown", "path": "/q.json"}
+    slice_ = slice_frontmatter.Slice(slice_id="sl-y", body="b\n",
+                                     frontmatter={"provenance": prov, "distiller": {}, "slice_id": "sl-y"})
+    text = slice_frontmatter.render(slice_)
+    assert "commit_source" not in text and "branch" not in text and "dirty" not in text
