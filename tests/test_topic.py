@@ -42,3 +42,33 @@ def test_collapse_keeps_newest_per_group():
     kept, collapsed = topic.collapse_same_topic(hits)
     assert [h["slice_id"] for h in kept] == ["new", "other"]
     assert collapsed == {"new": ["old"]}
+
+
+def test_malformed_captured_at_never_beats_valid_newer():
+    # "N/A"／"yesterday" 字典序都大於 ISO 字串（例如 'y' > '2'），
+    # 若仍用字串排序會被誤判為「最新」而搶下 owner 位置。
+    hits = [_n("malformed_na", "p", "Flash Layout", "N/A"),
+            _n("malformed_word", "p", "flash layout", "yesterday"),
+            _n("valid", "p", "Flash layout", "2020-01-01T00:00:00Z")]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert [h["slice_id"] for h in kept] == ["valid"]
+    assert collapsed == {"valid": ["malformed_na", "malformed_word"]}
+
+
+def test_two_malformed_captured_at_keep_input_order():
+    hits = [_n("first", "p", "Alpha Beta Gamma Delta Epsilon", "N/A"),
+            _n("second", "p", "Zeta Eta Theta Iota Kappa", "not-a-date")]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert [h["slice_id"] for h in kept] == ["first", "second"]
+    assert collapsed == {}
+
+
+def test_z_suffix_and_offset_forms_compare_correctly():
+    # "-05:00" 換算 UTC 後（2026-08-22T04:00:00）其實比 Z／naive 兩筆都新，
+    # 但原始字串因日期欄位是 "21" 而在字典序上排最後——純字串排序會誤判成最舊。
+    hits = [_n("offset", "p", "Flash Layout", "2026-08-21T23:00:00-05:00"),
+            _n("z", "p", "flash layout", "2026-08-22T02:00:00Z"),
+            _n("naive", "p", "flash Layout", "2026-08-22T01:00:00")]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert [h["slice_id"] for h in kept] == ["offset"]
+    assert collapsed == {"offset": ["z", "naive"]}

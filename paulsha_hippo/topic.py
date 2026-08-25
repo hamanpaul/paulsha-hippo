@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{2,}")
@@ -55,8 +56,29 @@ def is_same_topic(a: Mapping, b: Mapping, *, families: Iterable[Iterable[str]] =
     return bool(union) and len(ta & tb) / len(union) >= JACCARD_THRESHOLD
 
 
+def _recency_key(value: object) -> datetime:
+    """把 captured_at 解析成可比較的 datetime；缺或不可解析視為最舊（datetime.min）。
+
+    只用 stdlib `datetime.fromisoformat`；額外容忍尾隨 `Z`（fromisoformat 在
+    3.11 之前不接受）。aware 值換算為 UTC 後去 tzinfo，naive 值原樣使用，
+    確保同一批排序 key 型別一致、彼此可比較，不會因 naive/aware 混用丟例外。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.min
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
 def collapse_same_topic(hits: list[dict], *, families: Iterable[Iterable[str]] = ()) -> tuple[list[dict], dict[str, list[str]]]:
-    ordered = sorted(hits, key=lambda h: str(h.get("captured_at") or ""), reverse=True)
+    ordered = sorted(hits, key=lambda h: _recency_key(h.get("captured_at")), reverse=True)
     kept: list[dict] = []
     collapsed: dict[str, list[str]] = {}
     for h in ordered:

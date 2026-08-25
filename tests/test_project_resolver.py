@@ -529,6 +529,25 @@ class UnionReadTests(unittest.TestCase):
         self.assertEqual(config.projects[0].roots, ("/data/manual-root", "/data/discovered-root"))
         self.assertEqual(config.projects[0].remotes, ("github.com/acme/widget",))
 
+    def test_union_merged_path_preserves_legacy_families(self):
+        legacy = self.write_projects_config(
+            """
+            version: 1
+            families:
+              - [MCU-Octopus, ot-ti-mirror]
+            projects:
+              manual-proj:
+                remotes:
+                  - github.com/acme/manual
+            """
+        )
+        registry_path = self.write_registry(
+            (ProjectConfig(slug="widget", remotes=("github.com/acme/widget",)),)
+        )
+        config = load_union_projects_config(legacy, registry_path)
+        self.assertEqual([project.slug for project in config.projects], ["manual-proj", "widget"])
+        self.assertEqual(config.families, (("MCU-Octopus", "ot-ti-mirror"),))
+
     def test_alias_collision_manual_wins_with_warning(self):
         legacy = self.write_projects_config(
             """
