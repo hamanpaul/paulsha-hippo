@@ -24,6 +24,34 @@ from pathlib import Path
 
 TOOL = "codex"
 
+_GIT_TIMEOUT = 2
+
+
+def _git_snapshot(cwd: object) -> dict:
+    """best-effort：cwd 為 git repo 時回 {commit, git_branch, git_dirty}；任何失敗回 {}。"""
+    if not isinstance(cwd, str) or not cwd:
+        return {}
+
+    def _run(args: list) -> "str | None":
+        try:
+            proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
+                                  timeout=_GIT_TIMEOUT)
+        except Exception:
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    head = _run(["rev-parse", "HEAD"])
+    if not head:
+        return {}
+    out = {"commit": head}
+    branch = _run(["rev-parse", "--abbrev-ref", "HEAD"])
+    if branch:
+        out["git_branch"] = branch
+    status = _run(["status", "--porcelain", "--untracked-files=normal"])
+    if status is not None:
+        out["git_dirty"] = bool(status)
+    return out
+
 
 def _memory_root() -> Path:
     env = os.environ.get("PSC_MEMORY_ROOT", "").strip()
@@ -105,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         queue_payload["capture_scope"] = capture_scope
         capture_id = uuid.uuid4().hex
         queue_payload["capture_id"] = capture_id
+        for key, value in _git_snapshot(queue_payload.get("cwd")).items():
+            queue_payload.setdefault(key, value)
         # Codex Stop/SubagentStop are mid-session snapshots, so ended_at is explicit null.
         queue_payload["ended_at"] = None
 
