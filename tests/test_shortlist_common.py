@@ -652,11 +652,11 @@ def test_publish_offered_ledger_failure_then_retry_is_clean(tmp_path, monkeypatc
     real_append = SC._append_offered_ledger
     calls = {"n": 0}
 
-    def _flaky_append(root, tool, session_id, project, offered):
+    def _flaky_append(root, tool, session_id, project, offered, collapsed=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("disk full")
-        return real_append(root, tool, session_id, project, offered)
+        return real_append(root, tool, session_id, project, offered, collapsed=collapsed)
 
     monkeypatch.setattr(SC, "_append_offered_ledger", _flaky_append)
 

@@ -297,12 +297,10 @@ def _publish_offered(root: Path, tool: str, session_id: str, project: str,
     僅記 warning。若在此 fail-closed，會使 agent 收不到「已 commit」的 offer、重現前輪
     offered-but-undelivered 的指標膨脹，故降級為 best-effort cache 更新。
     """
-    if collapsed:
-        _append_offered_ledger(root, tool, session_id, project, offered, collapsed)
-    else:
-        # 未折疊時保留舊 5-arg 呼叫形狀（呼叫端 monkeypatch 替身多半仍是舊簽名），
-        # 與折疊功能上線前逐位元組相同；有折疊才多帶第 6 個位置參數。
-        _append_offered_ledger(root, tool, session_id, project, offered)
+    # 一律以 keyword 傳 collapsed（None／{} 時 _append_offered_ledger 內部即省略該鍵，
+    # ledger 事件與折疊功能上線前逐位元組相同）；不再依 collapsed 真假切換 5-/6-arg
+    # 呼叫形狀——那是為了遷就舊版 monkeypatch 替身的權宜寫法，正確做法是替身跟著新簽名走。
+    _append_offered_ledger(root, tool, session_id, project, offered, collapsed=collapsed)
     try:
         _commit_offered_map(mpath, offered)
     except Exception as exc:

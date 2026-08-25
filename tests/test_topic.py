@@ -63,6 +63,31 @@ def test_two_malformed_captured_at_keep_input_order():
     assert collapsed == {}
 
 
+def test_collapse_output_order_is_relevance_not_recency():
+    # hits 已是呼叫端（BM25＋usage boost）的相關度序：A(idx0, topic X, 舊)、
+    # B(idx1, topic Y, 全體最新)、C(idx2, topic X, 較新)。recency 只決定同組誰存活
+    # （X 組存活者＝C），但 kept 的輸出順序仍須是相關度序——X 組最靠前的原始索引
+    # 是 A 的 idx0，早於 Y 組（B 的 idx1），所以 C 要佔住 rank 0，而不是因為 B
+    # 全域最新就被排到最前面。
+    hits = [_n("A", "p", "Flash Layout", "2026-08-01T00:00:00Z"),
+            _n("B", "p", "Release Button DIO24", "2026-08-25T00:00:00Z"),
+            _n("C", "p", "flash layout", "2026-08-20T00:00:00Z")]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert [h["slice_id"] for h in kept] == ["C", "B"]
+    assert collapsed == {"C": ["A"]}
+
+
+def test_collapse_no_collapse_keeps_input_order_regardless_of_recency():
+    # 三筆彼此都不同主題（不折疊），captured_at 刻意打亂成非遞增序；kept 必須逐位元組
+    # 等於輸入序（不是 recency 排序過的結果）。
+    hits = [_n("p1", "p", "Alpha Beta Gamma Delta", "2020-01-01T00:00:00Z"),
+            _n("p2", "p", "Epsilon Zeta Eta Theta", "2026-08-25T00:00:00Z"),
+            _n("p3", "p", "Iota Kappa Lambda Mu", "2010-01-01T00:00:00Z")]
+    kept, collapsed = topic.collapse_same_topic(hits)
+    assert kept == hits
+    assert collapsed == {}
+
+
 def test_z_suffix_and_offset_forms_compare_correctly():
     # "-05:00" 換算 UTC 後（2026-08-22T04:00:00）其實比 Z／naive 兩筆都新，
     # 但原始字串因日期欄位是 "21" 而在字典序上排最後——純字串排序會誤判成最舊。

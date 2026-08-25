@@ -36,8 +36,31 @@ def test_collapsed_note_not_offered_next_round_either(tmp_path, monkeypatch):
     monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
     _seed(tmp_path)
     SC.build_shortlist_and_record(tmp_path, "claude-code", "s1", cwd="/x", prompt="flash layout")
+    # round 1 已把 sl-new/sl-oth 都 offer 過（進 seen）；round 2 若沿用同一批筆記，
+    # claim 會因為全都 seen 而空手回傳 ""，讓「sl-old 不在 out2」這個斷言變得沒有鑑別力
+    # （出於"round 2 什麼都沒 offer"而不是出於"折疊持續生效"）。加第四筆不同主題的新
+    # 筆記重建索引，讓 round 2 有全新命中可 offer，斷言才真的鎖住「折疊在下一輪仍生效」。
+    _note(tmp_path, "sl-4th0000000000004", "GPIO Debounce Timer", "2026-08-22T00:00:00Z",
+          body="flash layout 與 gpio debounce timer 設計")
+    S.build_index(tmp_path, link_weights={})
     out2 = SC.build_shortlist_and_record(tmp_path, "claude-code", "s1", cwd="/x", prompt="flash layout")
+    assert out2 != ""
+    assert "sl-4th0000000000004" in out2
     assert "sl-old0000000000001" not in out2
+
+
+def test_collapse_all_same_topic_offers_single_survivor(tmp_path, monkeypatch):
+    # 全部命中同一主題時，折疊後 pool 只剩一個存活者；offered 恰一筆，其餘全進 collapsed。
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    _note(tmp_path, "sl-t1a0000000000001", "Flash Layout", "2026-08-01T00:00:00Z")
+    _note(tmp_path, "sl-t1b0000000000002", "flash layout", "2026-08-10T00:00:00Z")
+    _note(tmp_path, "sl-t1c0000000000003", "Flash Layout", "2026-08-20T00:00:00Z")
+    S.build_index(tmp_path, link_weights={})
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "s3", cwd="/x", prompt="flash layout")
+    assert "sl-t1c0000000000003" in out
+    ev = _ledger(tmp_path)[0]
+    assert [o["sl_id"] for o in ev["offered"]] == ["sl-t1c0000000000003"]
+    assert set(ev["collapsed"]["sl-t1c0000000000003"]) == {"sl-t1a0000000000001", "sl-t1b0000000000002"}
 
 
 def test_flag_off_restores_parallel_offer(tmp_path, monkeypatch):

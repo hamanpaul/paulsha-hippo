@@ -78,13 +78,29 @@ def _recency_key(value: object) -> datetime:
 
 
 def collapse_same_topic(hits: list[dict], *, families: Iterable[Iterable[str]] = ()) -> tuple[list[dict], dict[str, list[str]]]:
+    """同主題折疊：recency 只決定「同組誰存活」，`kept` 的輸出順序仍是 `hits` 的相關度順序。
+
+    `hits` 依呼叫端（BM25＋usage boost）已是相關度排序；折疊不得把整份 shortlist 依
+    captured_at 重排——否則强相關但非最新的主題會被擠出前 K。做法：先用既有的
+    recency-descending 貪婪分組（newest-first，同分時 `sorted` 的 stable 排序保留
+    `hits` 原序，決定性地選出每組存活者），再依「該組成員在 hits 中最小的原始索引」
+    把 kept 重新排回相關度序——最小索引最小的組排最前，讓一個強相關組即使其最新成員
+    在原始命中序中排得靠後，仍保住該組最靠前那個位置的名次。
+    """
+    orig_index = {str(h["slice_id"]): i for i, h in enumerate(hits)}
     ordered = sorted(hits, key=lambda h: _recency_key(h.get("captured_at")), reverse=True)
     kept: list[dict] = []
     collapsed: dict[str, list[str]] = {}
+    group_min_index: dict[str, int] = {}
     for h in ordered:
+        sid = str(h["slice_id"])
         owner = next((k for k in kept if is_same_topic(k, h, families=families)), None)
         if owner is None:
             kept.append(h)
+            group_min_index[sid] = orig_index[sid]
         else:
-            collapsed.setdefault(str(owner["slice_id"]), []).append(str(h["slice_id"]))
+            owner_id = str(owner["slice_id"])
+            collapsed.setdefault(owner_id, []).append(sid)
+            group_min_index[owner_id] = min(group_min_index[owner_id], orig_index[sid])
+    kept.sort(key=lambda h: group_min_index[str(h["slice_id"])])
     return kept, collapsed
