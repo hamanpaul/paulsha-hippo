@@ -246,8 +246,13 @@ def test_pool_exclude_reason_generic_title():
 
 class EpisodicReasonTests(unittest.TestCase):
     def test_mostly_status_lines_is_episodic(self):
+        # review round 1 fixture adjustment: 「下一步：開 PR。」原本靠舊版 bare-word
+        # 「下一步」單獨命中湊出 3/3；新版強弱訊號拆分後「下一步」只是弱訊號，單行
+        # 沒有第二個弱訊號佐證就不算 session-state 行，故該行不再計入命中。其餘 2 行
+        # （本次修改僅限／session 結束時尚未 commit）都是強訊號，仍以 2/3（≥0.5）判定
+        # episodic，body 內容本身不變。
         body = "## 狀態\n本次修改僅限 README-ARC.md。\nsession 結束時尚未 commit。\n下一步：開 PR。\n"
-        self.assertEqual(episodic_reason("ot-ti-mirror 本地建置環境重現與 SOP", body), "body:session-state:3/3")
+        self.assertEqual(episodic_reason("ot-ti-mirror 本地建置環境重現與 SOP", body), "body:session-state:2/3")
         self.assertFalse(classify_noise({}, body).is_noise)   # 不是 deletion-grade
 
     def test_status_minority_with_real_steps_is_kept(self):
@@ -258,6 +263,56 @@ class EpisodicReasonTests(unittest.TestCase):
     def test_handoff_title_is_episodic(self):
         self.assertEqual(episodic_reason("session-handoff-2026-08-12", "任何內容\n"), "title:session-state")
         self.assertIsNone(episodic_reason("Release Button 現有角色", "DIO24 用途分析。\n"))
+
+    # --- review round 1: strong/weak signal split -------------------------------
+    # Reviewer 舉出的三句耐久技術敘述：只含弱訊號（目前狀態／下一步／handoff 其中
+    # 一種，且各只出現一次、沒有第二個不同弱訊號佐證），單行 body 一律不得降層。
+    def test_current_state_machine_prose_is_not_episodic(self):
+        self.assertIsNone(
+            episodic_reason("狀態機設計筆記", "目前狀態機的初始化流程如下所述。\n")
+        )
+
+    def test_next_step_crc_prose_is_not_episodic(self):
+        self.assertIsNone(
+            episodic_reason("CRC 驗證流程", "韌體升級的下一步是驗證 CRC checksum。\n")
+        )
+
+    def test_handoff_register_prose_is_not_episodic(self):
+        self.assertIsNone(
+            episodic_reason(
+                "CC2674 暫存器對照", "handoff register 在 CC2674 上位於 0x4008_1000。\n"
+            )
+        )
+
+    # --- diagnosis positives：104 個誤降級案例的實際型態，強訊號單行即降層 -------
+    def test_bare_not_yet_commit_is_episodic(self):
+        self.assertEqual(episodic_reason("筆記", "尚未 commit\n"), "body:session-state:1/1")
+
+    def test_session_end_not_yet_commit_single_line_is_episodic(self):
+        self.assertEqual(
+            episodic_reason("筆記", "session 結束時尚未 commit。\n"),
+            "body:session-state:1/1",
+        )
+
+    def test_scope_limited_not_yet_commit_is_episodic(self):
+        self.assertEqual(
+            episodic_reason("筆記", "本次修改僅限 README，尚未 commit。\n"),
+            "body:session-state:1/1",
+        )
+
+    # --- 強訊號只出現在 fenced code block 內：整段視為程式碼，不得觸發降層 -------
+    def test_strong_phrase_only_inside_closed_code_fence_is_kept(self):
+        body = "```\n尚未 commit\nsession 結束時尚未 commit\n```\n"
+        self.assertIsNone(episodic_reason("筆記", body))
+
+    def test_strong_phrase_only_inside_unclosed_code_fence_is_kept(self):
+        body = "說明如下。\n```\n尚未 commit\nsession 結束時尚未 commit\n"
+        self.assertIsNone(episodic_reason("筆記", body))
+
+    # --- 2 行 body、1 行強訊號 → 剛好卡在 EPISODIC_RATIO=0.5 門檻上 --------------
+    def test_two_line_body_one_strong_line_hits_ratio_floor(self):
+        body = "cmake 版本鎖定 3.31.6。\n尚未 commit。\n"
+        self.assertEqual(episodic_reason("筆記", body), "body:session-state:1/2")
 
 
 if __name__ == "__main__":

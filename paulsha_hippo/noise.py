@@ -224,26 +224,119 @@ _GENERIC_EXACT_TITLES = frozenset(
 _GENERIC_TITLE_PREFIX = re.compile(r"^(?:report|task|todo)-")
 
 
-# --- episodic demotion (#136 fix 4): session-state句非 deletion-grade ---
+# --- episodic demotion (#136 fix 4，review round 1 收緊強弱訊號): session-state句
+# 非 deletion-grade ---
 # 命中只把 memory_layer 從 knowledge 降層為 episodic（不刪檔），與 classify_noise
 # （刪檔）刻意分離：episodic 筆記仍在磁碟上，只是被 MOC index／wakeup／janitor
 # 依 `memory_layer != "knowledge"` 排除在檢索池外（見 moc/search.py）。
-SESSION_STATE_RE = re.compile(
-    r"尚未 ?commit|尚未 ?push|待 ?push|session 結束|本次修改僅限|目前狀態|handoff|下一步|session-handoff",
+#
+# review round 1 finding：brief 原版 SESSION_STATE_RE 對「目前狀態」「下一步」
+# 「handoff」這類 bare word 沒有語境限制，會誤觸發耐久技術敘述（例：「目前狀態機的
+# 初始化流程」「韌體升級的下一步是驗證 CRC」「handoff register 在 CC2674 上」）。
+# 故拆成 strong／weak 兩級：
+#   - strong：只有描述 session/commit 自身狀態時才通的措辭，一行命中即算
+#     session-state 行（不需佐證）。
+#   - weak：單獨出現在耐久技術文件裡也合理的字，需同一行內有 ≥2 個「不重疊」的
+#     不同 weak 訊號互相佐證才算一行命中；1 行 body 只接受 strong 命中，weak 訊號
+#     組合在單行下不成立（統計意義不足，且更容易被單一常見詞誤觸發）。
+_STRONG_STATE_RE = re.compile(
+    r"尚未 ?(?:commit|push|合併|merge)"        # 尚未 commit／push／合併／merge
+    r"|待 ?(?:push|commit|合併)"                # 待 push／commit／合併
+    r"|session ?結束(?:時|前|後)"                # session 結束時／前／後
+    r"|本次 ?session"                           # 本次 session
+    r"|session-handoff"                         # session-handoff（連字號複合詞）
+    r"|session ?交接"                           # session 交接
+    r"|交接狀態"                                 # 交接狀態
+    r"|handoff ?狀態"                           # handoff 狀態
+    r"|目前狀態[：:]"                           # 冒號分隔的狀態標頭（「目前狀態：」）
+    r"|本次修改僅限"                             # 本次修改僅限……（commit 訊息式範圍陳述）
+    r"|\bnot yet (?:committed|pushed|merged)\b"
+    r"|\bhandoff (?:status|state|note)\b"
+    r"|\bsession (?:ended|end|handoff)\b",
     re.IGNORECASE,
 )
-_STATE_TITLE_RE = re.compile(r"^session-handoff|handoff|狀態$", re.IGNORECASE)
+# weak 訊號各自獨立編譯，供逐行計算「不重疊命中數」使用（見 _weak_hit_count）。
+_WEAK_STATE_PATTERNS = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"\bstatus\b", r"目前", r"尚未", r"待辦")
+)
+# Title 規則維持 strong（單獨命中即整篇降層）；英文替代項加上 \b，避免比對到更長
+# 英文單字的子字串（中文「狀態$」本來就用 $ 錨定到字尾，不受影響）。
+_STATE_TITLE_RE = re.compile(r"^session-handoff\b|\bhandoff\b|狀態$", re.IGNORECASE)
 EPISODIC_RATIO = 0.5
+
+_FENCE_LINE = re.compile(r"^(?:```|~~~)")
+
+
+def _episodic_content_lines(body: str) -> list[str]:
+    """`_content_lines`，但先整段剔除 fenced code block（``` / ~~~，含未閉合)。
+
+    只用於 episodic_reason：程式碼片段裡的字面文字（如註解掉的 commit 指令）不該
+    被當成 session 狀態陳述；未閉合的 fence 視為從開啟處起全部都是程式碼直到結尾。
+    不動 classify_noise 共用的 `_content_lines`，避免影響其他分類器行為。
+    """
+    kept: list[str] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _FENCE_LINE.match(line.strip()):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        kept.append(line)
+    return _content_lines("\n".join(kept))
+
+
+def _weak_hit_count(line: str) -> int:
+    """該行內「不重疊」的 weak 訊號命中數。
+
+    子字串重疊（例如「目前」的比對範圍完全落在「目前狀態」的比對範圍裡）只算 1
+    次，避免單一詞出現（如僅「目前狀態」四字）就因規則列表冗餘而湊出 2 個命中。
+    """
+    spans = sorted(
+        (m.start(), m.end())
+        for pat in _WEAK_STATE_PATTERNS
+        for m in pat.finditer(line)
+    )
+    if not spans:
+        return 0
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        last_start, last_end = merged[-1]
+        if start < last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return len(merged)
+
+
+def _line_is_session_state(line: str) -> bool:
+    """ratio 規則（≥2 行 body）下，單行是否算 session-state：strong 一擊即中；
+    weak 需同一行 ≥2 個不重疊訊號互相佐證。"""
+    if _STRONG_STATE_RE.search(line):
+        return True
+    return _weak_hit_count(line) >= 2
 
 
 def episodic_reason(title: object, body: str) -> str | None:
-    """session 狀態句偵測：非 deletion-grade——命中只降層 episodic，不刪。"""
+    """session 狀態句偵測：非 deletion-grade——命中只降層 episodic，不刪。
+
+    Precision over recall（review round 1）：
+    - 標題命中 `_STATE_TITLE_RE` → 整篇強訊號，直接降層。
+    - body 只有 1 行 content line 時，只接受 strong 命中；weak 訊號組合在單行下
+      統計意義不足，一律不降層（`_content_lines` 需先剔除 fenced code block）。
+    - body ≥2 行 content line 時，走原本的 ratio 規則（session-state 行數 /
+      content 行數 ≥ EPISODIC_RATIO），但「是否算 session-state 行」改用
+      strong-one-hit / weak-two-distinct-hits 判定，而非舊版單一 bare-word regex。
+    """
     if _STATE_TITLE_RE.search(str(title or "").strip()):
         return "title:session-state"
-    lines = _content_lines((body or "").strip())
+    lines = _episodic_content_lines(body or "")
     if not lines:
         return None
-    hits = sum(1 for line in lines if SESSION_STATE_RE.search(line))
+    if len(lines) == 1:
+        return "body:session-state:1/1" if _STRONG_STATE_RE.search(lines[0]) else None
+    hits = sum(1 for line in lines if _line_is_session_state(line))
     if hits and hits / len(lines) >= EPISODIC_RATIO:
         return f"body:session-state:{hits}/{len(lines)}"
     return None
