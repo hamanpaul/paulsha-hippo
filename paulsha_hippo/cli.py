@@ -1500,14 +1500,20 @@ def _recall(args: argparse.Namespace) -> int:
 
 
 def _show(args: argparse.Namespace) -> int:
-    """印出一筆 knowledge note（issue #136 fix 3b）。
+    """印出一筆 knowledge note（issue #136 fix 3b；fix 11b 補 boundary 遮蔽）。
 
     ``--agent`` 印精簡 header＋body（省 token）；否則印整檔。``--tool``／
     ``--session-id`` 必須同時提供才記 read 事件——省下的 Read 仍要讓
     memory-usage KPI（看過率）看得到，用 usage_read.append_read_event 補記
     與 hooks/claude_post_tool_use.py 同 schema 的 read 事件。
 
-    read 歸因寫入是 best-effort：先印出 note，再嘗試補記事件；ledger
+    印出前一律先經 `show_mod.redact_for_agent`（`policy.check_boundary(
+    "external_to_raw", ...)`）——`--agent`／預設兩種模式都算 memory-consumer，
+    fix 3b 當時漏了這一步。Fail-closed：boundary check 本身炸掉（policy 載入失敗等）
+    一律不印任何內容、一行 warning 到 stderr、exit code 1（issue #136 fix 11b）。
+    `session_ref` 有 `--session-id` 就用它，否則退回 note 自身的 slice_id。
+
+    read 歸因寫入是 best-effort：印出成功之後才嘗試補記事件；ledger
     mkdir/open/write 出的任何例外都吃掉、印一行 warning 到 stderr，不影響
     exit code（review round 1 / Important 1）——note 已經解出來、渲染出來
     了，一筆記帳失敗不該讓整個指令當掉。
@@ -1523,13 +1529,21 @@ def _show(args: argparse.Namespace) -> int:
     if bool(args.tool) != bool(args.session_id):
         print("show: --tool 與 --session-id 必須同時提供", file=sys.stderr)
         return 2
-    text = show_mod.render_agent_view(path) if args.agent else path.read_text(encoding="utf-8")
+    try:
+        raw = path.read_text(encoding="utf-8")
+        fm, _ = _fio.read(raw)
+        text = show_mod.render_agent_view(path) if args.agent else raw
+        session_ref = args.session_id or str(fm.get("slice_id", "")) or "_unknown"
+        text = show_mod.redact_for_agent(
+            text, project=str(fm.get("project", "")), session_ref=session_ref)
+    except Exception as exc:
+        print(f"warning: show: boundary 檢查失敗，未輸出（fail-closed）：{exc}", file=sys.stderr)
+        return 1
     sys.stdout.write(text)
     if args.tool and args.session_id:
         from .usage_read import append_read_event
 
         try:
-            fm, _ = _fio.read(path.read_text(encoding="utf-8"))
             append_read_event(
                 root, tool=args.tool, session_id=args.session_id,
                 sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))

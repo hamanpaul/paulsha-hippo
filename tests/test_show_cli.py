@@ -146,3 +146,76 @@ def test_ambiguous_ref_exits_nonzero_prints_nothing(tmp_path):
     assert rc != 0
     assert out == ""
     assert "show: sl-bbbbbbbbbbbbbbbb: ambiguous (2 match)" in err
+
+
+# --- T11b：印出前經 check_boundary 遮蔽（issue #136 fix 3b 的遺漏，比照 followups 的
+# fail-closed 慣例：hooks/_shortlist_common._redact）---------------------------------
+
+
+def test_agent_view_fails_closed_when_check_boundary_raises(tmp_path, monkeypatch):
+    """policy.check_boundary 炸掉：--agent 模式不得印出任何內容，rc=1，stderr 有 warning。"""
+    import paulsha_hippo.policy as pol
+
+    def _boom(*a, **k):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(pol, "check_boundary", _boom)
+    _seed(tmp_path)
+    rc, out, err = _run_full(["show", "sl-aaaaaaaaaaaaaaaa", "--memory-root", str(tmp_path), "--agent"])
+    assert rc == 1
+    assert out == ""
+    assert "warning" in err.lower()
+
+
+def test_default_view_fails_closed_when_check_boundary_raises(tmp_path, monkeypatch):
+    """policy.check_boundary 炸掉：無 --agent 的預設模式一樣不得印出任何內容，rc=1。"""
+    import paulsha_hippo.policy as pol
+
+    def _boom(*a, **k):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(pol, "check_boundary", _boom)
+    _seed(tmp_path)
+    rc, out, err = _run_full(["show", "sl-aaaaaaaaaaaaaaaa", "--memory-root", str(tmp_path)])
+    assert rc == 1
+    assert out == ""
+    assert "warning" in err.lower()
+
+
+def test_agent_view_prints_redacted_text_when_check_boundary_alters_it(tmp_path, monkeypatch):
+    """policy.check_boundary 回傳的 .text 與原文不同 → 印出的必須是遮蔽後的文字。"""
+    import types
+
+    import paulsha_hippo.policy as pol
+
+    def _fake(boundary, text, **kwargs):
+        assert boundary == "external_to_raw"
+        assert kwargs["project_slug"] == "proj"
+        return types.SimpleNamespace(text="[REDACTED]\n")
+
+    monkeypatch.setattr(pol, "check_boundary", _fake)
+    _seed(tmp_path)
+    rc, out = _run(["show", "sl-aaaaaaaaaaaaaaaa", "--memory-root", str(tmp_path), "--agent"])
+    assert rc == 0
+    assert out == "[REDACTED]\n"
+
+
+def test_show_passes_session_id_as_session_ref_to_check_boundary(tmp_path, monkeypatch):
+    """給了 --session-id／--tool 時，check_boundary 的 session_ref 要用 --session-id，
+    不是 note 自身的 slice_id。
+    """
+    import paulsha_hippo.policy as pol
+
+    seen = {}
+    real = pol.check_boundary
+
+    def _spy(boundary, text, **kwargs):
+        seen["session_ref"] = kwargs["session_ref"]
+        return real(boundary, text, **kwargs)
+
+    monkeypatch.setattr(pol, "check_boundary", _spy)
+    _seed(tmp_path)
+    rc, out = _run(["show", "sl-aaaaaaaaaaaaaaaa", "--memory-root", str(tmp_path), "--agent",
+                    "--tool", "claude-code", "--session-id", "s-explicit"])
+    assert rc == 0
+    assert seen["session_ref"] == "s-explicit"

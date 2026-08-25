@@ -4,7 +4,7 @@
 只回報待辦動作、不寫任何檔；--apply 走 frontmatter_io.update()（parse-equivalent、
 body 逐位元不變）；apply 過的 note 下次掃描不再是候選，migration 天生冪等。
 
-只碰 knowledge/**/*.md 且 memory_layer == "knowledge" 者；已有真實 commit
+只碰 `<root>/knowledge` 目錄下的 `*.md`（`memory_layer == "knowledge"`）者；已有真實 commit
 （!= "_unknown"）的 note 永不覆寫，也不下修既有 commit_source。
 
 commit_reasons 的完整原因集合：no-archive（path 缺/不可讀/非 JSON dict）、

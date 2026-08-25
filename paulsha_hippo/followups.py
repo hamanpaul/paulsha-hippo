@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 from paulsha_hippo.atomizer.slice_frontmatter import CITE_RE
@@ -50,10 +51,14 @@ def _fid(slice_id: str, target: dict | None, claim: str) -> str:
     return "fu-" + digest[:16]
 
 
-def _cite_in(lines: list[str], index: int) -> dict | None:
-    """在該行、前一行、後一行（依此順序）找第一個 `path:line` 引用。"""
+def _cite_in(lines: list[str], index: int, fenced: list[bool] | None = None) -> dict | None:
+    """在該行、前一行、後一行（依此順序）找第一個 `path:line` 引用；`fenced`（若給）落在
+    圍籬內（含 marker 行本身）的相鄰行一律不取（T11 leftover minor：原本沒有尊重
+    `_fence_mask`，圍籬開頭 marker 行若剛好長得像 cite locator——例如語言註記寫成
+    ```path.py:42``——會被誤當成真正的引用；未閉合圍籬的開頭 marker 行同樣要被排除）。
+    """
     for j in (index, index - 1, index + 1):
-        if 0 <= j < len(lines):
+        if 0 <= j < len(lines) and not (fenced is not None and fenced[j]):
             match = CITE_RE.search(lines[j])
             if match:
                 return {"path": match.group(1), "line": int(match.group(2))}
@@ -109,7 +114,7 @@ def extract_followups(*, slice_id: str, project: str, body: str, cites: list[dic
         line = raw.strip()
         if not line or not ACTIONABLE_RE.search(line):
             continue
-        target = _cite_in(lines, index)
+        target = _cite_in(lines, index, fenced)
         if target is None and cites:
             target = dict(cites[0])
         expected_stale = _expected_stale(line)
@@ -123,6 +128,37 @@ def extract_followups(*, slice_id: str, project: str, body: str, cites: list[dic
             "source": "regex",
         })
     return out
+
+
+def _warn(msg: str) -> None:
+    """一行 stderr warning（比照 cli.py `warning: ...` 慣例）；不 raise，呼叫端的 fail-closed
+    分支靠這個把「這筆為什麼被跳過」講清楚，而不是靜默吞掉。
+    """
+    print(f"warning: followups: {msg}", file=sys.stderr)
+
+
+def _redact_followup_item(item: dict, *, project: str, session_ref: str) -> dict:
+    """把即將寫入 ledger 的 `claim`／`expected_stale` 經 `policy.check_boundary` 遮蔽後回傳
+    新 item（issue #136 fix 11b：follow-up ledger 是 memory-consumer——Task 12 的 wakeup
+    brief 會把這裡存的文字秀給 agent，之前完全沒經過 boundary check 就落 ledger）。
+
+    比照 `hooks/_shortlist_common._redact` 的呼叫慣例：`project_slug` 用 note 自身
+    project（缺時 `_unknown`），`session_ref` 用 note 的 slice_id。任何例外（policy 載入
+    失敗、check_boundary 本身炸掉…）一律原樣往上拋，讓呼叫端 fail-closed 整筆跳過、不落
+    ledger——見 `extract_all`。
+    """
+    from paulsha_hippo import policy
+
+    slug = project or "_unknown"
+    claim = policy.check_boundary(
+        "external_to_raw", item["claim"], project_slug=slug, session_ref=session_ref,
+    ).text
+    expected_stale = item["expected_stale"]
+    if expected_stale is not None:
+        expected_stale = policy.check_boundary(
+            "external_to_raw", str(expected_stale), project_slug=slug, session_ref=session_ref,
+        ).text
+    return {**item, "claim": claim, "expected_stale": expected_stale}
 
 
 def append_event(root: Path, event: dict, *, now: str) -> None:
@@ -199,13 +235,19 @@ def _followups_enabled_default() -> bool:
 
 def extract_all(root: Path, *, apply: bool, now: str, project: str | None = None,
                  enabled: bool | None = None) -> dict:
-    """走訪 `<root>/knowledge/**/*.md`（memory_layer == knowledge），抽 follow-up 並（apply
+    """走訪 `<root>/knowledge` 目錄下的 `*.md`（`memory_layer == knowledge`），抽 follow-up 並（apply
     時）開單。
 
     冪等：同 id 已在 fold() 中（無論何種狀態，含已關閉）即跳過，不重複開單。`enabled` 為
     None 時 best-effort 讀 `runtime_flags.load_flags().followups_enabled`；解析後若停用且
     `apply=True`，一律不落 ledger（等同 dry-run），summary 多帶一個 `"skipped":
     "followups.disabled"` 讓呼叫端知道為什麼沒開單。
+
+    落 ledger 前先經 `_redact_followup_item`（`policy.check_boundary("external_to_raw", ...)`）
+    遮蔽 `claim`／`expected_stale`——這兩個欄位會被 Task 12 的 wakeup brief 秀給 agent，是
+    memory-consumer（issue #136 fix 11b）。Fail-closed：check_boundary 炸掉的那一筆整筆不落
+    ledger，summary 多帶 `"skipped_redaction"` 計數，並印一行 stderr warning；不影響其他筆、
+    不 raise。
     """
     root = Path(root)
     if enabled is None:
@@ -241,6 +283,15 @@ def extract_all(root: Path, *, apply: bool, now: str, project: str | None = None
             if item["id"] in known:
                 continue
             if effective_apply:
+                try:
+                    item = _redact_followup_item(
+                        item, project=str(fm.get("project", "")),
+                        session_ref=str(fm.get("slice_id", "")),
+                    )
+                except Exception as exc:
+                    summary["skipped_redaction"] = summary.get("skipped_redaction", 0) + 1
+                    _warn(f"boundary check 失敗，略過此筆（不落 ledger）id={item['id']}: {exc}")
+                    continue
                 append_event(root, {**item, "event": "opened"}, now=now)
                 known[item["id"]] = item
                 summary["opened"] += 1
@@ -258,6 +309,8 @@ def _resolve(target: dict, project: str, roots_by_project: dict) -> tuple[Path |
     完全繞過這道圍籬，可讀出專案根之外任意存在的檔案）。project 沒有任何 configured root
     時一律 `"no-root"`——沒有 root 可比對，寧可 unverifiable 也不能放行。target 缺
     ``path``／型別不對（壞 ledger 事件）視同解析失敗，回 `(None, "missing-file")`，不 raise。
+    帶 NUL byte 的 path（手改／外部工具寫入的壞事件）在 `Path.resolve()` 丟的是
+    `ValueError` 不是 `OSError`——T11 leftover minor，一併接住，同樣歸 unverifiable。
     """
     path_value = target.get("path") if isinstance(target, dict) else None
     if not isinstance(path_value, str) or not path_value:
@@ -271,7 +324,7 @@ def _resolve(target: dict, project: str, roots_by_project: dict) -> tuple[Path |
         try:
             root_resolved = Path(root_str).resolve()
             resolved = candidate.resolve() if candidate.is_absolute() else (root_resolved / candidate).resolve()
-        except OSError:
+        except (OSError, ValueError):
             continue
         if not resolved.is_relative_to(root_resolved):
             continue

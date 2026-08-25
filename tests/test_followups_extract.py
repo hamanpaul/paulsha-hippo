@@ -1,7 +1,17 @@
+import types
+
 from paulsha_hippo import followups as fu
 
 BODY = ("## Flash\n表格略。\n\nREADME-ARC.md 記載的舊 FLASH 數字 `133,604 B` 已與 fresh build 的 `133,372 B` 不符，"
         "需要更新（`README-ARC.md:108`）。\n\nNVS 未顯式保留，未來需加 linker reservation。\n")
+
+
+def _seed_body(tmp_path, body=BODY, project="ot-ti-mirror", slice_id="sl-1"):
+    k = tmp_path / "knowledge" / project
+    k.mkdir(parents=True)
+    (k / f"n--{slice_id}.md").write_text(
+        f"---\nslice_id: {slice_id}\nmemory_layer: knowledge\nproject: {project}\n---\n" + body,
+        encoding="utf-8")
 
 
 def test_extract_target_and_expected_stale():
@@ -89,3 +99,88 @@ def test_actionable_inside_fenced_code_block_is_skipped():
     items = fu.extract_followups(slice_id="sl-1", project="p", body=body, cites=[])
     assert len(items) == 1
     assert items[0]["claim"] == "TODO: this one is real"
+
+
+# --- T11 leftover minor: _cite_in 相鄰行查找必須尊重圍籬遮罩 -------------------------
+
+
+def test_cite_lookup_ignores_backtick_fence_marker_line():
+    """圍籬 marker 行本身也視為圍籬內（`_fence_mask` 既有規則）；`_cite_in` 的相鄰行
+    查找之前沒有遵守這條規則——marker 行若剛好長得像 cite locator（語言註記寫成
+    ```stale.py:42``），會被誤當成真正引用。這裡的 marker 行緊鄰在可行動語句後一行。
+    """
+    body = "需要更新\n```stale.py:42\ncontent\n```\n"
+    items = fu.extract_followups(slice_id="sl-1", project="p", body=body, cites=[])
+    assert len(items) == 1
+    assert items[0]["target"] is None
+
+
+def test_cite_lookup_ignores_tilde_fence_marker_line():
+    """同上，圍籬標記換成 `~~~`。"""
+    body = "需要更新\n~~~stale.py:42\ncontent\n~~~\n"
+    items = fu.extract_followups(slice_id="sl-1", project="p", body=body, cites=[])
+    assert len(items) == 1
+    assert items[0]["target"] is None
+
+
+def test_cite_lookup_ignores_unclosed_fence_marker_line():
+    """未閉合的圍籬（body 結尾前沒有對應的收尾 marker）：開頭 marker 行仍視為圍籬內
+    （`_fence_mask` 對未閉合圍籬的既有語意——toggle 之後一路到 EOF 都算圍籬內），
+    同樣不得被 `_cite_in` 當成 cite 來源。
+    """
+    body = "需要更新\n```leaked.py:7\n"
+    items = fu.extract_followups(slice_id="sl-1", project="p", body=body, cites=[])
+    assert len(items) == 1
+    assert items[0]["target"] is None
+
+
+# --- T11b: 遮蔽再落 ledger（memory-consumer 邊界，比照 hooks/_shortlist_common._redact）---
+
+
+def test_extract_all_fails_closed_and_skips_item_when_check_boundary_raises(tmp_path, monkeypatch):
+    """policy.check_boundary 炸掉：這筆 follow-up 整筆不落 ledger，summary 計數但不 raise。"""
+    import paulsha_hippo.policy as pol
+
+    def _boom(*a, **k):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(pol, "check_boundary", _boom)
+    _seed_body(tmp_path)
+    s = fu.extract_all(tmp_path, apply=True, now="2026-08-25T00:00:00Z")
+    assert s["opened"] == 0
+    assert s["skipped_redaction"] == 2
+    assert not (tmp_path / "runtime" / "ledger" / "followups.jsonl").exists()
+
+
+def test_extract_all_stores_redacted_text_when_check_boundary_alters_it(tmp_path, monkeypatch):
+    """policy.check_boundary 回傳的 .text 與原文不同 → ledger 存的必須是遮蔽後的文字。"""
+    import paulsha_hippo.policy as pol
+
+    def _fake(boundary, text, **kwargs):
+        assert boundary == "external_to_raw"
+        assert kwargs["project_slug"] == "ot-ti-mirror"
+        assert kwargs["session_ref"] == "sl-1"
+        return types.SimpleNamespace(text="[REDACTED]")
+
+    monkeypatch.setattr(pol, "check_boundary", _fake)
+    _seed_body(tmp_path)
+    s = fu.extract_all(tmp_path, apply=True, now="2026-08-25T00:00:00Z")
+    assert s["opened"] == 2
+    st = fu.fold(tmp_path)
+    assert {v["claim"] for v in st.values()} == {"[REDACTED]"}
+    stales = {v.get("expected_stale") for v in st.values()}
+    assert stales == {"[REDACTED]", None} or stales == {"[REDACTED]"}
+
+
+def test_extract_all_real_default_policy_leaves_readme_fixture_unchanged(tmp_path):
+    """真實預設 policy：README-ARC.md fixture 的 claim／expected_stale 不含機密樣式，
+    走過 check_boundary 後文字必須維持不變（不能因為加了遮蔽就悄悄改壞既有輸出）。
+    """
+    _seed_body(tmp_path)
+    s = fu.extract_all(tmp_path, apply=True, now="2026-08-25T00:00:00Z")
+    assert s["opened"] == 2
+    st = fu.fold(tmp_path)
+    claims = {v["claim"] for v in st.values()}
+    assert any("133,604 B" in c and "需要更新" in c for c in claims)
+    stales = {v.get("expected_stale") for v in st.values()}
+    assert "133,604 B" in stales

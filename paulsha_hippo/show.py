@@ -34,6 +34,21 @@ def resolve_ref(memory_root: Path, ref: str) -> Path:
     return hits[0]
 
 
+def redact_for_agent(text: str, *, project: str, session_ref: str) -> str:
+    """印出到 agent 之前跑一次 `external_to_raw` boundary check（issue #136 fix 11b：
+    `hippo show` 是 memory-consumer，fix 3b 當時漏了這一步）。
+
+    比照 `hooks/_shortlist_common._redact` 的呼叫慣例，但 fail-closed 的方式不同：這裡
+    直接把例外原樣往上拋，讓呼叫端（`cli._show`）決定「不印任何內容、warning 到
+    stderr、exit 1」——CLI 印出動作與遮蔽判斷分離，才能讓 CLI 端統一處理 exit code。
+    """
+    from paulsha_hippo import policy
+
+    return policy.check_boundary(
+        "external_to_raw", text, project_slug=project or "_unknown", session_ref=session_ref,
+    ).text
+
+
 def _cites(fm: dict) -> str:
     items = fm.get("cites") if isinstance(fm.get("cites"), list) else []
     return ", ".join(

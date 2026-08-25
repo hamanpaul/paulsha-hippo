@@ -94,6 +94,20 @@ def test_fold_orders_events_by_timestamp_not_append_position(tmp_path):
     assert fu.open_count(tmp_path, "ot-ti-mirror") == 0
 
 
+def test_verify_nul_byte_path_is_unverifiable_not_raise(tmp_path):
+    """target.path 含 NUL byte（`\\x00`）：`Path.resolve()` 對這種字串丟的是 ValueError
+    不是 OSError，`_resolve` 原本只接 `except OSError` 會漏接，讓整輪 verify 崩掉
+    （T11 leftover minor）。必須跟其他圍籬失敗一樣歸 unverifiable／path-escape，不 raise。
+    """
+    repo = tmp_path / "repo"; repo.mkdir()
+    _open(tmp_path, "fu-nul", "a\x00b.md", 1, "x")
+    s = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)}, now=NOW)
+    assert s == {"checked": 1, "verified_open": 0, "resolved": 0, "unverifiable": 1}
+    st = fu.fold(tmp_path)
+    assert st["fu-nul"]["state"] == "unverifiable"
+    assert st["fu-nul"]["detail"]["reason"] == "path-escape"
+
+
 def test_verify_absolute_path_outside_roots_is_path_escape(tmp_path):
     """絕對路徑 cite 也必須落在其中一個 configured root 內；否則 unverifiable、
     reason: path-escape——不得繞過只有相對路徑才會走到的圍籬檢查（binding constraint 6）。
@@ -128,4 +142,47 @@ def test_verify_sequential_transitions_open_then_resolved(tmp_path):
                    now="2026-08-25T00:01:00Z")
     assert s2["resolved"] == 1
     assert fu.fold(tmp_path)["fu-seq"]["state"] == "resolved-in-source"
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 0
+
+
+# --- T11 leftover minor: 端到端組合測試，只走 public functions ------------------------
+
+
+def test_composed_extract_then_verify_open_then_edit_then_resolved(tmp_path):
+    """用真實 knowledge note body（README-ARC.md:108／`133,604 B` 的過時值宣稱，跟
+    `tests/test_followups_extract.py` 的 BODY fixture同一句）跑 `extract_all(apply=True)`
+    真的開單 → `verify()` 先確認仍 open（source 裡值還在）→ 改掉 target 檔內容 →
+    再 `verify()` 一次，確認自動轉成 resolved-in-source——全程只呼叫 public functions，
+    不手動 `append_event` 塞 opened 事件。
+    """
+    body = ("README-ARC.md 記載的舊 FLASH 數字 `133,604 B` 已與 fresh build 的 `133,372 B` 不符，"
+            "需要更新（`README-ARC.md:108`）。\n")
+    k = tmp_path / "knowledge" / "ot-ti-mirror"; k.mkdir(parents=True)
+    (k / "n--sl-e2e.md").write_text(
+        "---\nslice_id: sl-e2e\nmemory_layer: knowledge\nproject: ot-ti-mirror\n---\n" + body,
+        encoding="utf-8")
+
+    s1 = fu.extract_all(tmp_path, apply=True, now=NOW)
+    assert s1["opened"] == 1
+    [fid] = list(fu.fold(tmp_path).keys())
+    assert fu.fold(tmp_path)[fid]["state"] == "opened"
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    readme = repo / "README-ARC.md"
+    readme.write_text(
+        "\n".join(f"line {i}" for i in range(1, 108)) + "\nFLASH usage: 133,604 B\n",
+        encoding="utf-8")
+
+    s2 = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)}, now=NOW)
+    assert s2["verified_open"] == 1
+    assert fu.fold(tmp_path)[fid]["state"] == "verified-open"
+    assert fu.open_count(tmp_path, "ot-ti-mirror") == 1
+
+    readme.write_text(
+        "\n".join(f"line {i}" for i in range(1, 108)) + "\nFLASH usage: 133,372 B\n",
+        encoding="utf-8")
+    s3 = fu.verify(tmp_path, roots_by_project={"ot-ti-mirror": (str(repo),)},
+                   now="2026-08-25T00:01:00Z")
+    assert s3["resolved"] == 1
+    assert fu.fold(tmp_path)[fid]["state"] == "resolved-in-source"
     assert fu.open_count(tmp_path, "ot-ti-mirror") == 0
