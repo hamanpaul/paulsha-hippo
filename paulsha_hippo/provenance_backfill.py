@@ -6,6 +6,14 @@ body 逐位元不變）；apply 過的 note 下次掃描不再是候選，migrat
 
 只碰 knowledge/**/*.md 且 memory_layer == "knowledge" 者；已有真實 commit
 （!= "_unknown"）的 note 永不覆寫，也不下修既有 commit_source。
+
+commit_reasons 的完整原因集合：no-archive（path 缺/不可讀/非 JSON dict）、
+path-escape（path 解析後不在 <memory_root>/archive/queue 之內，比照 recovery.py
+的 archive 圍籬，issue #136 review round 1 #1）、no-cwd、no-timestamp（archive
+payload 的 ended_at/timestamp 與 note 自身 captured_at 三者皆缺/空）、
+not-a-repo、no-commit-before-ts。ts 來源優先序 ended_at > timestamp >
+note.captured_at（回退，review round 1 #3）；哪個來源實際命中候選記在
+summary["ts_source"]。
 """
 from __future__ import annotations
 
@@ -20,15 +28,24 @@ from paulsha_hippo.moc import frontmatter_io as fio
 _UNKNOWN = ("", "_unknown", None)
 
 
-def _archive_meta(path_value: object) -> tuple[dict | None, str]:
-    """讀 provenance.path 指向的 archive queue payload；失敗一律歸類 no-archive。"""
+def _archive_meta(path_value: object, root: Path) -> tuple[dict | None, str]:
+    """讀 provenance.path 指向的 archive queue payload。
+
+    path 須解析落在 ``<root>/archive/queue`` 之內（比照 recovery.py:93-101 /
+    :130-137 的圍籬寫法）；逃逸一律歸類 path-escape、其餘失敗（缺檔/不可讀/
+    非 JSON dict）歸類 no-archive。
+    """
     if not isinstance(path_value, str) or not path_value:
         return None, "no-archive"
     p = Path(path_value)
     if not p.is_file():
         return None, "no-archive"
+    archive_root = (root / "archive" / "queue").resolve()
+    resolved = p.resolve()
+    if not resolved.is_relative_to(archive_root):
+        return None, "path-escape"
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None, "no-archive"
     if not isinstance(data, dict):
@@ -43,7 +60,7 @@ def run(memory_root: Path | str, *, apply: bool = False, project: str | None = N
     knowledge = root / "knowledge"
     summary = {
         "scanned": 0, "commit_candidates": 0, "commit_reasons": {}, "cites_candidates": 0,
-        "updated": 0, "details": [],
+        "updated": 0, "details": [], "ts_source": {},
     }
     warnings: list[str] = []
     if not knowledge.is_dir():
@@ -65,22 +82,35 @@ def run(memory_root: Path | str, *, apply: bool = False, project: str | None = N
         prov = dict(fm.get("provenance") or {}) if isinstance(fm.get("provenance"), dict) else {}
 
         if prov.get("commit") in _UNKNOWN:
-            meta, why = _archive_meta(prov.get("path"))
+            meta, why = _archive_meta(prov.get("path"), root)
             if meta is not None:
-                cwd, ts = meta.get("cwd"), meta.get("ended_at") or meta.get("timestamp")
-                top = toplevel(cwd) if cwd else None
+                cwd = meta.get("cwd")
+                captured_at = fm.get("captured_at")
+                ts, ts_source = None, None
+                if meta.get("ended_at"):
+                    ts, ts_source = meta.get("ended_at"), "ended_at"
+                elif meta.get("timestamp"):
+                    ts, ts_source = meta.get("timestamp"), "timestamp"
+                elif isinstance(captured_at, str) and captured_at:
+                    ts, ts_source = captured_at, "captured_at"
                 if not cwd:
                     why = "no-cwd"
                 elif not ts:
                     why = "no-timestamp"
-                elif not top:
-                    why = "not-a-repo"
                 else:
-                    sha = rev_before(top, ts)
-                    why = "" if sha else "no-commit-before-ts"
-                    if sha:
-                        updates["provenance"] = {**prov, "commit": sha, "commit_source": "backfill-approx"}
-                        summary["commit_candidates"] += 1
+                    # perf: git rev-parse --show-toplevel only spawns once ts is
+                    # known resolvable — no point probing cwd for a note we're
+                    # about to skip as no-timestamp anyway (review round 1 #4).
+                    top = toplevel(cwd)
+                    if not top:
+                        why = "not-a-repo"
+                    else:
+                        sha = rev_before(top, ts)
+                        why = "" if sha else "no-commit-before-ts"
+                        if sha:
+                            updates["provenance"] = {**prov, "commit": sha, "commit_source": "backfill-approx"}
+                            summary["commit_candidates"] += 1
+                            summary["ts_source"][ts_source] = summary["ts_source"].get(ts_source, 0) + 1
             if why:
                 summary["commit_reasons"][why] = summary["commit_reasons"].get(why, 0) + 1
 
