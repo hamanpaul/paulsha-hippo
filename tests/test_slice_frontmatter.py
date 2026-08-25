@@ -350,5 +350,29 @@ class BuildFromProposalTagsNormalizationTests(unittest.TestCase):
         self.assertFalse(moc_census._census_tags_invalid(built.frontmatter["tags"]))
 
 
+def test_extract_cites_dedup_order_limit():
+    body = ("Layout 定義在 `examples/apps/X/octopus.lds:35`；NVS 見 src/CC2674.syscfg:131。"
+            "README-ARC.md:108 已不符；再提 src/CC2674.syscfg:131 一次。")
+    assert slice_frontmatter.extract_cites(body) == [
+        {"path": "examples/apps/X/octopus.lds", "line": 35},
+        {"path": "src/CC2674.syscfg", "line": 131},
+        {"path": "README-ARC.md", "line": 108},
+    ]
+    many = " ".join(f"f{i}.py:{i}" for i in range(50))
+    assert len(slice_frontmatter.extract_cites(many)) == 32
+    assert slice_frontmatter.extract_cites("時間 12:30 與 http://x:80 都不是引用") == []
+
+
+def test_build_from_proposal_writes_cites_and_round_trips():
+    proposal = SliceProposal(title="t", artifact_kind="report", project="paulshaclaw", tags=[],
+                             body="見 README-ARC.md:108。", source_fragment_indices=[0], relations=[])
+    slice_ = slice_frontmatter.build_from_proposal(proposal, _SESSION_META)
+    assert slice_.frontmatter["cites"] == [{"path": "README-ARC.md", "line": 108}]
+    fm, _ = fio.read(slice_frontmatter.render(slice_))
+    assert fm["cites"] == [{"path": "README-ARC.md", "line": 108}]
+    assert slice_frontmatter.validate(slice_.frontmatter, slice_.body) == [] or \
+        all("cites" not in e for e in slice_frontmatter.validate(slice_.frontmatter, slice_.body))
+
+
 if __name__ == "__main__":
     unittest.main()
