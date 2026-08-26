@@ -113,3 +113,10 @@ external_agents:
 # knowledge slices（樣板噪音），僅保留為顯式 --promoter identity（測試/離線）。
 promoter: llm
 skill_path: skills/atomize-knowledge-slice.md
+# issue-136-knowledge-hygiene（2026-08-25）：以下鍵全部 optional，缺鍵即預設值。
+shortlist:
+  collapse_same_topic: true   # 同 project／family 同主題只留最新（fix 2a）
+  read_hint: show             # show：hint 建議 `hippo show --agent`；read：舊行為
+followups:
+  enabled: true               # follow-up ledger 抽取／verify／brief 一行（fix 5）
+episodic_filter: true         # session 狀態句 slice 降層 episodic（fix 4）

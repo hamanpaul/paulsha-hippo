@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +11,8 @@ from typing import Any, Mapping, Sequence
 
 from ..agent_profiles import AgentRunResult
 from ..ledger import processing, relations
-from ..noise import DocCorpus, classify_noise
+from ..noise import DocCorpus, classify_noise, episodic_reason
+from ..topic import canonical_title as _canonical_title, recency_key as _recency_key
 from . import slice_frontmatter, splitter
 from .config import AtomizerConfig, is_safe_path_component, project_directory_key, sanitize_project_component
 from .llm_promoter import LLMPromoter, PromoteError
@@ -713,17 +713,39 @@ def _has_unsupported_semantic_relations(promoted: list[slice_frontmatter.Slice])
     return None
 
 
-def _canonical_title(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+def _existing_names(item: Mapping[str, Any]) -> set[str]:
+    """既存 note 的 canonical 名稱集合（title / atom_title / aliases），空值不算名字。
+
+    只認這個 note 自己的「主題名」：``title``/``atom_title`` 是同一個名字的兩個
+    欄位，``aliases`` 是它公開承認的別名。刻意不含 ``session_title``——那是來源
+    session 的標題，不是這則原子筆記的主題名，納入會讓「剛好出自同名 session」
+    的兩則不同主題誤判為前後版本。
+    """
+    candidates = [item.get("title"), item.get("atom_title")]
+    candidates.extend(a for a in (item.get("aliases") or []) if isinstance(a, str))
+    return {name for name in (_canonical_title(c) for c in candidates) if name}
 
 
 def _attach_unambiguous_supersedes(
     memory_root: Path,
     promoted: list[slice_frontmatter.Slice],
 ) -> list[slice_frontmatter.Slice]:
-    """Link a changed body only when source, project, and canonical title agree.
+    """Link a changed body only when project and canonical title/alias agree.
 
     Zero or multiple matches are intentionally left parallel for manual review.
+
+    fix 2b (#136)：舊條件多要求 ``distilled_from`` 相等，等於只有「同一場 session
+    重蒸」才連得上前身；跨 session 蒸出的更新版永遠與舊版平行存在，janitor 的
+    ``decay_superseded`` 因此從未對它們觸發。這裡拿掉 ``distilled_from`` 條件，
+    改用 ``topic.canonical_title``（含 aliases）比對，並要求前身的 ``captured_at``
+    不晚於新 slice——時間單調保證不會回頭連到更新的 note、也不會成環。時間比較走
+    ``topic.recency_key`` 而不是字串序：既存 note 的 captured_at 混用 ``Z``、
+    ``+08:00`` 與 fragment YAML round-trip 後的 ``2026-05-31 00:00:00+00:00``，
+    字串序會把 ``07:00:00+08:00`` 判成晚於 ``00:00:00Z``，合法前身因此漏連。
+
+    專案仍要求嚴格相等：跨專案配對只透過 ``projects.yaml`` 的 ``families:``
+    開通，而 publish 這條路徑不讀 projects.yaml，所以它一律不跨專案（跨專案的
+    同主題候選由 ``supersedes_link`` 的 review tier 出報表給人決定）。
     """
     existing: list[Mapping[str, Any]] = []
     knowledge = memory_root / "knowledge"
@@ -744,10 +766,10 @@ def _attach_unambiguous_supersedes(
             item
             for item in existing
             if item.get("slice_id") != slice_.slice_id
-            and item.get("distilled_from") == frontmatter.get("distilled_from")
             and item.get("project") == frontmatter.get("project")
-            and _canonical_title(item.get(title_key)) == title
+            and title in _existing_names(item)
             and item.get("checksum") != frontmatter.get("checksum")
+            and _recency_key(item.get("captured_at")) <= _recency_key(frontmatter.get("captured_at"))
         ]
         if title and len(matches) == 1:
             predecessor = str(matches[0].get("slice_id") or "")
@@ -853,7 +875,8 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
                 continue
         captured_at = str(data.get("captured_at", now))
         provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
-        provenance = {k: str(provenance.get(k, "")) for k in ("repo", "commit", "path")}
+        provenance = {k: str(provenance[k]) for k in slice_frontmatter.PROVENANCE_KEYS
+                      if provenance.get(k) not in (None, "")}
         source_artifact = str(data.get("source_artifact", "session"))
         session_title = str(data.get("title", ""))
 
@@ -897,12 +920,14 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
 
 
 def _render_fragment(project, agent, session, source_artifact, captured_at, provenance, index, body, session_title="") -> str:
+    prov_lines = ["provenance:"] + [f"  {k}: {json.dumps(str(provenance.get(k, '')), ensure_ascii=False)}"
+                                    for k in slice_frontmatter.PROVENANCE_KEYS
+                                    if k in ("repo", "commit", "path") or provenance.get(k)]
     lines = ["---", "memory_layer: inbox", f"project: {project}",
              f"source_agent: {agent}", f"source_session: {session}",
              f"source_artifact: {source_artifact}", f"captured_at: {captured_at}",
              f"session_title: {json.dumps(session_title, ensure_ascii=False)}",
-             "provenance:", f"  repo: {provenance.get('repo', '')}",
-             f"  commit: {provenance.get('commit', '')}", f"  path: {provenance.get('path', '')}",
+             *prov_lines,
              f"fragment_index: {index}", f"parent_session_ref: {agent}:{session}", "---"]
     return "\n".join(lines) + "\n" + body
 
@@ -920,7 +945,8 @@ def _read_fragment(path: Path) -> Fragment | None:
     if not all(is_safe_path_component(value) for value in (agent, session)):
         return None
     provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
-    provenance = {k: str(provenance.get(k, "")) for k in ("repo", "commit", "path")}
+    provenance = {k: str(provenance[k]) for k in slice_frontmatter.PROVENANCE_KEYS
+                  if provenance.get(k) not in (None, "")}
     return Fragment(project=project, source_agent=agent,
                     source_session=session,
                     source_artifact=str(data.get("source_artifact", "session")),
@@ -1080,6 +1106,17 @@ def _promote_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, n
             continue
 
         promoted = _attach_unambiguous_supersedes(memory_root, promoted)
+
+        if config.episodic_filter:
+            demoted = []
+            for slice_ in promoted:
+                reason = episodic_reason(slice_.frontmatter.get("title"), slice_.body)
+                if reason:
+                    fm = dict(slice_.frontmatter, memory_layer="episodic", episodic_reason=reason)
+                    slice_ = replace(slice_, frontmatter=fm)
+                    LOGGER.info("atomize: demoted slice %s to episodic (%s)", slice_.slice_id, reason)
+                demoted.append(slice_)
+            promoted = demoted
 
         # Phase 2: Validate all slices before any writes
         for slice_ in promoted:

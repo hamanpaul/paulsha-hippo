@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -9,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from paulsha_hippo import cli
+from paulsha_hippo import cli, runtime_flags
 from paulsha_hippo.dream import lock as dream_lock
 from paulsha_hippo.ledger import dream
 
@@ -291,6 +292,160 @@ class DreamCliTests(unittest.TestCase):
                 payload = json.loads(buf.getvalue())
                 self.assertNotIn("skipped", payload)  # 第二輪未被殘留鎖擋住
                 self.assertIn("passes", payload)
+
+    def test_followups_failure_does_not_downgrade_dream(self):
+        # 秘密字面量刻意選用 policy 的 github_pat 規則能命中的樣式（比照
+        # test_dream_orchestrator.py::test_global_disable_rules_override_cannot_weaken_dream_ledger），
+        # 這樣 assertNotIn 才是在驗證真正的 secret redaction，而不是巧合地對
+        # 一句普通錯誤訊息（例如 "boom"）斷言其不出現。
+        secret = "ghp_" + "A1b2C3d4" * 5
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed(root)
+            with patch("paulsha_hippo.dream.cli.followups.verify",
+                       side_effect=RuntimeError(f"token {secret} rejected")), \
+                 patch("paulsha_hippo.dream.cli.load_flags", return_value=runtime_flags.HygieneFlags()):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cli.main(["dream", "run", "--memory-root", str(root), "--promoter", "identity"])
+            out = json.loads(buf.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertIn(out["status"], ("ok", "partial"))
+            self.assertIn("error", out["passes"]["followups"])
+            self.assertNotIn(secret, json.dumps(out["passes"]["followups"]))   # sanitize
+
+    def test_followups_fn_happy_path_runs_real_verify(self):
+        # Review round 1 finding 2: the failure-isolation test above always mocks
+        # followups.verify to raise — it never exercises the real followups_fn wiring
+        # (real ledger + real projects.yaml -> followups.verify actually running and
+        # succeeding). Build that real setup here: a real followups ledger entry whose
+        # target file genuinely still contains its expected_stale text (-> verified_open),
+        # and a real projects.yaml at the exact path dream/cli.py's followups_fn reads
+        # (importer.config.default_projects_path(memory_root)) declaring a root that
+        # contains that target file.
+        from paulsha_hippo import followups as fu
+        from paulsha_hippo.importer.config import default_projects_path
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # memory_root as a subdir of tmp (not tmp itself) so that
+            # default_projects_path(root) == root.parent/"config"/"projects.yaml"
+            # also lands inside tmp and is cleaned up with it (no host litter under /tmp).
+            root = tmp_path / "memory"
+            _seed(root)
+
+            target_repo = tmp_path / "src-repo"
+            target_repo.mkdir()
+            (target_repo / "doc.md").write_text("stale marker here\n", encoding="utf-8")
+
+            fu.append_event(
+                root,
+                {
+                    "id": "fu-happy-1",
+                    "event": "opened",
+                    "slice_id": "sl-x",
+                    "project": "paulshaclaw",
+                    "target": {"path": "doc.md", "line": 1},
+                    "expected_stale": "stale marker",
+                    "claim": "c",
+                    "source": "regex",
+                },
+                now="2026-07-10T00:00:00Z",
+            )
+
+            # Force "no PSC_CONFIG_ROOT override" regardless of the host environment,
+            # so default_projects_path(root) resolves deterministically relative to
+            # root and the projects.yaml written below is the one followups_fn reads.
+            with patch.dict(os.environ, {"PSC_CONFIG_ROOT": ""}):
+                projects_path = default_projects_path(root)
+                projects_path.parent.mkdir(parents=True, exist_ok=True)
+                projects_path.write_text(
+                    "projects:\n"
+                    "  paulshaclaw:\n"
+                    "    roots:\n"
+                    f"      - {target_repo}\n",
+                    encoding="utf-8",
+                )
+
+                with patch(
+                    "paulsha_hippo.dream.cli.load_flags",
+                    return_value=runtime_flags.HygieneFlags(),
+                ):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        rc = cli.main([
+                            "dream", "run",
+                            "--memory-root", str(root),
+                            "--now", "2026-07-10T00:00:00Z",
+                            "--promoter", "identity",
+                        ])
+            out = json.loads(buf.getvalue())
+            self.assertEqual(rc, 0)
+            followups_summary = out["passes"]["followups"]
+            self.assertNotIn("error", followups_summary)
+            self.assertNotIn("skipped", followups_summary)
+            self.assertEqual(
+                followups_summary,
+                {"checked": 1, "verified_open": 1, "resolved": 0, "unverifiable": 0},
+            )
+            # followups running for real must not degrade dream's overall status.
+            self.assertIn(out["status"], ("ok", "partial"))
+
+    def test_followups_fn_resolves_roots_from_registry_only_project(self):
+        """dream 的 followups 階段要走 registry-aware 的 union 讀取：只登記在
+        generated registry（`project-hippo.yaml`）而沒進手寫 `projects.yaml` 的專案
+        先前一律拿不到 root，每輪 dream 都只會替它記一筆 `no-root` unverifiable。
+        """
+        from paulsha_hippo import followups as fu
+        from paulsha_hippo.importer import registry
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "memory"
+            _seed(root)
+
+            target_repo = tmp_path / "src-repo"
+            target_repo.mkdir()
+            (target_repo / "doc.md").write_text("stale marker here\n", encoding="utf-8")
+
+            fu.append_event(
+                root,
+                {
+                    "id": "fu-registry-1",
+                    "event": "opened",
+                    "slice_id": "sl-x",
+                    "project": "paulshaclaw",
+                    "target": {"path": "doc.md", "line": 1},
+                    "expected_stale": "stale marker",
+                    "claim": "c",
+                    "source": "regex",
+                },
+                now="2026-07-10T00:00:00Z",
+            )
+
+            with patch.dict(os.environ, {"PSC_CONFIG_ROOT": ""}):
+                # 只寫 generated registry，完全不寫手寫 projects.yaml。
+                registry.record_discovery(
+                    slug="paulshaclaw", roots=[str(target_repo)],
+                    registry_path=registry.default_registry_path(root))
+
+                with patch(
+                    "paulsha_hippo.dream.cli.load_flags",
+                    return_value=runtime_flags.HygieneFlags(),
+                ):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        rc = cli.main([
+                            "dream", "run",
+                            "--memory-root", str(root),
+                            "--now", "2026-07-10T00:00:00Z",
+                            "--promoter", "identity",
+                        ])
+            out = json.loads(buf.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                out["passes"]["followups"],
+                {"checked": 1, "verified_open": 1, "resolved": 0, "unverifiable": 0},
+            )
 
     def test_status_reports_backlog(self):
         with TemporaryDirectory() as tmp:

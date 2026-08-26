@@ -22,6 +22,8 @@ class NormalizedSession(TypedDict):
     cwd: str | None
     repo: str | None
     commit: str | None
+    git_branch: str | None
+    git_dirty: bool | None
     turn_count: int
     user_prompts: list[str]
     assistant_messages: list[str]
@@ -154,6 +156,8 @@ def build_session(
         "cwd": string_or_none(payload.get("cwd")),
         "repo": string_or_none(payload.get("repo")),
         "commit": string_or_none(payload.get("commit")),
+        "git_branch": string_or_none(payload.get("git_branch")),
+        "git_dirty": (payload.get("git_dirty") if isinstance(payload.get("git_dirty"), bool) else None),
         "turn_count": extract_turn_count(payload, prompts),
         "user_prompts": prompts,
         "assistant_messages": assistant_messages,

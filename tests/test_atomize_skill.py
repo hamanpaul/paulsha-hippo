@@ -141,5 +141,10 @@ class SkillDocTests(unittest.TestCase):
         self.assertNotIn("```", output_contract)
 
 
+def test_skill_excludes_session_state_statements():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "尚未 commit" in text and "session 結束" in text and "handoff" in text
+
+
 if __name__ == "__main__":
     unittest.main()

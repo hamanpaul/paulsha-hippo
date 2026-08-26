@@ -220,6 +220,30 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(list((root / "knowledge").rglob("*.md")))
             self.assertEqual(processing.state_of(root, "claude:s1"), "promoted")
 
+    def test_split_and_promote_preserve_six_key_provenance(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "inbox" / "research" / "claude" / "2026-06-02" / "s1.md"
+            raw.parent.mkdir(parents=True)
+            raw.write_text(_RAW.replace(
+                "  path: docs/x.md\n",
+                "  path: docs/x.md\n  commit_source: hook\n  branch: main\n  dirty: \"true\"\n"),
+                encoding="utf-8")
+            cfg, h = atomizer_config.load_config(override_path=None)
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-06-03T00:00:00Z",
+                         promoter=pipeline.IdentityPromoter())
+            # A successful identity-promote run archives fragments out of
+            # inbox/_slices (see test_flow_through_empties_working_layers);
+            # the rendered fragment content survives the move unchanged, so
+            # this is where _render_fragment's output can still be inspected.
+            frag = next((root / "archive" / "fragments").rglob("*.md"))
+            ffm, _ = pipeline._parse_frontmatter(frag.read_text(encoding="utf-8"))
+            self.assertEqual(ffm["provenance"]["branch"], "main")
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            nfm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(nfm["provenance"]["commit_source"], "hook")
+            self.assertEqual(nfm["provenance"]["dirty"], "true")
+
     def test_one_to_one_slice_count_matches_fragments(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -635,6 +659,159 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(supersedes), 1)
             self.assertEqual(supersedes[0]["to"], f"slice:{old_id}")
 
+    def test_cross_session_same_title_supersedes_at_publish(self):
+        """fix 2b：不同 session 蒸餾出的同專案同 canonical title note 也要連 supersedes。
+
+        舊條件要求 ``distilled_from`` 相等，等於只有「同一場 session 重蒸」才連；
+        跨 session 的更新版永遠與舊版平行存在，janitor 的 decay_superseded 因此
+        永遠不會觸發。這裡兩輪用不同 inbox session（s1/s2）但同一個 canonical
+        title、不同 body（checksum 不同），第二輪必須把第一輪的 slice 標成前身。
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+
+            def canned(body: str) -> str:
+                return json.dumps(
+                    [{
+                        "title": "stable canonical title",
+                        "artifact_kind": "report",
+                        "project": "paulshaclaw",
+                        "tags": [],
+                        "body": body,
+                        "source_fragment_indices": [0, 1],
+                        "relations": [],
+                    }]
+                )
+
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(canned("body version one")),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            old_slice = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            old_fm, _ = pipeline._parse_frontmatter(old_slice.read_text(encoding="utf-8"))
+            old_id = str(old_fm["slice_id"])
+            self.assertEqual(old_fm["distilled_from"], "claude:s1")
+
+            # 第二輪用另一個 inbox session（s2 -> distilled_from: claude:s2）。
+            _seed_raw_s2(root)
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T02:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(canned("body version two")),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+
+            notes = sorted((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            self.assertEqual(len(notes), 2)
+            new_note = next(path for path in notes if path != old_slice)
+            frontmatter, _ = pipeline._parse_frontmatter(new_note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["distilled_from"], "claude:s2")
+            self.assertEqual(frontmatter["supersedes"], [old_id])
+
+    def test_mixed_offset_captured_at_still_supersedes_at_publish(self):
+        """captured_at 的新舊比較必須先 parse：字串序會被時區偏移騙倒。
+
+        既存 note 的 ``2026-05-31T07:00:00+08:00`` 換算成 UTC 是
+        ``2026-05-30T23:00:00Z``，確實比新 slice 的 captured_at 舊；但字串序把它
+        判成「比較新」而整個漏掉。真實記憶庫同時混用 ``Z``、``+08:00``，以及
+        fragment YAML round-trip 之後的空白分隔寫法，三者字串序互不可比。
+        """
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "paulshaclaw"
+            existing.mkdir(parents=True)
+            (existing / "n--sl-offset.md").write_text(
+                "---\nslice_id: sl-offset\nmemory_layer: knowledge\nproject: paulshaclaw\n"
+                "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                "captured_at: \"2026-05-31T07:00:00+08:00\"\nchecksum: offset\nsupersedes: []\n---\nx\n",
+                encoding="utf-8",
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next(path for path in sorted(existing.glob("*.md"))
+                        if path.name != "n--sl-offset.md")
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            # 前提：這一組值在字串序下是「舊者比較新」，parse 之後才是對的。
+            self.assertFalse("2026-05-31T07:00:00+08:00" <= str(frontmatter["captured_at"]))
+            self.assertEqual(frontmatter["supersedes"], ["sl-offset"])
+
+    def test_two_older_same_title_notes_stay_parallel(self):
+        """同專案同標題有兩個較舊候選時不自動連：歧義交給 link-supersedes 的 review tier。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "paulshaclaw"
+            existing.mkdir(parents=True)
+            for sid, checksum in (("sl-amb-1", "amb1"), ("sl-amb-2", "amb2")):
+                (existing / f"n--{sid}.md").write_text(
+                    f"---\nslice_id: {sid}\nmemory_layer: knowledge\nproject: paulshaclaw\n"
+                    "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                    f"captured_at: \"2026-01-01T00:00:00Z\"\nchecksum: {checksum}\nsupersedes: []\n---\nx\n",
+                    encoding="utf-8",
+                )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next(path for path in sorted(existing.glob("*.md"))
+                        if not path.name.startswith("n--sl-amb-"))
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["supersedes"], [])
+
+    def test_cross_project_same_title_stays_parallel(self):
+        """跨專案同標題不得自動連結：immediate path 只認同一個 project。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            existing = root / "knowledge" / "other-project"
+            existing.mkdir(parents=True)
+            (existing / "n--sl-foreign.md").write_text(
+                "---\nslice_id: sl-foreign\nmemory_layer: knowledge\nproject: other-project\n"
+                "title: \"stable canonical title\"\natom_title: \"stable canonical title\"\n"
+                "captured_at: \"2026-01-01T00:00:00Z\"\nchecksum: foreign\nsupersedes: []\n---\nx\n",
+                encoding="utf-8",
+            )
+            pipeline.run(
+                root, config=cfg, config_hash=h, now="2026-07-16T01:00:00Z",
+                promoter=llm_promoter.LLMPromoter(
+                    FakeAgentClient(json.dumps([{
+                        "title": "stable canonical title", "artifact_kind": "report",
+                        "project": "paulshaclaw", "tags": [], "body": "body one",
+                        "source_fragment_indices": [0, 1], "relations": [],
+                    }])),
+                    skill_text="SKILL", known_projects=["paulshaclaw"],
+                ),
+            )
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            frontmatter, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(frontmatter["supersedes"], [])
+
     def test_llm_dangling_relates_to_warns_and_promotes(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1042,6 +1219,39 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(result["summary"]["noise_dropped"], 1)   # ## CWD structural-echo
             self.assertEqual(result["summary"]["slices"], 1)          # ## Real Topic kept
             self.assertFalse(list((root / "knowledge").rglob("*.md")))  # dry-run writes nothing
+
+    def test_session_state_finding_publishes_as_episodic_and_stays_out_of_index(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            promoter = llm_promoter.LLMPromoter(FakeAgentClient(json.dumps([{
+                "title": "session-handoff-2026-08-12", "artifact_kind": "report", "project": "paulshaclaw",
+                "tags": [], "body": "本次修改僅限 README（alpha）。\nsession 結束時尚未 commit。\n",
+                "source_fragment_indices": [0], "relations": []}])), skill_text="SKILL", known_projects=["paulshaclaw"])
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-08-25T00:00:00Z", promoter=promoter)
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            fm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(fm["memory_layer"], "episodic")
+            self.assertEqual(fm["episodic_reason"], "title:session-state")
+            from paulsha_hippo.moc import search as S
+            cov = S.build_index(root, link_weights={})
+            self.assertEqual(cov["pool_excluded"].get("non-knowledge-layer:episodic"), 1)
+
+    def test_episodic_filter_flag_off_keeps_knowledge_layer(self):
+        from dataclasses import replace as _replace
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            cfg = _replace(cfg, episodic_filter=False)
+            promoter = llm_promoter.LLMPromoter(FakeAgentClient(json.dumps([{
+                "title": "session-handoff-2026-08-12", "artifact_kind": "report", "project": "paulshaclaw",
+                "tags": [], "body": "本次修改僅限 README（alpha）。\nsession 結束時尚未 commit。\n",
+                "source_fragment_indices": [0], "relations": []}])), skill_text="SKILL", known_projects=["paulshaclaw"])
+            pipeline.run(root, config=cfg, config_hash=h, now="2026-08-25T00:00:00Z", promoter=promoter)
+            note = next((root / "knowledge" / "paulshaclaw").glob("*.md"))
+            fm, _ = pipeline._parse_frontmatter(note.read_text(encoding="utf-8"))
+            self.assertEqual(fm["memory_layer"], "knowledge")
+            self.assertNotIn("episodic_reason", fm)
 
 
 _RAW_TITLED = """---

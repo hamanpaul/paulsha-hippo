@@ -5,8 +5,11 @@ import json
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from paulsha_hippo import followups as fu
+from paulsha_hippo import usage_read
 from paulsha_hippo.lib.lifecycle import schema as lifecycle_schema
 from paulsha_hippo.moc import frontmatter_io, search
 
@@ -407,3 +410,65 @@ def test_report_marks_missing_sources_and_zero_denominators_as_unavailable(tmp_p
     assert markdown.returncode == 0, markdown.stderr
     assert "## 資料診斷" in markdown.stdout
     assert "missing_file=1" in markdown.stdout
+
+
+def test_show_agent_read_event_counts_toward_viewed_kpi(tmp_path):
+    """`hippo show --agent` 取代 Read 之後，記下的 read 事件仍要餵得動看過率 KPI。
+
+    fix 3b 的重點：省下的 Read 不能讓 KPI 看不到——offered.jsonl 先有一筆
+    shortlist offer，usage_read.append_read_event（show 的 read 歸因寫入器）
+    補一筆同 schema 的 read 事件後，report 的 usage.viewed 就要把它算進去。
+    """
+    root = tmp_path
+    note = root / "knowledge" / "proj" / "note--sl-aaaaaaaaaaaaaaaa.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "---\nslice_id: sl-aaaaaaaaaaaaaaaa\nproject: proj\n---\nbody\n", encoding="utf-8"
+    )
+    offer_ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _write_jsonl(root, "offered.jsonl", [
+        {"ts": offer_ts, "tool": "claude-code", "session_id": "s1", "offered": ["sl-aaaaaaaaaaaaaaaa"]},
+    ])
+
+    usage_read.append_read_event(
+        root, tool="claude-code", session_id="s1",
+        sl_id="sl-aaaaaaaaaaaaaaaa", path=note, project="proj",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(REPORT_SCRIPT), "--memory-root", str(root), "--format", "json"],
+        cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["windows"]["7d"]["usage"]["viewed"]["count"] == 1
+
+
+def test_report_includes_followups_counts(tmp_path):
+    """issue #136 fix 5：report 的每個 window payload 要多一個 followups 區塊——
+    open 是 fold 後跨全部 project 仍 open 的目前快照，resolved_in_source 是本
+    window 內 resolved-in-source 事件數。NOW（_run_report 固定帶的 --now）是
+    2026-08-18T12:00:00Z，7d window 的下界是 2026-08-11T12:00:00Z，以下事件時間
+    都落在這個 window 內。
+    """
+    tmp_path.mkdir(exist_ok=True)
+    fu.append_event(tmp_path, {
+        "id": "fu-1", "event": "opened", "slice_id": "s", "project": "p", "target": None,
+        "expected_stale": None, "claim": "c", "source": "regex",
+    }, now="2026-08-17T00:00:00Z")
+    fu.append_event(tmp_path, {"id": "fu-1", "event": "resolved-in-source"}, now="2026-08-17T01:00:00Z")
+    fu.append_event(tmp_path, {
+        "id": "fu-2", "event": "opened", "slice_id": "s", "project": "p", "target": None,
+        "expected_stale": None, "claim": "d", "source": "regex",
+    }, now="2026-08-17T02:00:00Z")
+
+    completed = _run_report(tmp_path, "--format", "json")
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["windows"]["7d"]["followups"] == {"open": 1, "resolved_in_source": 1}
+
+    markdown = _run_report(tmp_path, "--format", "markdown")
+    assert markdown.returncode == 0, markdown.stderr
+    assert "Follow-ups open／resolved(window)" in markdown.stdout
+    assert "1／1" in markdown.stdout

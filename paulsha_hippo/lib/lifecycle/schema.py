@@ -166,6 +166,21 @@ def _parse_frontmatter_value(key: str, value: str) -> object:
                 break
             else:
                 return numbers
+    if key == "cites":
+        parsed = _parse_bracket_list(value)
+        if parsed is not None:
+            cites: list[dict] = []
+            for item in parsed:
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("path"), str)
+                    and type(item.get("line")) is int
+                ):
+                    cites.append(item)
+                    continue
+                break
+            else:
+                return cites
     return _parse_scalar(value)
 
 

@@ -515,5 +515,12 @@ class ProducerContractTests(_ScratchDirTestCase):
         self.assertEqual(block, self.FIXTURE.read_text(encoding="utf-8"))
 
 
+def test_projects_config_parses_top_level_families():
+    from paulsha_hippo.importer.config import parse_projects_config
+    cfg = parse_projects_config("version: 1\nfamilies:\n  - [MCU-Octopus, ot-ti-mirror]\n  - [a, b]\nprojects:\n  a:\n    slug: a\n")
+    assert cfg.families == (("MCU-Octopus", "ot-ti-mirror"), ("a", "b"))
+    assert cfg.projects[0].slug == "a"
+
+
 if __name__ == "__main__":
     unittest.main()

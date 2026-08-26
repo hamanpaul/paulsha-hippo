@@ -224,6 +224,143 @@ _GENERIC_EXACT_TITLES = frozenset(
 _GENERIC_TITLE_PREFIX = re.compile(r"^(?:report|task|todo)-")
 
 
+# --- episodic demotion (#136 fix 4，review round 1 收緊強弱訊號): session-state句
+# 非 deletion-grade ---
+# 命中只把 memory_layer 從 knowledge 降層為 episodic（不刪檔），與 classify_noise
+# （刪檔）刻意分離：episodic 筆記仍在磁碟上，只是被 MOC index／wakeup／janitor
+# 依 `memory_layer != "knowledge"` 排除在檢索池外（見 moc/search.py）。
+#
+# review round 1 finding：brief 原版 SESSION_STATE_RE 對「目前狀態」「下一步」
+# 「handoff」這類 bare word 沒有語境限制，會誤觸發耐久技術敘述（例：「目前狀態機的
+# 初始化流程」「韌體升級的下一步是驗證 CRC」「handoff register 在 CC2674 上」）。
+# 故拆成 strong／weak 兩級：
+#   - strong：只有描述 session/commit 自身狀態時才通的措辭，一行命中即算
+#     session-state 行（不需佐證）。
+#   - weak：單獨出現在耐久技術文件裡也合理的字，需同一行內有 ≥2 個「不同」weak
+#     pattern 互相佐證才算一行命中（同一 pattern 重複出現幾次都只算 1 個佐證，
+#     見 review round 2 finding／_weak_hit_count）；1 行 body 只接受 strong 命中，
+#     weak 訊號組合在單行下不成立（統計意義不足，且更容易被單一常見詞誤觸發）。
+_STRONG_STATE_RE = re.compile(
+    r"尚未 ?(?:commit|push|合併|merge)"        # 尚未 commit／push／合併／merge
+    r"|待 ?(?:push|commit|合併)"                # 待 push／commit／合併
+    r"|session ?結束(?:時|前|後)"                # session 結束時／前／後
+    r"|本次 ?session"                           # 本次 session
+    r"|session-handoff"                         # session-handoff（連字號複合詞）
+    r"|session ?交接"                           # session 交接
+    r"|交接狀態"                                 # 交接狀態
+    r"|handoff ?狀態"                           # handoff 狀態
+    r"|目前狀態[：:]"                           # 冒號分隔的狀態標頭（「目前狀態：」）
+    r"|本次修改僅限"                             # 本次修改僅限……（commit 訊息式範圍陳述）
+    r"|\bnot yet (?:committed|pushed|merged)\b"
+    # round 2b：需要冒號／行尾分隔符才算強訊號，比照 `目前狀態：`——否則會誤觸發
+    # 「handoff status register」這類硬體暫存器複合名詞（真實 CC2674 案例，
+    # round 2 report 記錄為在該輪 scope 內無法修的第三個誤降級）。
+    r"|\bhandoff (?:status|state|note)\b(?:\s*[：:]|$)"
+    r"|\bsession (?:ended|end|handoff)\b",
+    re.IGNORECASE,
+)
+# weak 訊號各自獨立編譯，供逐行計算「不同 pattern 命中數」使用（見 _weak_hit_count）。
+# round 2b：移除裸字 `status`——英文硬體／韌體敘述常見「status register」「status
+# field」，過於通用，診斷語料的真正正例沒有一個是靠裸字 status 撐起來的（見
+# task-13-report.md round 2b fix report）。`handoff` 維持 weak。
+_WEAK_STATE_PATTERNS = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (r"目前狀態", r"下一步", r"\bhandoff\b", r"目前", r"尚未", r"待辦")
+)
+# Title 規則同樣拆成 strong／weak（全支線 review I2）。舊規則
+# `\bhandoff\b|狀態$` 是「一擊即中、body 完全不看」，但這兩個形狀在耐久技術筆記的
+# 標題裡極常見——`CC2674 handoff register 對照`（硬體暫存器名）、`LED 燈號狀態`
+# （燈號對照表）都會整篇被降層、從檢索池消失，而它們的 body 全是可重用知識。
+#
+# strong 標題（`_STRONG_STATE_RE`，與 body 共用同一套措辭）只在描述 session／交接
+# 自身時才成立——`session-handoff-2026-08-12`、`session 交接`、`交接狀態`、
+# `handoff status:`——單獨命中即整篇降層，body 不必佐證。
+# weak 標題只是「可能相關」，需要 body 至少一行 strong 命中才降層。
+_WEAK_STATE_TITLE_RE = re.compile(r"\bhandoff\b|狀態$", re.IGNORECASE)
+EPISODIC_RATIO = 0.5
+
+_FENCE_LINE = re.compile(r"^(?:```|~~~)")
+
+
+def _episodic_content_lines(body: str) -> list[str]:
+    """`_content_lines`，但先整段剔除 fenced code block（``` / ~~~，含未閉合)。
+
+    只用於 episodic_reason：程式碼片段裡的字面文字（如註解掉的 commit 指令）不該
+    被當成 session 狀態陳述；未閉合的 fence 視為從開啟處起全部都是程式碼直到結尾。
+    不動 classify_noise 共用的 `_content_lines`，避免影響其他分類器行為。
+    """
+    kept: list[str] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _FENCE_LINE.match(line.strip()):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        kept.append(line)
+    return _content_lines("\n".join(kept))
+
+
+def _weak_hit_count(line: str) -> int:
+    """該行內命中的「不同」weak pattern 數（distinct pattern indices，非 span 數）。
+
+    review round 2 finding：舊版用「不重疊 span 數」計算，同一個 pattern 在同一行
+    內重複出現（如「目前目前都還好」「status status」）會各自產生不重疊 span，被
+    誤算成 2 次命中，湊出 session-state 判定。正確判準是「≥2 個不同 pattern」互相
+    佐證，同一 pattern 出現幾次都只算 1 次；故直接對每個 pattern 判斷「該行是否至
+    少命中一次」（不看次數、不看位置），再加總命中的 pattern 數。
+
+    round 2b 更新：round 2 report 記錄的第三個殘留案例（「HANDOFF register
+    （handoff status register）」，`\bhandoff\b` 與 `\bstatus\b` 兩個不同 weak
+    pattern 皆命中，且同時撞上 strong 的 `\bhandoff (?:status|state|note)\b`）已在
+    round 2b 解決：`status` 已從 `_WEAK_STATE_PATTERNS` 移除（過於通用，見常數旁
+    註解），且 strong 的 handoff status/state/note 現在要求冒號／行尾分隔符，兩者
+    合力使這行不再命中 weak 也不再命中 strong。詳見 task-13-report.md round 2b
+    fix report。
+    """
+    return sum(1 for pat in _WEAK_STATE_PATTERNS if pat.search(line))
+
+
+def _line_is_session_state(line: str) -> bool:
+    """ratio 規則（≥2 行 body）下，單行是否算 session-state：strong 一擊即中；
+    weak 需同一行 ≥2 個不同 pattern 互相佐證。"""
+    if _STRONG_STATE_RE.search(line):
+        return True
+    return _weak_hit_count(line) >= 2
+
+
+def episodic_reason(title: object, body: str) -> str | None:
+    """session 狀態句偵測：非 deletion-grade——命中只降層 episodic，不刪。
+
+    Precision over recall（review round 1／全支線 review I2）：
+    - 標題命中 strong 措辭（`_STRONG_STATE_RE`，如 `session-handoff…`、`session 交接`、
+      `交接狀態`、`handoff status:`）→ 整篇強訊號，body 不必佐證，直接降層。
+    - 標題只命中 weak 形狀（`_WEAK_STATE_TITLE_RE`：裸 `handoff` 或以「狀態」結尾）
+      → 需 body 至少一行 strong 命中才降層。`CC2674 handoff register 對照`、
+      `LED 燈號狀態` 這類耐久標題否則會整篇被誤降、從檢索池消失。
+    - body 只有 1 行 content line 時，只接受 strong 命中；weak 訊號組合在單行下
+      統計意義不足，一律不降層（`_content_lines` 需先剔除 fenced code block）。
+    - body ≥2 行 content line 時，走原本的 ratio 規則（session-state 行數 /
+      content 行數 ≥ EPISODIC_RATIO），但「是否算 session-state 行」改用
+      strong-one-hit / weak-two-distinct-hits 判定，而非舊版單一 bare-word regex。
+    """
+    title_text = str(title or "").strip()
+    if _STRONG_STATE_RE.search(title_text):
+        return "title:session-state"
+    lines = _episodic_content_lines(body or "")
+    if _WEAK_STATE_TITLE_RE.search(title_text) and any(
+            _STRONG_STATE_RE.search(line) for line in lines):
+        return "title:session-state+body"
+    if not lines:
+        return None
+    if len(lines) == 1:
+        return "body:session-state:1/1" if _STRONG_STATE_RE.search(lines[0]) else None
+    hits = sum(1 for line in lines if _line_is_session_state(line))
+    if hits and hits / len(lines) >= EPISODIC_RATIO:
+        return f"body:session-state:{hits}/{len(lines)}"
+    return None
+
+
 def is_generic_title(title: object) -> bool:
     """True when title normalizes to an exact generic label or allowed prefix.
 

@@ -11,9 +11,12 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
+from paulsha_hippo.importer.config import default_projects_path, load_projects_config
 from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
 from paulsha_hippo.retrieval import format_shortlist, to_fts_query
+from paulsha_hippo.runtime_flags import load_flags
+from paulsha_hippo.topic import collapse_same_topic
 from paulsha_hippo.hooks._wakeup_common import (
     hippo_invocation, log_warn, offered_map_path as _offered_map_path, validate_tool,
 )
@@ -27,6 +30,18 @@ SHORTLIST_FETCH_K = 12
 # 沒在讀的 session」持續 offer 是純 context 污染。8 保留完整安全邊際（比實測讀取發生
 # 的最後一個事件序號 6 多兩個事件）。
 OFFER_STOP_AFTER_EVENTS = 8
+
+
+def _families(root: Path) -> tuple:
+    """讀 projects.yaml 的 families（同義專案分組），best-effort：讀取／解析失敗一律回 `()`。
+
+    供 collapse_same_topic 的 family_key 跨專案別名判定用；本函式的失敗不得中斷
+    shortlist 管線（呼叫端已在最外層 try/except 內），失敗即退回「不跨專案分組」。
+    """
+    try:
+        return tuple(load_projects_config(default_projects_path(root)).families)
+    except Exception:
+        return ()
 
 
 def _norm_title_key(s: str) -> str:
@@ -166,18 +181,25 @@ def _session_lock(mpath: Path):
 
 
 def _append_offered_ledger(root: Path, tool: str, session_id: str, project: str,
-                           offered: list[tuple[str, str]]) -> None:
+                           offered: list[tuple[str, str]],
+                           collapsed: dict[str, list[str]] | None = None) -> None:
     """Append 一筆 offered 事件到 append-only ledger 並 fsync 落盤。呼叫端持 per-session flock。
 
     ledger 是 offered 的單一真值＋crash commit point：write 後 flush＋fsync 確保硬中止
     （SIGKILL／hook timeout／主機中斷）發生前已落盤——否則資料僅留在 Python／OS 緩衝，強制
     終止會連同「map 尚未更新」一起遺失，重現本 finding 的缺口（見 _publish_offered）。
+
+    collapsed：同主題折疊掉的 slice_id 對照表（{kept_sl_id: [collapsed_sl_id, ...]}），
+    僅供稽核——被折疊者不在 offered 內（沒 offer 就不能算 offered）。空 dict／None
+    時省略該鍵，維持 flag-off／無折疊發生時的 ledger 事件與折疊功能上線前逐位元組相同。
     """
     led_dir = root / "runtime" / "ledger"
     led_dir.mkdir(parents=True, exist_ok=True)
     ev = {"ts": datetime.now(timezone.utc).isoformat(), "session_id": session_id,
           "tool": tool, "project": project,
           "offered": [{"sl_id": sid, "path": p} for sid, p in offered]}
+    if collapsed:
+        ev["collapsed"] = collapsed
     with (led_dir / "offered.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
         fh.flush()
@@ -256,7 +278,8 @@ def _reconcile_offered_map(root: Path, tool: str, session_id: str, mpath: Path) 
 
 
 def _publish_offered(root: Path, tool: str, session_id: str, project: str,
-                     mpath: Path, offered: list[tuple[str, str]]) -> None:
+                     mpath: Path, offered: list[tuple[str, str]],
+                     collapsed: dict[str, list[str]] | None = None) -> None:
     """發布一筆 offered 事件——offered ledger 為單一真值＋commit point，per-session map 為可重建 cache。呼叫端持 flock。
 
     排序反轉為「先 ledger、後 map」並讓 ledger fsync 落盤，關閉前輪 map-先寫留下的
@@ -274,7 +297,10 @@ def _publish_offered(root: Path, tool: str, session_id: str, project: str,
     僅記 warning。若在此 fail-closed，會使 agent 收不到「已 commit」的 offer、重現前輪
     offered-but-undelivered 的指標膨脹，故降級為 best-effort cache 更新。
     """
-    _append_offered_ledger(root, tool, session_id, project, offered)
+    # 一律以 keyword 傳 collapsed（None／{} 時 _append_offered_ledger 內部即省略該鍵，
+    # ledger 事件與折疊功能上線前逐位元組相同）；不再依 collapsed 真假切換 5-/6-arg
+    # 呼叫形狀——那是為了遷就舊版 monkeypatch 替身的權宜寫法，正確做法是替身跟著新簽名走。
+    _append_offered_ledger(root, tool, session_id, project, offered, collapsed=collapsed)
     try:
         _commit_offered_map(mpath, offered)
     except Exception as exc:
@@ -284,7 +310,8 @@ def _publish_offered(root: Path, tool: str, session_id: str, project: str,
 
 
 def _record_offered(root: Path, tool: str, session_id: str, project: str,
-                    offered: list[tuple[str, str]]) -> None:
+                    offered: list[tuple[str, str]],
+                    collapsed: dict[str, list[str]] | None = None) -> None:
     """原子發布 offered（map commit＋ledger append），全程持 per-session flock。Best-effort。
 
     保留給直接呼叫端（顯式 recall 只記帳、既有並發測試）。完整 shortlist 管線改由
@@ -295,7 +322,7 @@ def _record_offered(root: Path, tool: str, session_id: str, project: str,
     try:
         mpath = _offered_map_path(root, tool, session_id)
         with _session_lock(mpath):
-            _publish_offered(root, tool, session_id, project, mpath, offered)
+            _publish_offered(root, tool, session_id, project, mpath, offered, collapsed)
     except Exception as exc:
         log_warn(root, tool, f"failed to record offered: {exc}")
 
@@ -407,13 +434,27 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                 # 永不早停（繼續供給）。bypass_early_stop=True（顯式 recall）永遠跳過此判斷。
                 return ""
             seen = _load_offered_ids(root, tool, session_id)
-            claim = [h for h in hits
+            flags = load_flags()
+            # fix 2a：同主題折疊在 claim 之前跑（被折疊者不進 claim → 不會被 offer／
+            # claimed，只留在 collapsed 供稽核）；flag off 時 pool 就是原始 hits，
+            # 行為與折疊上線前逐位元組相同。因為每輪的 hits 都重新含最新者，若最新
+            # 者已 offer 過（進了 seen），舊者仍會被同一輪的折疊規則再次吃掉——不會
+            # 因為「最新者已離開 claim」而讓舊者漏網重新曝光。
+            collapsed: dict[str, list[str]] = {}
+            pool = hits
+            if flags.collapse_same_topic:
+                pool, collapsed = collapse_same_topic(hits, families=_families(root))
+            claim = [h for h in pool
                      if h.get("slice_id") and h["slice_id"] not in seen][:SHORTLIST_K]
+            collapsed = {k: v for k, v in collapsed.items() if any(h["slice_id"] == k for h in claim)}
             if not claim:
                 return ""
             for h in claim:
                 h["summary"] = _summary(h.get("path", ""), str(h.get("title") or ""))
-            block = _redact(root, tool, project, session_id, format_shortlist(claim))
+            show_cmd = " ".join(shlex.quote(a) for a in hippo_invocation(root) + [
+                "show", "--memory-root", str(root), "--agent", "--tool", tool, "--session-id", session_id])
+            block = _redact(root, tool, project, session_id,
+                            format_shortlist(claim, hint=flags.read_hint, show_command=show_cmd))
             if not block:
                 # fail-closed: redaction suppressed the shortlist -> inject nothing and do
                 # NOT record offered (nothing was surfaced to the agent).
@@ -434,7 +475,7 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             # shortlist」的膨脹；ledger 成功後的硬中止只落在「ledger 有、map 無」安全側，由 reconcile
             # 重建（見 _publish_offered）。commit point 之後僅剩兩個既有 str 的串接（不會拋），故
             # 不存在「offer 已 durable 落盤但回傳被吞成 ''」的永久遺漏窗口。
-            _publish_offered(root, tool, session_id, project, mpath, offered)
+            _publish_offered(root, tool, session_id, project, mpath, offered, collapsed=collapsed)
         return block + "\n" + hint
     except Exception as exc:
         log_warn(root, tool, f"shortlist failed: {exc}")

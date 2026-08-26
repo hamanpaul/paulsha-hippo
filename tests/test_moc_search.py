@@ -495,8 +495,8 @@ class UsageBoostRankingTests(unittest.TestCase):
             index_path.write_text("mock-db", encoding="utf-8")
 
             data_rows = [
-                ("sl-a", "proj", "a", 0.00, 0, 1, "/k/a.md", 0, None),
-                ("sl-b", "proj", "b", 0.00, 0, 1, "/k/b.md", 100, "2026-07-20T00:00:00Z"),
+                ("sl-a", "proj", "a", 0.00, 0, 1, "/k/a.md", None, 0, None),
+                ("sl-b", "proj", "b", 0.00, 0, 1, "/k/b.md", None, 100, "2026-07-20T00:00:00Z"),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
 
@@ -517,8 +517,8 @@ class UsageBoostRankingTests(unittest.TestCase):
             index_path.write_text("mock-db", encoding="utf-8")
 
             data_rows = [
-                ("sl-worse", "proj", "w", 0.05, 0, 1, "/k/w.md", 10_000_000, "2026-07-20T00:00:00Z"),
-                ("sl-better", "proj", "b", 0.00, 0, 1, "/k/b.md", 0, None),
+                ("sl-worse", "proj", "w", 0.05, 0, 1, "/k/w.md", None, 10_000_000, "2026-07-20T00:00:00Z"),
+                ("sl-better", "proj", "b", 0.00, 0, 1, "/k/b.md", None, 0, None),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
 
@@ -540,8 +540,8 @@ class UsageBoostRankingTests(unittest.TestCase):
             # Raw BM25 differs, so using BM25 as the second key incorrectly
             # puts sl-z first instead of falling through to slice_id.
             data_rows = [
-                ("sl-a", "proj", "a", 0.20, 1, 1, "/k/a.md", 1, None),
-                ("sl-z", "proj", "z", 0.10, 0, 1, "/k/z.md", 1, None),
+                ("sl-a", "proj", "a", 0.20, 1, 1, "/k/a.md", None, 1, None),
+                ("sl-z", "proj", "z", 0.10, 0, 1, "/k/z.md", None, 1, None),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
 
@@ -582,8 +582,8 @@ class UsageBoostRankingTests(unittest.TestCase):
             index_path.write_text("mock-db", encoding="utf-8")
 
             data_rows = [
-                ("sl-high", "proj", "high", 0.20, 1, 1, "/k/high.md", 0, None),
-                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md", 0, None),
+                ("sl-high", "proj", "high", 0.20, 1, 1, "/k/high.md", None, 0, None),
+                ("sl-low", "proj", "low", 0.00, 0, 1, "/k/low.md", None, 0, None),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
 
@@ -604,8 +604,8 @@ class UsageBoostRankingTests(unittest.TestCase):
             # Equal legacy base score (0.10). The legacy one-key stable sort
             # preserves query order; raw BM25/slice-id tie-breaks change it.
             data_rows = [
-                ("sl-first", "proj", "first", 0.20, 1, 1, "/k/first.md", 0, None),
-                ("sl-second", "proj", "second", 0.10, 0, 1, "/k/second.md", 0, None),
+                ("sl-first", "proj", "first", 0.20, 1, 1, "/k/first.md", None, 0, None),
+                ("sl-second", "proj", "second", 0.10, 0, 1, "/k/second.md", None, 0, None),
             ]
             fake_conn = self._mock_usage_search(self._USAGE_PRAGMA_ROWS, data_rows)
 
@@ -833,6 +833,17 @@ def test_build_index_excludes_generic_title(tmp_path):
     hits = S.search(mr, "retrieval", project="proj", limit=10, include_decayed=True)
     assert [h["slice_id"] for h in hits] == [concrete_sid]
     assert (mr / "knowledge" / "proj" / f"{generic_title}--{generic_sid}.md").exists()
+
+
+def test_search_returns_captured_at(tmp_path):
+    from paulsha_hippo.moc import search as S
+
+    k = tmp_path / "knowledge" / "proj"; k.mkdir(parents=True)
+    (k / "a.md").write_text("---\nmemory_layer: knowledge\nslice_id: sl-aaaaaaaaaaaaaaaa\nproject: proj\n"
+                            "title: Alpha\ncaptured_at: '2026-06-29T00:00:00Z'\n---\nalpha body\n", encoding="utf-8")
+    S.build_index(tmp_path, link_weights={})
+    hit = S.search(tmp_path, "alpha", project="proj", limit=5, include_decayed=False)[0]
+    assert hit["captured_at"] == "2026-06-29T00:00:00Z"
 
 
 if __name__ == "__main__":

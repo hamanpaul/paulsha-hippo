@@ -39,6 +39,13 @@ def test_format_shortlist_empty_is_empty_string():
     assert format_shortlist([]) == ""
 
 
+def test_format_shortlist_show_mode_appends_slice_id_and_command():
+    out = format_shortlist([{"title": "T", "summary": "s", "path": "/m/k/a.md", "slice_id": "sl-1"}],
+                           hint="show", show_command="/v/python -m paulsha_hippo show --memory-root /m --agent --tool claude-code --session-id s1")
+    assert "hippo show" in out and out.rstrip().endswith("— /m/k/a.md — sl-1")
+    assert "Read 開啟" not in out
+
+
 def test_to_fts_query_drops_stopwords():
     q = to_fts_query("how do I fix the login bug")
     assert '"fix"' in q and '"login"' in q and '"bug"' in q

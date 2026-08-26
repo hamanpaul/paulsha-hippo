@@ -27,8 +27,14 @@ if str(_HOOKS_DIR) not in sys.path:
 
 
 _ORIENTATION = (
+    # issue #136 plan-gap（Task 6 reviewer finding）：build_orientation 的預設句子
+    # 現在跟著 runtime_flags 的 read_hint（預設 "show"）走，措辭與 Task 6 換過的
+    # prompt-time shortlist hint（retrieval.py _SHORTLIST_HINT_SHOW）同款——這裡是
+    # build_orientation 完全被 mock 掉時的替代回傳值，只是要跟真實預設保持一致，
+    # 不再是舊版「用 Read 開啟」。
     "# 記憶 — proj\n\n記憶系統已啟用（本專案約 2 筆 knowledge）。"
-    "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；用 Read 開啟清單中列出的絕對路徑即取全文。"
+    "與當前任務相關的記憶會在每次 prompt 後以短清單浮現；"
+    "執行 `python3 -m paulsha_hippo show --memory-root /x --agent <slice_id>` 取精簡全文，比 Read 省約 70% token。"
 )
 
 

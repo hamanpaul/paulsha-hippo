@@ -243,3 +243,43 @@ def test_frontmatter_uses_title_but_conversation_keeps_all_outcomes():
     assert "title: specific title" in markdown
     assert "## Summary\nsecond outcome" in markdown
     assert "## Conversation\n1. first outcome\n2. second outcome" in markdown
+
+
+def _write_queue(tmp_path: Path, payload: dict) -> Path:
+    q = tmp_path / "runtime" / "queue"; q.mkdir(parents=True, exist_ok=True)
+    p = q / "codex__capture-contract__cap-1.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_payload_commit_lands_in_inbox_provenance_with_hook_source(tmp_path):
+    q = _write_queue(tmp_path, _payload(cwd="/nonexistent", commit="abc123def", git_branch="feature/x", git_dirty=True))
+    preview = pipeline.preview_queue_item(q, memory_root=tmp_path)
+    fm = preview["rendered"].split("---")[1]
+    assert "  commit: abc123def" in fm
+    assert "  commit_source: hook" in fm
+    assert "  branch: feature/x" in fm
+    assert '  dirty: "true"' in fm
+
+
+def test_missing_commit_falls_back_to_import_discovery(tmp_path, monkeypatch):
+    from paulsha_hippo.importer import _git
+    monkeypatch.setattr(_git, "git_toplevel", lambda cwd: "/repo/top")
+    monkeypatch.setattr(_git, "git_remote", lambda top: "github.com/o/r")
+    monkeypatch.setattr(_git, "git_main_toplevel", lambda top: top)
+    monkeypatch.setattr(_git, "git_head", lambda top: "f" * 40)
+    q = _write_queue(tmp_path, _payload(cwd="/repo/top"))
+    fm = pipeline.preview_queue_item(q, memory_root=tmp_path)["rendered"].split("---")[1]
+    assert "  commit: " + "f" * 40 in fm
+    assert "  commit_source: import-discovery" in fm
+    assert "  branch:" not in fm and "  dirty:" not in fm
+
+
+def test_no_commit_anywhere_stays_unknown_without_source_lie(tmp_path, monkeypatch):
+    from paulsha_hippo.importer import _git
+    monkeypatch.setattr(_git, "git_toplevel", lambda cwd: None)
+    monkeypatch.setattr(_git, "git_head", lambda top: None)
+    q = _write_queue(tmp_path, _payload(cwd="/nowhere"))
+    fm = pipeline.preview_queue_item(q, memory_root=tmp_path)["rendered"].split("---")[1]
+    assert "  commit: _unknown" in fm
+    assert "  commit_source:" not in fm

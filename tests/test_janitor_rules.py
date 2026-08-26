@@ -11,6 +11,8 @@ from paulsha_hippo.janitor.record_source import KnowledgeRecord
 
 CFG = JanitorConfig(schema_version="1", default_decay_age_days=90, by_artifact_kind={},
                     check_provenance_path=True, check_provenance_commit=False, decay_superseded=True)
+CFG_COMMIT = JanitorConfig(schema_version="1", default_decay_age_days=90, by_artifact_kind={},
+                           check_provenance_path=True, check_provenance_commit=True, decay_superseded=True)
 HASH = "cfg-hash"
 NOW = "2026-05-31T00:00:00Z"
 
@@ -70,6 +72,19 @@ class DecayRuleTests(unittest.TestCase):
         events = rules.plan_scan([_rec(captured="2020-01-01T00:00:00Z")], {}, {}, CFG, NOW, HASH, source_path_exists=_PATH_OK)
         self.assertEqual(events[0]["original_ref"]["slice_id"], "sl-1")
         self.assertEqual(events[0]["original_ref"]["source_key"], "claude:s1")
+
+
+class ProvenanceCommitTests(unittest.TestCase):
+    def test_dangling_commit_decays_when_enabled(self):
+        ev = rules.plan_scan([_rec(captured="2026-05-30T00:00:00Z")], {}, {}, CFG_COMMIT, NOW, HASH,
+                             source_path_exists=_PATH_OK, source_commit_exists=lambda r: False)
+        self.assertEqual(ev[0]["reason"], "source_invalid"); self.assertEqual(ev[0]["detail"]["check"], "provenance_commit")
+
+    def test_unknown_or_disabled_never_decays(self):
+        self.assertEqual(rules.plan_scan([_rec(captured="2026-05-30T00:00:00Z")], {}, {}, CFG_COMMIT, NOW, HASH,
+                                         source_path_exists=_PATH_OK, source_commit_exists=lambda r: None), [])
+        self.assertEqual(rules.plan_scan([_rec(captured="2026-05-30T00:00:00Z")], {}, {}, CFG, NOW, HASH,
+                                         source_path_exists=_PATH_OK, source_commit_exists=lambda r: False), [])
 
 
 class ReactivationRuleTests(unittest.TestCase):

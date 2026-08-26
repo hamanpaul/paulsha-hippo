@@ -472,9 +472,9 @@ def _slice_meta_has_usage_columns(conn: sqlite3.Connection) -> bool:
 
 
 def _row_read_count(row: tuple) -> int:
-    if len(row) <= 7:
+    if len(row) <= 8:
         return 0
-    value = row[7]
+    value = row[8]
     return value if isinstance(value, int) and value > 0 else 0
 
 
@@ -498,7 +498,7 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
         has_usage_cols = _slice_meta_has_usage_columns(conn)
         usage_select = ", m.read_count, m.last_read_at" if has_usage_cols else ""
         sql = (f"SELECT f.slice_id, m.project, f.title, bm25(slices_fts) AS bm, "
-               f"m.link_weight, m.active, m.path{usage_select} "
+               f"m.link_weight, m.active, m.path, m.captured_at{usage_select} "
                "FROM slices_fts f JOIN slice_meta m ON m.slice_id = f.slice_id "
                "WHERE slices_fts MATCH ?")
         params: list[object] = [match_query]
@@ -535,5 +535,6 @@ def search(memory_root: Path, query: str, *, project: str | None, limit: int,
             return (base_score - boost, base_score, row[0])
 
         ranked = sorted(rows, key=_sort_key)
-    return [{"slice_id": r[0], "project": r[1], "title": r[2], "score": r[3], "path": r[6]}
+    return [{"slice_id": r[0], "project": r[1], "title": r[2], "score": r[3], "path": r[6],
+              "captured_at": r[7]}
             for r in ranked[:limit]]

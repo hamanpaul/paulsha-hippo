@@ -410,6 +410,60 @@ def _build_parser() -> argparse.ArgumentParser:
     ngroup.add_argument("--apply", action="store_true")
     normalize_tags_p.set_defaults(func=_normalize_tags)
 
+    backfill_provenance_p = knowledge_subparsers.add_parser(
+        "backfill-provenance",
+        help="一次性回填 provenance.commit（近似）與 cites，fix 1b/1c migration (#136)",
+    )
+    backfill_provenance_p.add_argument("--memory-root", required=True)
+    backfill_provenance_p.add_argument(
+        "--project", default=None,
+        help="restrict backfill to this project slug; omit to scan all projects.")
+    bgroup = backfill_provenance_p.add_mutually_exclusive_group()
+    bgroup.add_argument("--dry-run", action="store_true")
+    bgroup.add_argument("--apply", action="store_true")
+    backfill_provenance_p.set_defaults(func=_backfill_provenance)
+
+    mark_episodic_p = knowledge_subparsers.add_parser(
+        "mark-episodic",
+        help="一次性把既存 session 狀態 knowledge note 降層 episodic（可 --revert），fix 4 migration (#136)",
+    )
+    mark_episodic_p.add_argument("--memory-root", required=True)
+    mark_episodic_p.add_argument("--now", default=None)
+    mark_episodic_p.add_argument(
+        "--project", default=None,
+        help="restrict mark-episodic to this project slug; omit to scan all projects.")
+    mark_episodic_p.add_argument(
+        "--revert", default=None, metavar="SLICE_ID",
+        help=(
+            "還原單一 slice：episodic -> knowledge，移除 episodic_reason 與 "
+            "episodic_demoted_by。只還原本指令 --apply 降層過的 note；找不到"
+            "該 slice，或該 slice 是 episodic 但沒有 mark-episodic 標記"
+            "（例如 pipeline 直接降的層）時皆 exit 1。"
+        ))
+    mgroup = mark_episodic_p.add_mutually_exclusive_group()
+    mgroup.add_argument("--dry-run", action="store_true")
+    mgroup.add_argument("--apply", action="store_true")
+    mark_episodic_p.set_defaults(func=_mark_episodic)
+
+    link_supersedes_p = knowledge_subparsers.add_parser(
+        "link-supersedes",
+        help="一次性回填跨 session 同主題 supersedes（auto/review 分層），fix 2b migration (#136)",
+    )
+    link_supersedes_p.add_argument("--memory-root", required=True)
+    link_supersedes_p.add_argument("--now", default=None)
+    link_supersedes_p.add_argument(
+        "--tier", choices=("auto", "review"), default="auto",
+        help="--apply 要寫入哪一層。只有 auto（預設，雙向唯一的同名配對）可以 "
+             "--apply；--apply --tier review 一律拒絕（exit 2）——review 層是「要人"
+             "決定」的模糊配對，勾選報表後改用 --accept 套用。")
+    lgroup = link_supersedes_p.add_mutually_exclusive_group()
+    lgroup.add_argument("--dry-run", action="store_true")
+    lgroup.add_argument("--apply", action="store_true")
+    lgroup.add_argument(
+        "--accept", default=None, metavar="REPORT.jsonl",
+        help="套用報表中 accept 為 true 的那幾行（與 --apply 互斥）。")
+    link_supersedes_p.set_defaults(func=_link_supersedes)
+
     usage_p = memory_subparsers.add_parser("usage")
     # Let argparse accept `hippo usage mark-applied --memory-root ...`; the report path
     # still errors with exit 2 when the flag is omitted.
@@ -490,6 +544,47 @@ def _build_parser() -> argparse.ArgumentParser:
     recall_p.add_argument("--tool", required=True, type=_tool_arg)
     recall_p.add_argument("--session-id", required=True)
     recall_p.set_defaults(func=_recall)
+
+    show_p = memory_subparsers.add_parser(
+        "show", help="印出一筆 knowledge note；--agent 只印精簡 header＋body（省 ~70% token）")
+    show_p.add_argument("ref", help="slice_id 或檔案路徑")
+    show_p.add_argument("--memory-root", required=True)
+    show_p.add_argument("--agent", action="store_true")
+    show_p.add_argument("--tool", default=None)
+    show_p.add_argument("--session-id", default=None)
+    show_p.set_defaults(func=_show)
+
+    followups_p = memory_subparsers.add_parser(
+        "followups", help="follow-up ledger：list/verify/close/extract（issue #136 fix 5）")
+    followups_subparsers = followups_p.add_subparsers(dest="followups_command", required=True)
+
+    followups_list = followups_subparsers.add_parser("list", help="列出 follow-up ledger 項目")
+    followups_list.add_argument("--memory-root", required=True)
+    followups_list.add_argument("--project", default=None)
+    followups_list.add_argument("--status", choices=["open", "all"], default="open")
+    followups_list.add_argument("--json", action="store_true")
+    followups_list.set_defaults(func=_followups_list)
+
+    followups_verify = followups_subparsers.add_parser(
+        "verify", help="唯讀重查每筆 follow-up 引用的 file:line，過時值已不在則自動關閉")
+    followups_verify.add_argument("--memory-root", required=True)
+    followups_verify.add_argument("--project", default=None)
+    followups_verify.set_defaults(func=_followups_verify)
+
+    followups_close = followups_subparsers.add_parser("close", help="手動關閉一筆 follow-up")
+    followups_close.add_argument("id")
+    followups_close.add_argument("--memory-root", required=True)
+    followups_close.add_argument("--reason", required=True)
+    followups_close.set_defaults(func=_followups_close)
+
+    followups_extract = followups_subparsers.add_parser(
+        "extract", help="從 knowledge notes 抽取可行動語句；預設 dry-run，--apply 才落 ledger")
+    followups_extract.add_argument("--memory-root", required=True)
+    followups_extract.add_argument("--project", default=None)
+    followups_extract_mode = followups_extract.add_mutually_exclusive_group()
+    followups_extract_mode.add_argument("--dry-run", action="store_true")
+    followups_extract_mode.add_argument("--apply", action="store_true")
+    followups_extract.set_defaults(func=_followups_extract)
 
     return parser
 
@@ -897,6 +992,115 @@ def _normalize_tags(args: argparse.Namespace) -> int:
     print(json.dumps(summary, ensure_ascii=False))
     if warnings:
         return 1
+    return 0
+
+
+def _backfill_provenance(args: argparse.Namespace) -> int:
+    from . import provenance_backfill
+
+    root = Path(args.memory_root)
+    apply = bool(getattr(args, "apply", False))
+    project = getattr(args, "project", None)
+    summary, warnings = provenance_backfill.run(root, apply=apply, project=project)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False))
+    if warnings:
+        return 1
+    return 0
+
+
+def _mark_episodic(args: argparse.Namespace) -> int:
+    from . import episodic_migration
+
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    revert_id = getattr(args, "revert", None)
+    if revert_id:
+        found, message = episodic_migration.revert(root, revert_id, now=now)
+        payload: dict[str, object] = {"reverted": found, "slice_id": revert_id}
+        if message:
+            payload["message"] = message
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0 if found else 1
+    apply = bool(getattr(args, "apply", False))
+    project = getattr(args, "project", None)
+    summary, warnings = episodic_migration.run(root, apply=apply, now=now, project=project)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False))
+    if warnings:
+        return 1
+    return 0
+
+
+def _link_supersedes(args: argparse.Namespace) -> int:
+    """`hippo knowledge link-supersedes` 的接線；配對邏輯全在 supersedes_link。
+
+    dry-run（預設）只掃描並把 review 候選寫成報表（`runtime/reports/`，不碰任何
+    knowledge note、不寫 ledger），印 `{"auto": n, "review": m, "report": path}`
+    （沒有 review 候選時不寫報表，`report` 為 `null`）；
+    `--apply` 額外寫入 auto 層；`--accept` 只套報表中標成 true 的行。
+
+    `--apply --tier review` 一律拒絕（exit 2）：review 層收的就是「機器判斷不了、
+    要人決定」的模糊配對（Jaccard／tags 交集／related 互指／等時戳），一次全寫等於
+    把那個判斷丟掉，而 supersedes 會讓舊筆被 janitor decay、退出檢索池——批次寫錯
+    的代價是靜默失去知識。報表照寫，人勾選後走 `--accept`。
+    """
+    from . import supersedes_link
+    from .importer import config as importer_config
+
+    root = Path(args.memory_root)
+    now = (args.now or datetime.now(timezone.utc).isoformat()).replace("+00:00", "Z")
+    accept = getattr(args, "accept", None)
+    if accept:
+        report = Path(accept)
+        if not report.is_file():
+            print(f"error: accept report not found: {report}", file=sys.stderr)
+            return 1
+        applied, skipped = supersedes_link.apply_accepted(root, report, now=now)
+        payload: dict[str, object] = {"applied": applied, "report": str(report)}
+        if skipped:
+            payload["skipped"] = skipped
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    # families 是跨專案配對的唯一開關（opt-in）；讀不到 projects.yaml 就退回
+    # 「不跨專案」，比照 hooks/_shortlist_common._families 的 best-effort 語意。
+    # 靜悄悄退回會讓報表莫名變短（跨專案候選全部消失），所以比照 `_dead` 的 ledger
+    # 失敗處理，在 stderr 講一聲。
+    projects_path = importer_config.default_projects_path(root)
+    try:
+        families = tuple(importer_config.load_projects_config(projects_path).families)
+    except Exception as exc:
+        print(f"warning: link-supersedes: 讀不到 projects 設定（{projects_path}）：{exc}；"
+              "本次掃描視為沒有 families（不跨專案配對）", file=sys.stderr)
+        families = ()
+    result = supersedes_link.scan(root, families=families)
+    # 沒有 review 候選就不寫報表：乾淨的記憶庫上跑 dry-run 應該什麼都不留下，
+    # 而不是每跑一次就在 runtime/reports/ 多一個零筆的空檔。
+    report = supersedes_link.write_report(root, result["review"], now=now) if result["review"] else None
+    payload = {
+        "auto": len(result["auto"]),
+        "review": len(result["review"]),
+        "report": str(report) if report is not None else None,
+    }
+    if getattr(args, "apply", False):
+        if args.tier == "review":
+            print(json.dumps(payload, ensure_ascii=False))
+            print("error: link-supersedes: --apply --tier review 會一次寫入全部模糊配對，"
+                  "而 review 層存在的理由就是這些配對要由人決定（寫錯會讓舊筆被 janitor "
+                  "decay、退出檢索池）。"
+                  + (f"報表已產出：{report}；" if report is not None else "本次沒有 review 候選；")
+                  + "把要套用的行改成 `\"accept\": true` 後改跑 "
+                    "`hippo knowledge link-supersedes --memory-root <root> --accept <報表>.jsonl`。",
+                  file=sys.stderr)
+            return 2
+        applied, skipped = supersedes_link.apply_pairs(root, result[args.tier], now=now)
+        payload["applied"] = applied
+        payload["tier"] = args.tier
+        if skipped:
+            payload["skipped"] = skipped
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
@@ -1427,6 +1631,150 @@ def _recall(args: argparse.Namespace) -> int:
         bypass_early_stop=True)
     if block:
         print(block)
+    return 0
+
+
+def _show(args: argparse.Namespace) -> int:
+    """印出一筆 knowledge note（issue #136 fix 3b；fix 11b 補 boundary 遮蔽）。
+
+    ``--agent`` 印精簡 header＋body（省 token）；否則印整檔。``--tool``／
+    ``--session-id`` 必須同時提供才記 read 事件——省下的 Read 仍要讓
+    memory-usage KPI（看過率）看得到，用 usage_read.append_read_event 補記
+    與 hooks/claude_post_tool_use.py 同 schema 的 read 事件。
+
+    印出前一律先經 `show_mod.redact_for_agent`（`policy.check_boundary(
+    "external_to_raw", ...)`）——`--agent`／預設兩種模式都算 memory-consumer，
+    fix 3b 當時漏了這一步。Fail-closed：boundary check 本身炸掉（policy 載入失敗等）
+    一律不印任何內容、一行 warning 到 stderr、exit code 1（issue #136 fix 11b）。
+    `session_ref` 有 `--session-id` 就用它，否則退回 note 自身的 slice_id。
+
+    這個 fail-closed 的 try 只包 `redact_for_agent` 這一步（review round 1
+    修正）：讀檔（`path.read_text`）／解 frontmatter（`_fio.read`）／渲染
+    （`render_agent_view`）任何一步炸掉，都是 note 本身壞掉（編碼、權限、
+    malformed frontmatter 等），不是 boundary 檢查失敗，走自己的 try、印
+    另一行 stderr warning（不含「boundary」字樣）、非零 exit，同樣不印任何
+    內容到 stdout——不可被 boundary 的 fail-closed try 一起吃掉、誤標成
+    policy 失敗。
+
+    read 歸因寫入是 best-effort：印出成功之後才嘗試補記事件；ledger
+    mkdir/open/write 出的任何例外都吃掉、印一行 warning 到 stderr，不影響
+    exit code（review round 1 / Important 1）——note 已經解出來、渲染出來
+    了，一筆記帳失敗不該讓整個指令當掉。
+    """
+    from . import show as show_mod
+
+    root = Path(args.memory_root)
+    try:
+        path = show_mod.resolve_ref(root, args.ref)
+    except show_mod.ShowError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if bool(args.tool) != bool(args.session_id):
+        print("show: --tool 與 --session-id 必須同時提供", file=sys.stderr)
+        return 2
+    try:
+        raw = path.read_text(encoding="utf-8")
+        fm, _ = _fio.read(raw)
+        text = show_mod.render_agent_view(path) if args.agent else raw
+    except Exception as exc:
+        print(f"warning: show: 讀取或解析 note 失敗：{exc}", file=sys.stderr)
+        return 1
+    session_ref = args.session_id or str(fm.get("slice_id", "")) or "_unknown"
+    try:
+        text = show_mod.redact_for_agent(
+            text, project=str(fm.get("project", "")), session_ref=session_ref)
+    except Exception as exc:
+        print(f"warning: show: boundary 檢查失敗，未輸出（fail-closed）：{exc}", file=sys.stderr)
+        return 1
+    sys.stdout.write(text)
+    if args.tool and args.session_id:
+        from .usage_read import append_read_event
+
+        try:
+            append_read_event(
+                root, tool=args.tool, session_id=args.session_id,
+                sl_id=str(fm.get("slice_id", "")), path=path, project=str(fm.get("project", "")))
+        except Exception as exc:
+            print(f"warning: show: read 事件記錄失敗（略過，不影響輸出）：{exc}", file=sys.stderr)
+    return 0
+
+
+def _followups_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _followups_list(args: argparse.Namespace) -> int:
+    """列出 follow-up ledger 項目（issue #136 fix 5）：預設只列 open，--status all 含已關閉。"""
+    from . import followups as fu
+
+    root = Path(args.memory_root)
+    rows = []
+    for fid, state in sorted(fu.fold(root).items()):
+        if args.project and state.get("project") != args.project:
+            continue
+        if args.status == "open" and state.get("state") not in fu.OPEN_STATES:
+            continue
+        rows.append((fid, state))
+    if args.json:
+        print(json.dumps({fid: state for fid, state in rows}, ensure_ascii=False, sort_keys=True))
+        return 0
+    for fid, state in rows:
+        target = state.get("target")
+        target_str = f"{target['path']}:{target['line']}" if target else "-"
+        claim = str(state.get("claim") or "")[:60]
+        print(f"{fid}\t{state.get('state', '-')}\t{state.get('project', '-')}\t{target_str}\t{claim}")
+    return 0
+
+
+def _followups_verify(args: argparse.Namespace) -> int:
+    """對未解決的 follow-up 唯讀重查其引用的 file:line（issue #136 fix 5）。
+
+    roots 取自 registry-aware 的 union 讀取（手寫 `projects.yaml` ∪ generated
+    `project-hippo.yaml`），比照 `importer/project_resolver`：只登記在 registry 而
+    沒進手寫檔的專案否則一律拿不到 root，整批 follow-up 只會得到 `no-root`。
+    純讀取，不寫入被查的 repo 檔案——只有 followups ledger 本身會多一筆事件。
+
+    `followups.enabled` 的 gate 內建在 `followups.verify` 本身（比照 extract_all），
+    這裡不重複判斷；停用時 summary 會帶 `"skipped": "followups.disabled"`。
+    """
+    from . import followups as fu
+    from .importer.config import default_projects_path
+    from .importer.registry import default_registry_path, load_union_projects_config
+
+    root = Path(args.memory_root)
+    projects_cfg = load_union_projects_config(
+        default_projects_path(root), default_registry_path(root))
+    roots_by_project = {p.slug: p.roots for p in projects_cfg.projects}
+    summary = fu.verify(root, roots_by_project=roots_by_project, now=_followups_now(),
+                        project=args.project)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _followups_close(args: argparse.Namespace) -> int:
+    """手動關閉一筆 follow-up（issue #136 fix 5）；id 不存在時非零 exit。"""
+    from . import followups as fu
+
+    root = Path(args.memory_root)
+    if not fu.close(root, args.id, reason=args.reason, now=_followups_now()):
+        print(f"followups close: 找不到 id：{args.id}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _followups_extract(args: argparse.Namespace) -> int:
+    """從 knowledge notes 抽取可行動語句（issue #136 fix 5）；預設 dry-run，--apply 才落 ledger。
+
+    review round 1 finding 3：runtime_flags.followups_enabled 閘門已內建進
+    `followups.extract_all` 本身（`enabled=None` 時 best-effort 讀 config）——這裡不重複
+    判斷，直接把 `apply` 原樣傳下去；config 關掉時 summary 會帶 `"skipped":
+    "followups.disabled"`，落不落 ledger 一律以 `extract_all` 的決定為準。
+    """
+    from . import followups as fu
+
+    root = Path(args.memory_root)
+    summary = fu.extract_all(root, apply=bool(args.apply), now=_followups_now(), project=args.project)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
 

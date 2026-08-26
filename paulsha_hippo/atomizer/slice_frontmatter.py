@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,13 +15,40 @@ if TYPE_CHECKING:
     from .llm_output import SliceProposal
 
 _T4_FIELDS = ("memory_layer", "source_agent", "captured_at", "provenance", "supersedes")
+# provenance sub-keys: repo/commit/path always render, the rest only when present
+# (see importer/frontmatter.py::render_markdown, the upstream producer of this shape).
+PROVENANCE_KEYS = ("repo", "commit", "path", "commit_source", "branch", "dirty")
 # Stage 3 ordered fields first, then T4 + provenance handled specially in render().
 _SCALAR_ORDER = (
     "phase", "project", "slice_id", "artifact_kind", "version", "created_at",
     "created_by", "source_session", "gate_required", "checksum",
-    "memory_layer", "source_agent", "captured_at", "supersedes",
-    "distilled_from", "fragment_ref", "session_title", "title", "atom_title", "tags", "source_fragments", "publication_id",
+    "memory_layer", "episodic_reason", "source_agent", "captured_at", "supersedes",
+    "distilled_from", "fragment_ref", "session_title", "title", "atom_title", "tags", "source_fragments", "cites", "publication_id",
 )
+
+# path:line 引用（issue #136 fix 1c）：negative lookbehind 避免咬到 URL host:port
+# （`http://x:80`）或更長路徑片段中間的 `:`；副檔名白名單排除時間戳
+# （`12:30`）之類假陽性。
+CITE_RE = re.compile(r"(?<![\w/.-])([\w./-]+\.(?:md|py|c|h|cpp|hpp|lds|syscfg|yml|yaml|sh|json|toml|cmake|txt)):(\d{1,6})\b")
+
+
+def extract_cites(body: str, *, limit: int = 32) -> list[dict]:
+    """從 body 抽取 `path:line` 引用，保序去重（以 (path, line) 為鍵），最多 limit 筆。
+
+    純函式、無 I/O——Task 10 的既有 note backfill 與 Task 11 的 follow-up
+    ledger locator 都重用本函式，輸出形狀須維持穩定。
+    """
+    seen: set[tuple[str, int]] = set()
+    out: list[dict] = []
+    for m in CITE_RE.finditer(body or ""):
+        key = (m.group(1), int(m.group(2)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"path": key[0], "line": key[1]})
+        if len(out) >= limit:
+            break
+    return out
 
 
 @dataclass(frozen=True)
@@ -154,6 +182,7 @@ def build_from_proposal(proposal: "SliceProposal", session_meta: dict[str, objec
         "atom_title": proposal.title,
         "tags": normalize_tags(list(proposal.tags)),
         "source_fragments": list(proposal.source_fragment_indices),
+        "cites": extract_cites(body),
     }
     return Slice(
         slice_id=slice_id,
@@ -172,8 +201,11 @@ def validate(frontmatter: dict[str, object], body: str) -> list[str]:
             errors.append(f"missing T4 contract field: {field}")
     if "distiller" not in frontmatter:
         errors.append("missing distiller provenance")
-    if frontmatter.get("memory_layer") != "knowledge":
-        errors.append("memory_layer must be 'knowledge'")
+    layer = frontmatter.get("memory_layer")
+    if layer not in ("knowledge", "episodic"):
+        errors.append("memory_layer must be 'knowledge' or 'episodic'")
+    if layer == "episodic" and not frontmatter.get("episodic_reason"):
+        errors.append("episodic slice requires episodic_reason")
     return errors
 
 
@@ -199,8 +231,9 @@ def render(slice_: Slice) -> str:
     provenance = fm.get("provenance") or {}
     if isinstance(provenance, dict):
         lines.append("provenance:")
-        for pkey in ("repo", "commit", "path"):
-            lines.append(f"  {pkey}: {json.dumps(str(provenance.get(pkey, '')), ensure_ascii=False)}")
+        for pkey in PROVENANCE_KEYS:
+            if pkey in ("repo", "commit", "path") or provenance.get(pkey):
+                lines.append(f"  {pkey}: {json.dumps(str(provenance.get(pkey, '')), ensure_ascii=False)}")
     distiller = fm.get("distiller") or {}
     if isinstance(distiller, dict):
         lines.append("distiller:")

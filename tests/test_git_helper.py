@@ -1,5 +1,5 @@
 from __future__ import annotations
-import subprocess, unittest
+import os, subprocess, unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from paulsha_hippo.importer import _git
@@ -105,3 +105,62 @@ class GitHelperTests(unittest.TestCase):
     def test_git_main_toplevel_non_repo_falls_back_to_input(self) -> None:
         with TemporaryDirectory() as tmp:
             self.assertEqual(_git.git_main_toplevel(tmp), str(tmp))
+
+    def test_git_head_returns_sha_or_none(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            head = _git.git_head(str(repo))
+            self.assertRegex(head, r"^[0-9a-f]{40}$")
+            self.assertIsNone(_git.git_head(None))
+            self.assertIsNone(_git.git_head(tmp))  # 非 repo
+
+    # 迴歸覆蓋：self-review 發現 git_rev_before 缺真 repo 測試後才補上，是在
+    # 實作完成後才加的（未走 TDD RED→GREEN），見 task-10-report.md「Process exception」。
+    def test_rev_before_returns_approx_commit_for_timestamp(self) -> None:
+        # 真 repo、兩個帶明確 commit 日期的 commit（issue #136 fix 1b/1c backfill 用）：
+        # rev-list --before= 近似值須落在正確的一側。
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+            def _commit(msg: str, when: str) -> str:
+                run_env = {**env, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+                subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", msg],
+                                check=True, env=run_env)
+                return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+
+            c1 = _commit("c1", "2026-08-01T00:00:00+00:00")
+            c2 = _commit("c2", "2026-08-10T00:00:00+00:00")
+
+            self.assertEqual(_git.git_rev_before(str(repo), "2026-08-05T00:00:00+00:00"), c1)
+            self.assertEqual(_git.git_rev_before(str(repo), "2026-08-31T00:00:00+00:00"), c2)
+            self.assertIsNone(_git.git_rev_before(str(repo), "2025-01-01T00:00:00+00:00"))
+            self.assertIsNone(_git.git_rev_before(None, "2026-08-05T00:00:00+00:00"))
+            self.assertIsNone(_git.git_rev_before(str(repo), None))
+
+    def test_git_commit_exists(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"; repo.mkdir(); _init_repo(repo)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            head = _git.git_head(str(repo))
+            self.assertTrue(_git.git_commit_exists(str(repo), head))
+            self.assertFalse(_git.git_commit_exists(str(repo), "0" * 40))
+            self.assertIsNone(_git.git_commit_exists(None, head))
+
+    # Review round 1, finding #1: an existing-but-non-git directory (stale or
+    # misconfigured projects.yaml root) must resolve to None ("unknown"), not
+    # be conflated with a definite "commit absent" (False) — a toplevel that
+    # can't be resolved as a git repo at all is a different failure mode from
+    # a resolvable repo that genuinely lacks the commit.
+    def test_git_commit_exists_requires_resolvable_toplevel(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plain = Path(tmp) / "plain"; plain.mkdir()  # 存在但非 git checkout
+            self.assertIsNone(_git.git_commit_exists(str(plain), "0" * 40))
+
+            missing = Path(tmp) / "missing"  # 完全不存在
+            self.assertIsNone(_git.git_commit_exists(str(missing), "0" * 40))

@@ -104,10 +104,29 @@ def render_markdown(
     captured_at: str | None = None,
     memory_layer: str = "inbox",
     provenance_repo: str | None = None,
+    provenance_commit: str | None = None,
+    provenance_commit_source: str | None = None,
+    provenance_branch: str | None = None,
+    provenance_dirty: bool | None = None,
 ) -> str:
     source_artifact = _artifact_name(classifier_bucket)
     captured = captured_at or session.get("ended_at") or session.get("started_at") or "_unknown"
     repo_value = session.get("repo") if provenance_repo is None else provenance_repo
+    commit_value = session.get("commit") if provenance_commit is None else provenance_commit
+    prov_lines = [
+        "provenance:",
+        f"  repo: {_required_frontmatter_value(repo_value)}",
+        f"  commit: {_required_frontmatter_value(commit_value)}",
+        f"  path: {_required_frontmatter_value(session.get('raw_payload_pointer'))}",
+    ]
+    if provenance_commit_source:
+        prov_lines.append(f"  commit_source: {_frontmatter_value(provenance_commit_source)}")
+    branch = session.get("git_branch") if provenance_branch is None else provenance_branch
+    if branch:
+        prov_lines.append(f"  branch: {_frontmatter_value(branch)}")
+    dirty = session.get("git_dirty") if provenance_dirty is None else provenance_dirty
+    if isinstance(dirty, bool):
+        prov_lines.append(f'  dirty: "{"true" if dirty else "false"}"')
     lines = [
         "---",
         f"memory_layer: {_frontmatter_value(memory_layer)}",
@@ -118,10 +137,7 @@ def render_markdown(
         f"title: {_frontmatter_value(session.get('session_title'))}",
         f"title_source: {_frontmatter_value(session.get('title_source') or 'fallback')}",
         f"captured_at: {_frontmatter_value(captured)}",
-        "provenance:",
-        f"  repo: {_required_frontmatter_value(repo_value)}",
-        f"  commit: {_required_frontmatter_value(session.get('commit'))}",
-        f"  path: {_required_frontmatter_value(session.get('raw_payload_pointer'))}",
+        *prov_lines,
         "---",
         "",
         f"# Session {_value(session.get('session_id'))}",

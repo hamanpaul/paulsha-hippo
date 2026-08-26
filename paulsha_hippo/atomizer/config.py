@@ -78,6 +78,7 @@ class AtomizerConfig:
     default_promoter: str = "identity"
     skill_path: str = "skills/atomize-knowledge-slice.md"
     known_projects_file: str = field(default_factory=lambda: str(paths.projects_config_path()))
+    episodic_filter: bool = True
 
 
 def _read_mapping(path: Path) -> Mapping[str, Any]:
@@ -413,6 +414,10 @@ def load_config(
     default_artifact_kind = config_data.get("default_artifact_kind", "report")
     default_phase = config_data.get("default_phase", "review")
 
+    episodic_filter = config_data.get("episodic_filter", True)
+    if not isinstance(episodic_filter, bool):
+        raise AtomizerConfigError("episodic_filter must be a bool")
+
     agent_exec_config = config_data.get("agent_exec", {})
     if using_canonical_runtime_config and agent_exec_config not in (None, "", {}, []):
         raise AtomizerConfigError(
@@ -628,6 +633,7 @@ def load_config(
         default_promoter=default_promoter,
         skill_path=skill_path,
         known_projects_file=known_projects_file,
+        episodic_filter=episodic_filter,
     )
     
     # Compute deterministic hash of effective config

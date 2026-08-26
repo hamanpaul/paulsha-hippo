@@ -203,5 +203,69 @@ class RecordSourceTests(unittest.TestCase):
             self.assertEqual(warnings, [])
 
 
+_SIX_KEY_PROVENANCE = """---
+memory_layer: knowledge
+slice_id: sl-six
+source_agent: claude
+source_session: sess-six
+captured_at: "2026-01-01T00:00:00Z"
+provenance:
+  repo: paulshaclaw
+  commit: deadbeef
+  path: docs/x.md
+  commit_source: git
+  branch: main
+  dirty: "false"
+---
+body
+"""
+
+_THREE_KEY_PROVENANCE = """---
+memory_layer: knowledge
+slice_id: sl-three
+source_agent: claude
+source_session: sess-three
+captured_at: "2026-01-01T00:00:00Z"
+provenance:
+  repo: paulshaclaw
+  commit: deadbeef
+  path: docs/x.md
+---
+body
+"""
+
+
+def test_provenance_key_whitelist_matches_file_key_count(tmp_path):
+    """Guards against future narrowing of the six-key provenance whitelist.
+
+    A knowledge file whose frontmatter carries all six provenance keys
+    (repo/commit/path/commit_source/branch/dirty) must expose all six via
+    KnowledgeRecord.provenance, while a file with only the original three
+    keys must still yield exactly three.
+    """
+    six_root = tmp_path / "six" / "knowledge"
+    six_root.mkdir(parents=True)
+    (six_root / "a.md").write_text(_SIX_KEY_PROVENANCE, encoding="utf-8")
+    six_records, six_warnings = record_source.iter_records(six_root)
+    assert six_warnings == []
+    assert len(six_records) == 1
+    assert dict(six_records[0].provenance) == {
+        "repo": "paulshaclaw",
+        "commit": "deadbeef",
+        "path": "docs/x.md",
+        "commit_source": "git",
+        "branch": "main",
+        "dirty": "false",
+    }
+
+    three_root = tmp_path / "three" / "knowledge"
+    three_root.mkdir(parents=True)
+    (three_root / "a.md").write_text(_THREE_KEY_PROVENANCE, encoding="utf-8")
+    three_records, three_warnings = record_source.iter_records(three_root)
+    assert three_warnings == []
+    assert len(three_records) == 1
+    assert len(three_records[0].provenance) == 3
+
+
 if __name__ == "__main__":
     unittest.main()

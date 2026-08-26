@@ -24,7 +24,7 @@ def test_shortlist_injects_and_records_offered(tmp_path, monkeypatch):
     _seed(tmp_path)
     out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sid1", cwd="/x", prompt="SerialWrap 執行")
     note = str(tmp_path / "knowledge" / "proj" / "a.md")
-    assert note in out and "Read" in out
+    assert note in out and "show --memory-root" in out and "sl-aaaaaaaaaaaaaaaa" in out
     # offered ledger
     led = (tmp_path / "runtime" / "ledger" / "offered.jsonl").read_text(encoding="utf-8")
     assert "sl-aaaaaaaaaaaaaaaa" in led and note in led
@@ -32,6 +32,15 @@ def test_shortlist_injects_and_records_offered(tmp_path, monkeypatch):
     m = json.loads((tmp_path / "runtime" / "wakeup" / "claude-code__sid1.offered.json").read_text())
     assert m["by_path"][note] == "sl-aaaaaaaaaaaaaaaa"
     assert m["by_id"]["sl-aaaaaaaaaaaaaaaa"] == note
+
+
+def test_shortlist_read_hint_flag_restores_read_wording(tmp_path, monkeypatch):
+    from paulsha_hippo import runtime_flags as rf
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    monkeypatch.setattr(SC, "load_flags", lambda: rf.HygieneFlags(read_hint="read"))
+    _seed(tmp_path)
+    out = SC.build_shortlist_and_record(tmp_path, "claude-code", "sidR", cwd="/x", prompt="SerialWrap 執行")
+    assert "Read" in out and "show --memory-root" not in out
 
 
 def test_shortlist_skips_slash_command(tmp_path, monkeypatch):
@@ -643,11 +652,11 @@ def test_publish_offered_ledger_failure_then_retry_is_clean(tmp_path, monkeypatc
     real_append = SC._append_offered_ledger
     calls = {"n": 0}
 
-    def _flaky_append(root, tool, session_id, project, offered):
+    def _flaky_append(root, tool, session_id, project, offered, collapsed=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("disk full")
-        return real_append(root, tool, session_id, project, offered)
+        return real_append(root, tool, session_id, project, offered, collapsed=collapsed)
 
     monkeypatch.setattr(SC, "_append_offered_ledger", _flaky_append)
 

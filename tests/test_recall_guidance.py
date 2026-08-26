@@ -68,5 +68,37 @@ class RecallGuidanceTests(unittest.TestCase):
         self.assertNotIn("mark-applied", ctx)
 
 
+class ShowCommandHintTests(unittest.TestCase):
+    """全支線 review I1：兩個 hint 先前寫死 `hippo show ... --memory-root …`。
+
+    `hippo` 不一定在 PATH 上（wheel／venv／pipx 部署各不相同，`hippo_invocation`
+    就是為此存在），而字面 `…` 是 agent 抄不動的佔位符——照抄就是一條跑不起來的
+    指令。兩者都要由 `format_show_command(root, ...)` 用真實 `--memory-root` 組出。
+    """
+
+    def test_format_show_command_uses_invocation_and_real_memory_root(self):
+        from paulsha_hippo.hooks import _wakeup_common as wc
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = wc.format_show_command(root)
+            self.assertTrue(bare.endswith(f"show --memory-root {root} --agent"))
+            self.assertTrue(bare.startswith(" ".join(wc.hippo_invocation(root))))
+            self.assertNotIn("--tool", bare)
+            self.assertNotIn("--session-id", bare)
+            attributed = wc.format_show_command(root, tool="codex", session_id="sidG")
+            self.assertTrue(attributed.endswith("--agent --tool codex --session-id sidG"))
+
+    def test_recall_guidance_hint_show_command_is_copy_pasteable(self):
+        from paulsha_hippo.hooks import _wakeup_common as wc
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hint = wc.recall_guidance_hint(root, "codex", "sidG", "/x")
+            self.assertNotIn("…", hint)
+            self.assertNotIn("`hippo show", hint)
+            self.assertIn(wc.format_show_command(root, tool="codex", session_id="sidG"), hint)
+
+
 if __name__ == "__main__":
     unittest.main()

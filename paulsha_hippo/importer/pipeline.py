@@ -600,6 +600,13 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
     discovered_remote = normalize_remote(_git.git_remote(discovered_toplevel))
     provenance_repo = discovered_remote or "_unknown"
     main_root = _git.git_main_toplevel(discovered_toplevel)
+    payload_commit = session.get("commit")
+    if payload_commit:
+        provenance_commit, commit_source = str(payload_commit), "hook"
+    else:
+        discovered_head = _git.git_head(discovered_toplevel)
+        provenance_commit = discovered_head or None
+        commit_source = "import-discovery" if discovered_head else None
     # 持久化面只信顯式 remote 鍵（remote_url / remote）：remote_url 的 fallback 鏈含
     # session['repo']（toplevel 路徑形輸入，僅供 resolve_project 比對 match-only），
     # normalize_remote 會把路徑變造成假 remote（work/...、github.com/a/b），不得寫入 registry（#14）。
@@ -647,6 +654,8 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         classifier_bucket=bucket,
         captured_at=captured_at,
         provenance_repo=provenance_repo,
+        provenance_commit=provenance_commit,
+        provenance_commit_source=commit_source,
     )
     return decision
 

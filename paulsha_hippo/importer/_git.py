@@ -88,3 +88,42 @@ def git_main_toplevel(toplevel: str | Path | None) -> Optional[str]:
         return str(toplevel)
     except Exception:
         return str(toplevel)
+
+
+def git_head(toplevel: str | Path | None) -> Optional[str]:
+    """Return HEAD sha for toplevel, or None（best-effort、never raises）。"""
+    if not toplevel:
+        return None
+    return _run_git(["rev-parse", "HEAD"], cwd=toplevel)
+
+
+def git_rev_before(toplevel: str | Path | None, iso_ts: str | None) -> Optional[str]:
+    """`rev-list -1 --before=<ts> HEAD`：近似值（分支可能不同），呼叫端須標 backfill-approx。"""
+    if not toplevel or not iso_ts:
+        return None
+    return _run_git(["rev-list", "-1", f"--before={iso_ts}", "HEAD"], cwd=toplevel) or None
+
+
+def git_commit_exists(toplevel: str | Path | None, sha: str | None) -> Optional[bool]:
+    """`git cat-file -e <sha>^{commit}`：commit 存在→True；不存在→False；
+
+    toplevel/sha 缺、toplevel 無法解析成 git repo（含存在但非 git checkout 的目錄——
+    如 stale/misconfigured projects.yaml root）、git 不可用或逾時 → None（unknown，
+    best-effort、never raises）。「repo 不可解析」與「repo 可解析但 commit 確定不存在」
+    是兩種不同的失敗模式，不可回同一個 False。
+    """
+    if not toplevel or not sha:
+        return None
+    if git_toplevel(toplevel) is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=str(toplevel),
+            capture_output=True,
+            text=True,
+            timeout=_DEFAULT_TIMEOUT,
+        )
+    except Exception:
+        return None
+    return proc.returncode == 0

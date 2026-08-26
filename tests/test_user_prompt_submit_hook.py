@@ -30,7 +30,7 @@ def test_relevant_prompt_injects_shortlist(tmp_path, monkeypatch):
     out = _run(tmp_path, {"hook_event_name": "UserPromptSubmit", "session_id": "s1",
                           "cwd": str(proj_cwd), "prompt": "SerialWrap 執行"})
     ctx = out.get("hookSpecificOutput", {}).get("additionalContext", "")
-    assert "a.md" in ctx and "Read" in ctx
+    assert "a.md" in ctx and "show --memory-root" in ctx
 
 
 def test_error_or_unknown_emits_empty_and_exit0(tmp_path):

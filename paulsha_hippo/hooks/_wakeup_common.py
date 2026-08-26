@@ -162,6 +162,26 @@ def hippo_invocation(root: Path) -> list[str]:
     return ["python3", "-m", "paulsha_hippo"]
 
 
+def format_show_command(root: Path, tool: str | None = None,
+                        session_id: str | None = None) -> str:
+    """組出 `hippo show --agent` 指令字串（供各 hint 共用；行尾自行接 `<slice_id>`）。
+
+    一律走 `hippo_invocation(root)` ＋ 真實 `--memory-root`：`hippo` 不保證在 PATH
+    上（wheel／venv／pipx 部署各不相同，這正是 `hippo_invocation` 存在的理由），
+    寫死 `hippo show ... --memory-root …` 的 hint 對 agent 而言是一條抄不動、也跑
+    不起來的指令。`tool`／`session_id` 兩者皆給時附上歸因參數，`show` 才會替這次
+    讀取記 read 事件（比照 `_shortlist_common` 的 prompt-time shortlist hint）。
+    """
+    import shlex
+
+    argv = hippo_invocation(root) + ["show", "--memory-root", str(root), "--agent"]
+    if tool:
+        argv += ["--tool", tool]
+    if session_id:
+        argv += ["--session-id", session_id]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
 def format_recall_command(root: Path, tool: str, session_id: str, cwd: str | None) -> str:
     """組出顯式 recall 指令字串（tool/session-id 歸因已填、--prompt 留說明佔位）。"""
     import shlex
@@ -185,7 +205,8 @@ def recall_guidance_hint(root: Path, tool: str, session_id: str, cwd: str | None
     return (
         "本平台不會在每次 prompt 自動浮現任務相關記憶；需要任務相關記憶時，執行：\n"
         f"`{format_recall_command(root, tool, session_id, cwd)}`\n"
-        "再用 Read 開啟輸出清單中的絕對路徑取全文。"
+        "再對輸出清單中的 slice_id 執行 "
+        f"`{format_show_command(root, tool=tool, session_id=session_id)} <slice_id>` 取精簡全文。"
     )
 
 
