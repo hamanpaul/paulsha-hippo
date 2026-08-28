@@ -546,7 +546,7 @@ def _build_parser() -> argparse.ArgumentParser:
     recall_p.set_defaults(func=_recall)
 
     show_p = memory_subparsers.add_parser(
-        "show", help="印出一筆 knowledge note；--agent 只印精簡 header＋body（省 ~70% token）")
+        "show", help="印出一筆 knowledge note；--agent 只印精簡 header＋body（省 ~70%% token）")
     show_p.add_argument("ref", help="slice_id 或檔案路徑")
     show_p.add_argument("--memory-root", required=True)
     show_p.add_argument("--agent", action="store_true")

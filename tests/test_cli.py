@@ -1,3 +1,5 @@
+import argparse
+
 import pytest
 
 from paulsha_hippo import cli
@@ -95,3 +97,27 @@ def test_mark_episodic_exit_codes(tmp_path, capsys):
     ]) == 1
     err = capsys.readouterr().err
     assert "warning:" in err
+
+
+def _iter_parsers(parser: argparse.ArgumentParser):
+    """Yield `parser` and every subparser reachable via `add_subparsers()`,
+    recursively (e.g. `followups` nests its own list/verify/close/extract
+    subparsers under the top-level `knowledge`/`memory` ones)."""
+    yield parser
+    subparsers_group = getattr(parser, "_subparsers", None)
+    if subparsers_group is None:
+        return
+    for action in subparsers_group._group_actions:
+        for sub in getattr(action, "choices", {}).values():
+            yield from _iter_parsers(sub)
+
+
+def test_help_renders_for_every_subcommand_without_exception():
+    # issue #139: an un-escaped `%` in a `help=` string (e.g. "~70% token")
+    # made argparse's `%`-formatting of help text raise ValueError at
+    # `--help` time. Render top-level help and every subparser's help
+    # recursively so any future unescaped `%` fails here instead of at
+    # `hippo --help` in the field.
+    parser = cli._build_parser()
+    for sub_parser in _iter_parsers(parser):
+        sub_parser.format_help()
