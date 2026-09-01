@@ -20,6 +20,7 @@
 
 ### Fixed
 - 修 issue #141：四個 atomizer 測試繞過僅在 pytest 下才生效的 `_isolate_runtime_config` fixture（用 `python3 -m unittest` 等方式直接執行時會完全跳過 `conftest.py`），直接讀寫使用者真實 `~/.config/paulsha-hippo/config.yaml`（2026-08-25 生產事故：蓋成單一 fake-agent profile，31 筆 session parked，蒸餾靜默停擺一週）。新增共用 helper `tests/atomizer_config_testutil.py::isolated_atomizer_config()`，四個測試改用它在測試主體內自行隔離 `HIPPO_CONFIG_ROOT`；另新增 `tests/conftest.py` regression guard 比對真實 config 的 bytes 是否被任何測試動過。
+- 修 issue #142：`_split_pass()` 對已有處理狀態的 session_key（`split`／`parked`，或 `promoted`／`no-findings` 且 inbox 內容 hash 未變）完全靜默跳過，重新派送已處理過的文件時 `slices: 0, skipped: 0, warnings: []`，外觀跟「inbox 空的」一樣，實際上文件被略過、原封不動留在 inbox。兩個 skip 分支補上具名 `warnings` 項目與獨立的 summary counter `skipped_already_processed`；跳過語意本身未變。
 - lifecycle 詞彙表改為記憶平面與治理平面的聯集，修復與 `paulsha-cortex` 的跨平面對齊 FAIL：`lib/lifecycle/schema.PHASES` 新增 cortex 的首階段 `claim`，成為 `("claim", "research", "define", "plan", "build", "verify", "review", "ship")`。`claim`（cortex 的 work item 認領）與 `research`（本平面記憶 slice 的調查階段）語意不同、不可互相改名，故採聯集——既有 235 個 `phase: research` slice 零遷移即維持合法。`PHASES` 在本平面只做成員資格檢查與 gates 產生、不決定順序，擴充不改變既有行為，`current_phase` 預設仍為 `research`。三套套件之間維持零 import 依賴，相等性續由 paulshaclaw 的消費端對齊測試守。**本項於 0.1.2 凍結後才落地，不含於 `v0.1.2`，隨 0.1.3 發布。**
 
 ## [0.1.2] - 2026-08-08

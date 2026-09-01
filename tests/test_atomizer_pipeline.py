@@ -264,6 +264,57 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(result2["summary"]["slices"], 0)
             self.assertEqual(len(list((root / "knowledge").rglob("*.md"))), before)
 
+    def test_redispatch_with_existing_split_state_is_observable_not_silent(self):
+        """#142: re-dispatching a doc whose session_key already has processing
+        state (e.g. the session's own hook import ran first) must not be
+        silently swallowed -- the skip is correct, but it has to show up in
+        warnings and a dedicated counter instead of leaving
+        slices/skipped/warnings all zero, indistinguishable from an empty
+        inbox."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = _seed_raw(root)
+            cfg, h = atomizer_config.load_config(override_path=None)
+            processing.append_state(root, session_key="claude:s1", state="split",
+                                    now="2026-05-31T02:00:00Z", config_hash=h,
+                                    fragments=260)
+
+            result = pipeline.run(root, config=cfg, config_hash=h,
+                                  now="2026-05-31T03:00:00Z")
+
+            self.assertEqual(result["summary"]["slices"], 0)
+            self.assertEqual(result["summary"]["skipped_already_processed"], 1)
+            self.assertTrue(any(
+                str(raw) in warning and "claude:s1" in warning and "split" in warning
+                for warning in result["warnings"]
+            ), result["warnings"])
+            self.assertTrue(raw.exists())
+            self.assertEqual(processing.state_of(root, "claude:s1"), "split")
+
+    def test_redispatch_with_unchanged_promoted_content_is_observable_not_silent(self):
+        """Same observability requirement (#142) for the other silent-skip
+        branch: an already-promoted session_key whose inbox content hash is
+        unchanged."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = _seed_raw(root)
+            raw_hash = hashlib.sha256(raw.read_bytes()).hexdigest()
+            cfg, h = atomizer_config.load_config(override_path=None)
+            processing.append_state(root, session_key="claude:s1", state="promoted",
+                                    now="2026-05-31T02:00:00Z", config_hash=h,
+                                    source_inbox_hash=raw_hash, slices=2)
+
+            result = pipeline.run(root, config=cfg, config_hash=h,
+                                  now="2026-05-31T03:00:00Z")
+
+            self.assertEqual(result["summary"]["slices"], 0)
+            self.assertEqual(result["summary"]["skipped_already_processed"], 1)
+            self.assertTrue(any(
+                str(raw) in warning and "claude:s1" in warning and "promoted" in warning
+                for warning in result["warnings"]
+            ), result["warnings"])
+            self.assertTrue(raw.exists())
+
     def test_flow_through_empties_working_layers(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -843,7 +894,7 @@ class PipelineTests(unittest.TestCase):
             _seed_raw(root)
             cfg, h = atomizer_config.load_config(override_path=None)
             warnings: list[str] = []
-            dry_run_split, _ = pipeline._split_pass(root, cfg, h, "2026-05-31T03:00:00Z", False, warnings)
+            dry_run_split, _, _ = pipeline._split_pass(root, cfg, h, "2026-05-31T03:00:00Z", False, warnings)
             self.assertEqual(dry_run_split, 1)
             cached_client = agent_exec.CachingAgentClient(
                 FakeAgentClient(

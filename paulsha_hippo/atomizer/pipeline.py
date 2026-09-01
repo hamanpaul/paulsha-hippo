@@ -794,8 +794,9 @@ def _promote_fragments(
 
 
 def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now: str,
-                dry_run: bool, warnings: list[str]) -> tuple[int, dict[str, list[Fragment]]]:
+                dry_run: bool, warnings: list[str]) -> tuple[int, dict[str, list[Fragment]], int]:
     count = 0
+    skipped_already_processed = 0
     dry_run_fragments: dict[str, list[Fragment]] = {}
     for raw_path in _raw_session_docs(memory_root):
         path_session_key = f"{raw_path.parent.parent.name}:{raw_path.stem}"
@@ -865,6 +866,18 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
         current_event = processing.fold_events(memory_root).get(session_key)
         current_state = str(current_event.get("state", "")) if current_event else ""
         if current_state in {"split", "parked"}:
+            # Idempotency is correct here (re-dispatching a document whose
+            # session_key is still split/parked must not re-split it), but a
+            # silent `continue` left operators unable to tell "nothing to
+            # process" apart from "something was skipped" (issue #142: a
+            # well-formed re-dispatch returned slices/skipped/warnings all
+            # zero and the file sat in inbox untouched, looking identical to
+            # an empty inbox). Surface it instead of changing the skip.
+            warnings.append(
+                f"{raw_path}: skipped (session_key={session_key} already {current_state}); "
+                "re-dispatch with a fresh source_session to force reprocessing"
+            )
+            skipped_already_processed += 1
             continue
         if current_state in {"promoted", "no-findings"}:
             prior_hash = current_event.get("source_inbox_hash") if current_event else None
@@ -872,6 +885,12 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
             # explicit recovery/requeue operation; never guess that an old inbox copy
             # is a new capture.  New-format events re-open only on a proven byte change.
             if not isinstance(prior_hash, str) or prior_hash == source_inbox_hash:
+                warnings.append(
+                    f"{raw_path}: skipped (session_key={session_key} already {current_state}, "
+                    "inbox content unchanged); re-dispatch with a fresh source_session to force "
+                    "reprocessing"
+                )
+                skipped_already_processed += 1
                 continue
         captured_at = str(data.get("captured_at", now))
         provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
@@ -916,7 +935,7 @@ def _split_pass(memory_root: Path, config: AtomizerConfig, config_hash: str, now
             )
         _move(raw_path, archive)
         count += 1
-    return count, dry_run_fragments
+    return count, dry_run_fragments, skipped_already_processed
 
 
 def _render_fragment(project, agent, session, source_artifact, captured_at, provenance, index, body, session_title="") -> str:
@@ -1230,7 +1249,9 @@ def run(memory_root: Path, *, config: AtomizerConfig, config_hash: str, now: str
         from .publication import recover_incomplete
 
         publication_recovery = recover_incomplete(memory_root)
-    split, dry_run_fragments = _split_pass(memory_root, config, config_hash, now, dry_run, warnings)
+    split, dry_run_fragments, skipped_already_processed = _split_pass(
+        memory_root, config, config_hash, now, dry_run, warnings
+    )
     slices, noise_dropped, produced_slice_ids = _promote_pass(
         memory_root, config, config_hash, now, dry_run, promoter, warnings,
         dry_run_fragments, doc_corpus, run_id,
@@ -1238,6 +1259,7 @@ def run(memory_root: Path, *, config: AtomizerConfig, config_hash: str, now: str
     return {
         "run_id": run_id,
         "summary": {"run_id": run_id, "split_sessions": split, "slices": slices, "skipped": len(warnings),
+                    "skipped_already_processed": skipped_already_processed,
                     "noise_dropped": noise_dropped,
                     "config_hash": config_hash, "backend_identity": "external-cli" if not isinstance(promoter, IdentityPromoter) else "identity",
                     "dry_run": dry_run},
