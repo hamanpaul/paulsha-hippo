@@ -22,6 +22,11 @@ from paulsha_hippo import cli as memory_cli, paths
 from paulsha_hippo.agent_profiles import FIXED_TIMEOUT_SECONDS
 from paulsha_hippo.ledger import processing
 
+try:
+    from atomizer_config_testutil import isolated_atomizer_config
+except ImportError:  # pragma: no cover - only hit under `-m unittest tests.x` from repo root
+    from tests.atomizer_config_testutil import isolated_atomizer_config
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "atomizer"
 RAW_FIXTURE = FIXTURES / "raw" / "s1.md"
 SESSION_KEY = "claude:sess-e2e"
@@ -70,7 +75,7 @@ def _cache_json_files(root: Path) -> list[Path]:
 
 class ProseWrappedJsonTests(unittest.TestCase):
     def test_prose_wrapped_json_is_parked_invalid_output(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config():
             root = Path(tmp)
             _seed(root)
             _write_profile(root, "prose-agent.py")
@@ -82,7 +87,7 @@ class ProseWrappedJsonTests(unittest.TestCase):
 
 class TruncatedOutputTests(unittest.TestCase):
     def test_truncated_output_evicts_cache_and_parks_after_budget(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config():
             root = Path(tmp)
             _seed(root)
             _write_profile(root, "truncated-agent.py")
@@ -120,7 +125,7 @@ class TruncatedOutputTests(unittest.TestCase):
 
 class NonZeroExitTests(unittest.TestCase):
     def test_nonzero_exit_is_transient_no_cache_written(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config():
             root = Path(tmp)
             _seed(root)
             _write_profile(root, "failing-agent.py")
@@ -135,7 +140,7 @@ class NonZeroExitTests(unittest.TestCase):
 
 class TimeoutTests(unittest.TestCase):
     def test_timeout_override_cannot_weaken_the_fixed_per_call_contract(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config():
             root = Path(tmp)
             _seed(root)
             _write_profile(root, "hanging-agent.py", timeout_seconds=1)
