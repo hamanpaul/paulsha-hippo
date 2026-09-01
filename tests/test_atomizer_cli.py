@@ -11,9 +11,13 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from paulsha_hippo import cli
-from paulsha_hippo import paths
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.atomizer import cli as atomizer_cli
+
+try:
+    from atomizer_config_testutil import isolated_atomizer_config
+except ImportError:  # pragma: no cover - only hit under `-m unittest tests.x` from repo root
+    from tests.atomizer_config_testutil import isolated_atomizer_config
 
 _RAW = """---
 memory_layer: inbox
@@ -87,7 +91,7 @@ class AtomizeCliLlmTests(unittest.TestCase):
         self.assertEqual(tuple(profiles), cfg.external_profiles)
 
     def test_promoter_llm_uses_stub_agent(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config() as canonical:
             root = Path(tmp)
             raw = root / "inbox" / "research" / "claude" / "2026-06-02" / "s1.md"
             raw.parent.mkdir(parents=True)
@@ -96,7 +100,6 @@ class AtomizeCliLlmTests(unittest.TestCase):
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
             stub = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "fake-agent.py"
             import yaml
-            canonical = paths.atomizer_config_path()
             document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
             document["known_projects_file"] = str(projects)
             document["external_agents"]["profiles"] = [{

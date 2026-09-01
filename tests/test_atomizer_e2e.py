@@ -9,13 +9,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paulsha_hippo import cli as memory_cli
-from paulsha_hippo import paths
 from paulsha_hippo.atomizer import config as atomizer_config
 from paulsha_hippo.atomizer import pipeline
 from paulsha_hippo.atomizer.agent_exec import FakeAgentClient
 from paulsha_hippo.atomizer.llm_promoter import LLMPromoter
 from paulsha_hippo.ledger import processing, relations
 from paulsha_hippo.lib.lifecycle.schema import parse_artifact_text, validate_frontmatter
+
+try:
+    from atomizer_config_testutil import isolated_atomizer_config
+except ImportError:  # pragma: no cover - only hit under `-m unittest tests.x` from repo root
+    from tests.atomizer_config_testutil import isolated_atomizer_config
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "raw" / "s1.md"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -160,14 +164,13 @@ class AtomizerE2ETests(unittest.TestCase):
                 self.assertNotIn("beta body", ledger)
 
     def test_llm_cli_stub_run_writes_gate_valid_slice_with_flow_through(self):
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config() as canonical:
             root = Path(tmp)
             _seed(root)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
             stub = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "fake-agent.py"
             import yaml
-            canonical = paths.atomizer_config_path()
             document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
             document["known_projects_file"] = str(projects)
             document["external_agents"]["profiles"] = [{

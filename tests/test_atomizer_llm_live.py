@@ -10,9 +10,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from paulsha_hippo import backends, cli, paths
+from paulsha_hippo import backends, cli
 from paulsha_hippo.atomizer.agent_exec import AgentExecClient, AgentExecError
 from paulsha_hippo.lib.lifecycle.gate import run_static_gate_check_file
+
+try:
+    from atomizer_config_testutil import isolated_atomizer_config
+except ImportError:  # pragma: no cover - only hit under `-m unittest tests.x` from repo root
+    from tests.atomizer_config_testutil import isolated_atomizer_config
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "atomizer" / "raw" / "s1.md"
 
@@ -74,14 +79,13 @@ class AtomizerLlmLiveMatrixTests(unittest.TestCase):
         except AgentExecError as exc:
             self.skipTest(f"{preset_name} 本機不可用（launch probe）：{exc}")
 
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config() as canonical:
             root = Path(tmp)
             raw = root / "inbox" / "research" / "claude" / "2026-05-31" / "s1.md"
             raw.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(FIXTURE, raw)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            canonical = paths.atomizer_config_path()
             document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
             document["known_projects_file"] = str(projects)
             document["external_agents"]["profiles"] = [{
@@ -140,14 +144,13 @@ class AtomizerLlmLiveTests(unittest.TestCase):
     def test_live_llm_atomize_with_256k_declaration_produces_gate_valid_slice(self):
         import yaml
 
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, isolated_atomizer_config() as canonical:
             root = Path(tmp)
             raw = root / "inbox" / "research" / "claude" / "2026-05-31" / "s1.md"
             raw.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(FIXTURE, raw)
             projects = root / "projects.yaml"
             projects.write_text("projects:\n  - paulshaclaw\n", encoding="utf-8")
-            canonical = paths.atomizer_config_path()
             document = yaml.safe_load(canonical.read_text(encoding="utf-8"))
             document["known_projects_file"] = str(projects)
             document["context_window"] = 262144
