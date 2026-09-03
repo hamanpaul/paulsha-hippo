@@ -99,11 +99,27 @@ Each profile SHALL declare at least `id`, `tier`, `priority`, typed `traits`, al
 
 The default ordered groups SHALL be Tier 1 `claude` and `codex` as difficult-decision judges, Tier 2 `agy` and `cg` as fast-response/heavy-work agents, and Tier 3 `co-gem`, `claude-gem`, and custom local profiles as low-cost fallback. Exact order within a tier SHALL use explicit numeric priority. Traits SHALL be reviewable routing metadata, not free-form instructions that permit the model to choose its successor. The fallback graph SHALL be acyclic and constrained by a global deadline, maximum attempts, maximum agent calls, and per-profile circuit breaker/cooldown. Dream profiles SHALL disable CLI-native model fallback/retry; a CLI for which preflight cannot prove native fallback is disabled SHALL be ineligible, so Hippo remains the sole routing and budget authority.
 
+The global deadline SHALL scale with the number of prompt chunks the session was packed into, bounded by a fixed floor and a fixed ceiling, so that a session's chain budget bears a defined relationship to the work it contains. The per-call timeout SHALL remain a separate fixed bound and MUST NOT be widened by this scaling; hang protection is not negotiable. A profile MAY declare a maximum session size it is suited for; when a session exceeds that declaration the profile SHALL be ineligible for that session, SHALL be recorded in attempt provenance, and MUST NOT consume an agent call.
+
 A valid `no_findings` response SHALL be success and MUST NOT trigger fallback. Allowlisted profile-ineligible, auth, rate-limit, capacity, timeout, transport/process, empty-output, and invalid-output categories MAY advance; deterministic input-contract, policy/config, unsafe, or context-budget failures MUST NOT. Success after one or more failed profiles SHALL be reported as `degraded-success`, retaining every prior failure and the fallback reason. Exhaustion SHALL park the session once.
+
+Chunk outputs that already passed response validation SHALL be retained across profile transitions: the next eligible profile SHALL resume from the first chunk that has no validated output rather than repeating validated work. The prompt sequence SHALL remain frozen and every chunk SHALL still be validated individually. Retention MUST NOT weaken exhaustion semantics: when no profile can complete the remaining chunks the session SHALL still be parked exactly once with no partial publication.
 
 #### Scenario: Primary auth failure falls back deterministically
 - **WHEN** the first Tier 1 profile returns a sanitized auth failure and policy allows fallback
-- **THEN** the next eligible profile in explicit priority order SHALL restart the complete session from frozen input and successful output SHALL be marked `degraded-success`
+- **THEN** the next eligible profile in explicit priority order SHALL continue the session from the first chunk without a validated output and successful output SHALL be marked `degraded-success`
+
+#### Scenario: Chain budget scales with session size
+- **WHEN** a session is packed into more chunks than the fixed floor budget can cover
+- **THEN** the chain deadline SHALL scale with the chunk count up to the fixed ceiling, and each individual agent call SHALL still be bounded by the unchanged per-call timeout
+
+#### Scenario: Oversized session skips an unsuited profile without cost
+- **WHEN** a session's chunk count exceeds a profile's declared maximum session size
+- **THEN** that profile SHALL be ineligible for the session, SHALL appear in attempt provenance, and SHALL consume no agent call
+
+#### Scenario: Validated chunks survive a profile transition
+- **WHEN** a profile validates the first chunks of a session and then fails on a later chunk
+- **THEN** the next eligible profile SHALL be asked only for the chunks that have no validated output, and the validated outputs SHALL be reused rather than regenerated
 
 #### Scenario: Safety failure does not fallback
 - **WHEN** a profile attempt detects an input-contract, policy, unsafe, invalid-config, or context-budget failure
@@ -121,9 +137,15 @@ A valid `no_findings` response SHALL be success and MUST NOT trigger fallback. A
 
 Distillation cache identity SHALL include task class/operation, response-schema hash/version, router-contract version, profile ID/revision, tier, requested model, requested effort, rendered command fingerprint, effective config hash, skill hash, and prompt hash. Processing records and atoms SHALL retain the selected profile/tier, attempt index, requested model/effort, observed model when verifiable, model-verification status, elapsed time, sanitized failure category, fallback reason, and command/config/skill/build identities. A cache entry or staged output from one operation, schema, profile, or profile revision MUST NOT satisfy another.
 
+When more than one profile contributed validated chunks to a single session, provenance SHALL identify the producing profile for each chunk, and the session-level record SHALL report `degraded-success`. A session completed by multiple profiles MUST NOT be recorded as the product of a single profile. Routing declarations that change which profile is eligible for a session SHALL participate in cache-namespace identity so that a routing change cannot replay outputs produced under different routing, while leaving the rendered command fingerprint unchanged when the command itself is unchanged.
+
 #### Scenario: Agent configuration change invalidates cache
 - **WHEN** task class, response schema, router contract, profile, model, effort, command template, config, skill, or prompt changes
 - **THEN** the previous cache entry SHALL not be reused and provenance SHALL identify the new request independently
+
+#### Scenario: Mixed-profile session records a producer per chunk
+- **WHEN** one profile validates some chunks of a session and another profile validates the rest
+- **THEN** provenance SHALL record which profile produced each chunk and the session SHALL be reported as `degraded-success`
 
 ### Requirement: Session semantic content preservation
 
@@ -161,7 +183,7 @@ Each profile SHALL use its CLI-specific flags or isolation mechanism to enforce 
 
 ### Requirement: Explicit canonical LLM disposition
 
-The canonical response SHALL be exactly an object with fields `schema_version`, `disposition`, `reason`, and `findings`. `schema_version` SHALL equal `1`; `disposition` SHALL be either `findings` or `no_findings`; unknown fields and surrounding non-whitespace noise SHALL be invalid. `findings` SHALL contain one or more valid proposals and use `reason=null`; one malformed proposal SHALL invalidate the entire response rather than publish a salvageable subset. When the source session has a known project, that pinned source project SHALL override model re-homing. `no_findings` SHALL contain an empty findings list and a non-empty reason. During one compatibility version, a non-empty legacy proposal array MAY be accepted. A legacy empty array, empty wrapper, empty stdout, malformed type, or unknown field SHALL be invalid and MUST NOT produce `promoted`.
+The canonical response SHALL be exactly an object with fields `schema_version`, `disposition`, `reason`, and `findings`. `schema_version` SHALL equal `1`; `disposition` SHALL be either `findings` or `no_findings`; unknown fields on the canonical wrapper object and surrounding non-whitespace noise SHALL be invalid. `findings` SHALL contain one or more valid proposals and use `reason=null`. A proposal with a hard schema violation — missing or blank `title`, invalid `artifact_kind`, wrong field type, empty `body`, or empty `source_fragment_indices` — SHALL invalidate the entire response rather than publish a salvageable subset, because retrying a partially published response would non-deterministically lose findings. An unknown field on an individual proposal SHALL instead be a soft violation: the field SHALL be dropped deterministically, a warning naming the proposal index and the dropped field names SHALL be recorded for observability, the remaining fields of that proposal and every other proposal SHALL still be validated and produced, and the drop MUST NOT consume a retry or trigger fallback. When the source session has a known project, that pinned source project SHALL override model re-homing. `no_findings` SHALL contain an empty findings list and a non-empty reason. During one compatibility version, a non-empty legacy proposal array MAY be accepted. A legacy empty array, empty wrapper, empty stdout, malformed type, or unknown wrapper field SHALL be invalid and MUST NOT produce `promoted`.
 
 `promoted` SHALL require `accepted_slices >= 1`. Only explicit successful `no_findings` responses from every chunk MAY terminate with zero slices, using the distinct terminal state `no-findings` and retaining the reasons.
 
@@ -174,6 +196,14 @@ Parked evidence SHALL retain only structured failure metadata plus the byte coun
 #### Scenario: Explicit no-findings terminates without a slice
 - **WHEN** every chunk returns a valid `no_findings` response with a non-empty reason
 - **THEN** the session SHALL enter terminal `no-findings`, archive its fragments, and never create a zero-slice promoted record
+
+#### Scenario: Unknown proposal field is soft-repaired without killing the response
+- **WHEN** a response contains valid proposals plus one proposal that carries a schema-unknown field such as `tags2`
+- **THEN** the unknown field SHALL be dropped deterministically with a warning naming the proposal index and the dropped field names, and every proposal — including the repaired one — SHALL be produced without invalidating the response
+
+#### Scenario: Hard proposal violation still invalidates the entire response
+- **WHEN** any proposal in a response is missing `title`, has an invalid `artifact_kind`, an empty `body`, or an empty `source_fragment_indices`
+- **THEN** the entire response SHALL be invalid, no proposal from that response SHALL be published, and the attempt SHALL follow the bounded retry/park path
 
 ### Requirement: Canonical semantic atom title before publication
 
@@ -226,4 +256,38 @@ Per-session promotion SHALL require valid semantic content, canonical non-generi
 #### Scenario: Fully closed atomization run is ok
 - **WHEN** all produced atoms pass semantic and integrity gates and appear in both metadata and FTS index surfaces
 - **THEN** dream SHALL report `ok` with the reconciled produced/indexed counts
+
+### Requirement: Local-harness pass-2 input slicing by fragment indices
+
+The contrib local-vllm harness's second map-reduce pass (per-concept write) SHALL slice the rendered prompt down to the fragment blocks named by the concept's `fragment_indices`, expanded by a ±1 neighbor window, and SHALL preserve the prompt preamble and the `## Output` instruction block verbatim, instead of resending the full fragment payload for every concept. Slicing SHALL be a pure string transformation over the existing `[fragment N]` markers and MUST NOT require any change to the prompt contract produced by the atomizer prompt builder.
+
+When slicing cannot be trusted — no fragment markers are found, the index set is empty, or every index is out of range — the harness SHALL fall back to the unmodified full prompt and SHALL emit a warning; a slicing failure MUST NOT cause the concept write itself to fail.
+
+#### Scenario: Concept write sends only its fragment neighborhood
+- **WHEN** pass 2 writes a concept whose `fragment_indices` cover a strict subset of the session's fragments
+- **THEN** the request payload SHALL contain only the selected fragment blocks (±1 neighbor) plus the preamble and the `## Output` block, and SHALL be smaller than the full prompt
+
+#### Scenario: Untrusted slicing falls back to the full prompt
+- **WHEN** slicing finds no `[fragment N]` markers, or the concept's index set is empty or entirely out of range
+- **THEN** the harness SHALL send the unmodified full prompt, SHALL log a warning, and the concept write SHALL proceed without failing
+
+### Requirement: Skipped-profile provenance on chain-budget exhaustion
+
+When the session chain budget runs out before the router has reached every enabled profile whose task classes match the session — whether the deadline expires at the pre-attempt check (reason `session_deadline`) or the deadline / agent-call budget is exhausted mid-attempt so the chunk loop raises the non-fallback `budget` category (reason `session_budget`) — the router SHALL append one attempt record for each remaining enabled, task-class-matching profile before breaking, using the existing ineligible provenance style: `failure_category="ineligible"`, the applicable reason string, zero elapsed time, and no agent call consumed. A remaining profile whose circuit breaker is currently open SHALL NOT receive a skip record, because the main loop would have silently skipped it even with budget to spare; recording it as budget-skipped would misstate provenance. Skipped-profile records MUST NOT alter dispatch order, deadline arithmetic, fallback semantics, or park behavior, and neither reason string may be added to the fallback-category allowlist. In particular, the exhausted-chain error raised for parking SHALL take its `category`, `profile_id`, `exit_code`, and `stderr` from the terminal attempt that actually ran (or was recorded by the pre-existing ineligible path), never from an appended skip record. Because skip records are appended only after the loop has already decided to break, the attempts list MAY exceed `max_attempts`; the records are provenance-only, park attempt counts derived from the list length therefore include never-executed profiles, and serialization stays bounded by the existing provenance attempt cap. The ordered attempt chain handed to parking SHALL therefore account for every enabled, task-class-matching, non-circuit-open profile, so a profile can no longer vanish from provenance because the chain budget was exhausted before its eligibility was evaluated.
+
+#### Scenario: Deadline break records the profiles it skipped
+- **WHEN** earlier profile attempts consume the entire chain deadline before the router reaches later enabled, task-class-matching profiles
+- **THEN** each skipped profile SHALL appear in attempt provenance as `ineligible` with reason `session_deadline`, consuming no agent call, and the session SHALL otherwise park exactly as before — the raised error's `category` / `profile_id` / `stderr` SHALL come from the last profile that actually ran
+
+#### Scenario: Mid-attempt budget exhaustion records the profiles it skipped
+- **WHEN** the deadline or agent-call budget runs out inside an attempt (e.g. a multi-chunk session whose earlier chunks consume the whole budget), so the chunk loop raises the non-fallback `budget` category and the router breaks
+- **THEN** each remaining enabled, task-class-matching profile SHALL appear in attempt provenance as `ineligible` with reason `session_budget`, consuming no agent call, and the raised error SHALL report the terminal real attempt (`category="budget"`, the failing profile's id)
+
+#### Scenario: Circuit-open remaining profiles keep their silent-skip behavior
+- **WHEN** a chain-budget break occurs while a remaining profile's circuit breaker is open
+- **THEN** that profile SHALL NOT receive a skip record, matching the main loop's silent skip of circuit-open profiles
+
+#### Scenario: Sufficient budget leaves provenance unchanged
+- **WHEN** the chain budget is not exhausted and the router walks the full profile chain
+- **THEN** attempt records SHALL be identical to the pre-change behavior with no skipped-profile records appended
 
