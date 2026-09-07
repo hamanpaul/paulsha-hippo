@@ -220,4 +220,3 @@ The production recovery manifest SHALL enumerate every remaining batch and assig
 #### Scenario: Producer release does not over-claim consumption
 - **WHEN** all deterministic producer/release gates pass but no supported client completes an offered-to-Read trace
 - **THEN** `v0.1.1` MAY publish with automatic consumption downgraded, but Issue #34 SHALL remain open and release notes MUST state the unproven capability
-

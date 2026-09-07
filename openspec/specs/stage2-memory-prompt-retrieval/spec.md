@@ -27,7 +27,7 @@ memory prompt-retrieval hook SHALL 於 UserPromptSubmit 解析 session 的 proje
 - **WHEN** 檢索或注入過程發生任何例外
 - **THEN** hook SHALL log warning、不注入、exit 0，prompt 不受影響
 
-### Requirement: FTS 查詢淨化純函式
+### Requirement: 搜尋查詢的 FTS 淨化套用
 
 `hippo search` CLI 入口與 `search()` 函式 SHALL 於查詢進入 SQLite FTS5 前套用 `to_fts_query()` 進行淨化，防止 `word:` 形式之 column-filter 形查詢觸發 SQLite `no such column` 或語法錯誤。
 
@@ -111,4 +111,3 @@ prompt-retrieval hook 在 `shortlist.collapse_same_topic`（預設 true）開啟
 #### Scenario: flag 關閉回到現行行為
 - **WHEN** `config.yaml` 設 `shortlist.collapse_same_topic: false`
 - **THEN** hook MUST NOT 折疊，offered 記錄 MUST NOT 含 `collapsed`
-

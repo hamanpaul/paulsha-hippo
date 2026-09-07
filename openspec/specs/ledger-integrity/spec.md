@@ -56,4 +56,3 @@ bad-line 計數同步生效），以及上述操作的原子性與冪等性保�
 #### Scenario: quarantine 清單損毀時 fail-closed
 - **WHEN** quarantine 清單存在但無法解析
 - **THEN** 掃描端 SHALL 將該 ledger 的壞行全數計入，SHALL NOT 因清單不可讀而放行
-

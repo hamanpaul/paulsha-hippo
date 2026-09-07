@@ -107,4 +107,3 @@ regressions 與實作，供 current-head review 一次性審閱。
 - **WHEN** candidate 準備開 PR 或 merge
 - **THEN** reviewer 必須先閱讀 frozen plan 與 authority，再以 current head
   的 code、tests、CI 與 review threads 作結論。
-
