@@ -12,3 +12,17 @@ work_items:
       - kind: path
         ref: 'docs/superpowers/plans/2026-08-04-issue-99-cg-max-session-chunks.md'
     excludes: []
+  issue-146-task-memory-payload:
+    title: 'issue-146-task-memory-payload'
+    links:
+      - kind: github_issue
+        ref: 'hamanpaul/paulsha-hippo#146'
+      - kind: path
+        ref: 'docs/superpowers/specs/2026-09-07-issue-146-task-memory-payload-spec.md'
+      - kind: path
+        ref: 'docs/superpowers/specs/2026-09-07-issue-146-task-memory-payload-design.md'
+      - kind: path
+        ref: 'docs/superpowers/plans/2026-09-07-issue-146-task-memory-payload.md'
+      - kind: path
+        ref: 'docs/superpowers/workstreams/issue-146-task-memory-payload/todo.md'
+    excludes: []

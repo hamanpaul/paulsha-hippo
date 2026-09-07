@@ -8,6 +8,9 @@
 ## [Unreleased]
 
 ### Added
+
+- #146 正式規劃：通用 task memory payload、capability-aware delivery、tool-neutral evidence 與 Cortex host adapter 依賴（僅規劃，不代表 runtime 已完成）。
+
 - 新增 repo-local `custom-skills/hippo-memory-kpi/`：唯讀產生 7/30 天 session→atomic note、note machine-valid/searchable、Agent offer→read→applied KPI，固定排除 observer/no-findings 污染並區分 Cortex source material、offer、read、applied 與 Codex 可觀測下限。
 - Issue #136 knowledge 層衛生（provenance）：SessionEnd hook 補截 git commit/branch/dirty 快照，importer/atomizer 貫通六鍵 provenance（新增 `commit_source`/`branch`/`dirty`），新增一次性 migration `hippo knowledge backfill-provenance` 近似回填既有 slice 的 commit 與 cites，janitor 新增可選 `check_provenance_commit` 將 dangling commit 視為 `source_invalid`。
 - Issue #136 knowledge 層衛生（show --agent）：新增 `hippo show --agent <slice_id>` 精簡 note 視圖（省約 70% token）並記 read 歸因；shortlist hint 依新設定 `shortlist.read_hint` 改建議 `hippo show --agent` 換取全文。
