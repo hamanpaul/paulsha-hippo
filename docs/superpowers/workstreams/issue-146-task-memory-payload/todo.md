@@ -15,13 +15,15 @@ work_item: issue-146-task-memory-payload
 
 ## Tasks
 
-- [ ] payload envelope/schema 與 bounded intent candidate contract（RED/GREEN）
+- [x] payload envelope/schema 與 bounded intent candidate contract（RED/GREEN）
   - [x] RED：新增 issue #146 契約回歸測試，固定 schema_version、bounded intent、最多三筆 candidates、deterministic ordering、空候選、provider unavailable、未授權候選與 redaction。
-- [ ] capability-aware delivery modes 與 tool-neutral evidence（RED/GREEN）
+  - [x] GREEN：新增 `paulsha_hippo.task_memory_payload`，落地 envelope builder/validator，固定最多三筆、授權過濾、deterministic ordering 與 shareable-safe redaction。
+- [x] capability-aware delivery modes 與 tool-neutral evidence（RED/GREEN）
   - [x] RED：新增 issue #146 契約回歸測試，固定 inline、snapshot、note_fetch、failure 的 evidence 語意，以及 returned/failed/applied 的可驗證事件邊界。
-- [ ] strict KPI compatibility、inline-not-read 與 fail-closed 測試
+  - [x] GREEN：新增 `summarize_delivery_outcome()`，明確保留 inline/snapshot 不計 read、無 returned 不推導成功、returned+applied 才算 applied。
+- [x] strict KPI compatibility、inline-not-read 與 fail-closed 測試
   - [x] RED：新增 issue #146 契約回歸測試，固定 inline 與 snapshot 不得計入 read、缺少 returned 不得推導成功，且 applied 不可單獨升格為 read。
-- [ ] Hippo core 最小實作與 shareable redaction
+- [x] Hippo core 最小實作與 shareable redaction
 - [ ] Cortex thin adapter 依 #857 沿現行 routing 接入
 - [ ] 每 path 至少 5 筆 canary，eligible authorized retrieval >=95%
 - [ ] 通過第一道 gate 後才執行 utility trial
