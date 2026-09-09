@@ -15,7 +15,7 @@ from paulsha_hippo import ops
 
 _BTIME = 1751900000
 _STARTTIME_TICKS = 5_000_000
-_STABLE_EXISTING_CWD = Path(__file__).resolve().parents[1]
+_STABLE_EXISTING_CWD = Path("/")
 
 
 def make_fake_proc(base: Path) -> Path:

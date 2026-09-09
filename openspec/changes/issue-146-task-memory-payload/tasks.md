@@ -20,7 +20,7 @@ work_item: issue-146-task-memory-payload
 - [ ] Cortex thin adapter 依 hamanpaul/paulsha-cortex#857 接入既有 routing。
 - [ ] 每個 delivery/capability path 至少 5 筆 canary，eligible authorized retrieval >=95%。
 - [ ] 通過第一道 gate 後才執行 utility trial。
-- [x] Governed preflight repair：runtime-health 測試改用穩定且非暫存的既有 cwd fixture，避免 disposable HOME 被誤判為 `cwd-temp-worktree`。
+- [x] Governed preflight repair：runtime-health 測試固定改用 `/` 這個穩定且非暫存的既有 cwd fixture，避免 disposable HOME／temp checkout 被誤判為 `cwd-temp-worktree`。
 - [x] `python3 -m pytest tests/ -q`。
 - [x] `python3 -m policy_check --repo .`。
 - [x] `openspec validate --all --strict`。
