@@ -8,6 +8,7 @@ work_item: issue-146-task-memory-payload
 ## Task 1: payload contract 與 shareable-safe envelope
 
 - [x] RED：新增契約測試，固定 schema_version、bounded intent、最多三筆 candidates、deterministic ordering、空候選、provider unavailable、未授權候選與 redaction。
+- [x] RED repair：將 truncation fixture 擴成四筆 authorized 候選，明確驗證 deterministic first-three truncation，不再是三選三 no-op。
 - [x] GREEN：新增 `paulsha_hippo.task_memory_payload` 的 builder/validator，固定最多三筆、授權過濾、deterministic ordering 與 unknown optional fields 相容。
 
 ## Task 2: delivery mode 與 evidence/read semantics

@@ -30,51 +30,66 @@ def _contract():
 
 def test_task_memory_payload_bounds_candidates_redacts_and_keeps_optional_fields():
     contract = _contract()
+    candidates = [
+        {
+            "ref": "cand-2",
+            "rank": 2,
+            "summary": "Authorized follow-up note",
+            "authorization": {"status": "authorized"},
+            "availability": {"status": "available"},
+            "excerpt": "second candidate body",
+        },
+        {
+            "ref": "cand-1",
+            "rank": 1,
+            "summary": "Authorized first note",
+            "authorization": {"status": "authorized"},
+            "availability": {"status": "available"},
+            "excerpt": "OPENAI_API_KEY=sk-prod-secret-token",
+        },
+        {
+            "ref": "cand-4",
+            "rank": 4,
+            "summary": "Provider offline note",
+            "authorization": {"status": "authorized"},
+            "availability": {
+                "status": "unavailable",
+                "reason": "provider_unavailable",
+            },
+            "excerpt": "body should not be required to expose availability",
+        },
+        {
+            "ref": "cand-3",
+            "rank": 3,
+            "summary": "Denied note",
+            "authorization": {
+                "status": "denied",
+                "reason": "permission_denied",
+            },
+            "availability": {"status": "available"},
+            "excerpt": "private denied body",
+        },
+        {
+            "ref": "cand-5",
+            "rank": 5,
+            "summary": "Authorized overflow note",
+            "authorization": {"status": "authorized"},
+            "availability": {"status": "available"},
+            "excerpt": "fifth candidate body",
+        },
+    ]
+    authorized_input_refs = sorted(
+        candidate["ref"]
+        for candidate in candidates
+        if candidate["authorization"]["status"] == "authorized"
+    )
+    assert authorized_input_refs == ["cand-1", "cand-2", "cand-4", "cand-5"]
 
     payload = contract.build_task_memory_payload(
         schema_version="1",
         task_id="task-146-red",
         intent="summarize task memory needed for the current job",
-        candidates=[
-            {
-                "ref": "cand-2",
-                "rank": 2,
-                "summary": "Authorized follow-up note",
-                "authorization": {"status": "authorized"},
-                "availability": {"status": "available"},
-                "excerpt": "second candidate body",
-            },
-            {
-                "ref": "cand-1",
-                "rank": 1,
-                "summary": "Authorized first note",
-                "authorization": {"status": "authorized"},
-                "availability": {"status": "available"},
-                "excerpt": "OPENAI_API_KEY=sk-prod-secret-token",
-            },
-            {
-                "ref": "cand-4",
-                "rank": 4,
-                "summary": "Provider offline note",
-                "authorization": {"status": "authorized"},
-                "availability": {
-                    "status": "unavailable",
-                    "reason": "provider_unavailable",
-                },
-                "excerpt": "body should not be required to expose availability",
-            },
-            {
-                "ref": "cand-3",
-                "rank": 3,
-                "summary": "Denied note",
-                "authorization": {
-                    "status": "denied",
-                    "reason": "permission_denied",
-                },
-                "availability": {"status": "available"},
-                "excerpt": "private denied body",
-            },
-        ],
+        candidates=candidates,
         delivery={
             "mode": "note_fetch",
             "capabilities": {
@@ -91,13 +106,11 @@ def test_task_memory_payload_bounds_candidates_redacts_and_keeps_optional_fields
     assert payload["schema_version"] == "1"
     assert payload["task_id"] == "task-146-red"
     assert payload["intent"] == "summarize task memory needed for the current job"
-    assert [candidate["ref"] for candidate in payload["candidates"]] == [
-        "cand-1",
-        "cand-2",
-        "cand-4",
-    ]
+    selected_refs = [candidate["ref"] for candidate in payload["candidates"]]
+    assert selected_refs == ["cand-1", "cand-2", "cand-4"]
     assert len(payload["candidates"]) == 3
     assert all(candidate["ref"] != "cand-3" for candidate in payload["candidates"])
+    assert "cand-5" not in selected_refs
     assert payload["candidates"][0]["authorization"]["status"] == "authorized"
     assert payload["candidates"][-1]["availability"] == {
         "status": "unavailable",
