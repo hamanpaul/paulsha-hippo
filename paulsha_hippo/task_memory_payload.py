@@ -265,12 +265,12 @@ def _normalize_rank(value: Any) -> int:
 
 def _sanitize_public_text(value: Any, *, field: str, limit: int) -> str:
     text = _require_text(value, field=field)
-    # Secret scrubbing must happen before truncation so boundary splits
-    # cannot leave an unredacted credential prefix behind.
-    text = redact_secret_text(text)
     home = str(Path.home())
     if home and home != "/":
         text = text.replace(home, "~")
+    # Secret scrubbing must happen before truncation so boundary splits
+    # cannot leave an unredacted credential prefix behind.
+    text = redact_secret_text(text)
     return _bounded_text(text, field=field, limit=limit)
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -220,6 +221,47 @@ def test_task_memory_payload_redacts_secret_before_summary_truncation():
     assert len(summary) <= 240
     assert "ghp_" not in summary
     assert "Q9w8E7r6" not in summary
+
+
+def test_task_memory_payload_masks_home_before_secret_redaction(monkeypatch: pytest.MonkeyPatch):
+    contract = _contract()
+    home = str(Path.home())
+    seen: list[str] = []
+
+    def fake_redact_secret_text(text: str) -> str:
+        seen.append(text)
+        return text
+
+    monkeypatch.setattr(contract, "redact_secret_text", fake_redact_secret_text)
+
+    payload = contract.build_task_memory_payload(
+        schema_version="1",
+        task_id="task-146-home-redaction-order",
+        intent="summarize task memory needed for the current job",
+        candidates=[
+            {
+                "ref": "cand-1",
+                "rank": 1,
+                "summary": f"{home}/notes/task.md",
+                "authorization": {"status": "authorized"},
+                "availability": {"status": "available"},
+            }
+        ],
+        delivery={
+            "mode": "note_fetch",
+            "capabilities": {
+                "inline": False,
+                "snapshot": False,
+                "note_fetch": True,
+            },
+        },
+        evidence=[],
+        producer={"id": "hippo-core", "version": "0.1.2"},
+        adapter={"id": "host-adapter"},
+    )
+
+    assert seen == ["~/notes/task.md", "~/notes/task.md"]
+    assert payload["candidates"][0]["summary"] == "~/notes/task.md"
 
 
 def test_delivery_outcome_requires_returned_event_and_keeps_inline_snapshot_out_of_read():
