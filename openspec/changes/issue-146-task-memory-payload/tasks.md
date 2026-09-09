@@ -19,4 +19,8 @@ work_item: issue-146-task-memory-payload
 
 - [ ] Cortex thin adapter 依 hamanpaul/paulsha-cortex#857 接入既有 routing。
 - [ ] 每個 delivery/capability path 至少 5 筆 canary，eligible authorized retrieval >=95%。
-- [ ] `python3 -m pytest tests/ -q`、`python3 -m policy_check --repo .`、`openspec validate --all --strict` 與跨 repo review gate 全綠。
+- [ ] 通過第一道 gate 後才執行 utility trial。
+- [x] `python3 -m pytest tests/ -q`。
+- [x] `python3 -m policy_check --repo .`。
+- [x] `openspec validate --all --strict`。
+- [ ] 跨 repo review gate。

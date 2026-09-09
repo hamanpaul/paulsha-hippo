@@ -22,7 +22,10 @@ work_item: issue-146-task-memory-payload
 - [ ] Cortex thin adapter 依 #857 沿現行 routing 接入
 - [ ] 每 path 至少 5 筆 canary，eligible authorized retrieval >=95%
 - [ ] 通過第一道 gate 後才執行 utility trial
-- [ ] pytest、policy_check、OpenSpec strict 與跨 repo review gate
+- [x] `python3 -m pytest tests/ -q`
+- [x] `python3 -m policy_check --repo .`
+- [x] `openspec validate --all --strict`
+- [ ] 跨 repo review gate
 
 ## Blockers / dependencies
 
