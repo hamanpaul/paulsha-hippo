@@ -148,6 +148,43 @@ def test_task_memory_payload_bounds_candidates_redacts_and_keeps_optional_fields
     assert empty["candidates"] == []
 
 
+def test_task_memory_payload_redacts_secret_before_excerpt_truncation():
+    contract = _contract()
+    token = "ghp_" + "A1b2C3d4" * 5
+
+    payload = contract.build_task_memory_payload(
+        schema_version="1",
+        task_id="task-146-boundary",
+        intent="summarize task memory needed for the current job",
+        candidates=[
+            {
+                "ref": "cand-1",
+                "rank": 1,
+                "summary": "Boundary secret candidate",
+                "authorization": {"status": "authorized"},
+                "availability": {"status": "available"},
+                "excerpt": ("x" * 790) + " " + token + " trailing",
+            }
+        ],
+        delivery={
+            "mode": "note_fetch",
+            "capabilities": {
+                "inline": False,
+                "snapshot": False,
+                "note_fetch": True,
+            },
+        },
+        evidence=[],
+        producer={"id": "hippo-core", "version": "0.1.2"},
+        adapter={"id": "host-adapter"},
+    )
+
+    excerpt = payload["candidates"][0]["excerpt"]
+    assert len(excerpt) <= 800
+    assert "ghp_" not in excerpt
+    assert "A1b2C3d4" not in excerpt
+
+
 def test_delivery_outcome_requires_returned_event_and_keeps_inline_snapshot_out_of_read():
     contract = _contract()
 

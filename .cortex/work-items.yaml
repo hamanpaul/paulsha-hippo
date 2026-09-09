@@ -20,7 +20,7 @@ work_items:
       - kind: openspec
         ref: 'issue-146-task-memory-payload'
       - kind: path
-        ref: 'openspec/changes/issue-146-task-memory-payload/proposal.md'
+        ref: 'openspec/changes/archive/2026-09-09-issue-146-task-memory-payload/proposal.md'
       - kind: path
         ref: 'docs/superpowers/specs/2026-09-07-issue-146-task-memory-payload-spec.md'
       - kind: path
