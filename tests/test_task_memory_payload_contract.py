@@ -185,6 +185,43 @@ def test_task_memory_payload_redacts_secret_before_excerpt_truncation():
     assert "A1b2C3d4" not in excerpt
 
 
+def test_task_memory_payload_redacts_secret_before_summary_truncation():
+    contract = _contract()
+    token = "ghp_" + "Q9w8E7r6" * 5
+
+    payload = contract.build_task_memory_payload(
+        schema_version="1",
+        task_id="task-146-summary-boundary",
+        intent="summarize task memory needed for the current job",
+        candidates=[
+            {
+                "ref": "cand-1",
+                "rank": 1,
+                "summary": ("x" * 230) + " " + token + " trailing",
+                "authorization": {"status": "authorized"},
+                "availability": {"status": "available"},
+                "excerpt": "safe excerpt",
+            }
+        ],
+        delivery={
+            "mode": "note_fetch",
+            "capabilities": {
+                "inline": False,
+                "snapshot": False,
+                "note_fetch": True,
+            },
+        },
+        evidence=[],
+        producer={"id": "hippo-core", "version": "0.1.2"},
+        adapter={"id": "host-adapter"},
+    )
+
+    summary = payload["candidates"][0]["summary"]
+    assert len(summary) <= 240
+    assert "ghp_" not in summary
+    assert "Q9w8E7r6" not in summary
+
+
 def test_delivery_outcome_requires_returned_event_and_keeps_inline_snapshot_out_of_read():
     contract = _contract()
 

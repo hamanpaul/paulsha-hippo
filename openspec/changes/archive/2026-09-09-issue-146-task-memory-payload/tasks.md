@@ -20,6 +20,8 @@ work_item: issue-146-task-memory-payload
 - [x] `openspec validate --all --strict`。
 - [x] Post-archive repair：`_sanitize_public_text()` 改為先做 `redact_secret_text()` 再 bounded truncate，避免 secret 在截斷邊界被腰斬後逃過 redaction。
 - [x] Post-archive repair：`.cortex/work-items.yaml` 的 proposal path 改指向 archive 後實際存在的 `openspec/changes/archive/2026-09-09-issue-146-task-memory-payload/proposal.md`。
+- [x] Post-archive repair follow-up：新增 `_sanitize_public_text()` summary truncation boundary 回歸測試，固定 secret redaction 必須先於 truncate。
+- [x] Post-archive repair follow-up：新增 `.cortex/work-items.yaml` issue #146 path-link 回歸測試，固定 archived proposal path 與其 path links 不得懸空。
 
 Remaining Cortex adapter、canary、utility trial 與 cross-repo handoff follow-up
 另記於 `docs/issue-146-implementation-notes.md`，避免 active OpenSpec `tasks.md`
