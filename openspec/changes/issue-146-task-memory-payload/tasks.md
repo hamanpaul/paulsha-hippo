@@ -19,9 +19,6 @@ work_item: issue-146-task-memory-payload
 - [x] `python3 -m policy_check --repo .`。
 - [x] `openspec validate --all --strict`。
 
-## Follow-up outside this pre-archive candidate
-
-- [ ] Cortex thin adapter 由 hamanpaul/paulsha-cortex#857 依本契約接入既有 routing，不在本 repo 複製 Hippo core。
-- [ ] 每個 delivery/capability path 至少收集 5 筆 canary，並以 per-job authorization evidence 證明 eligible authorized retrieval >=95%。
-- [ ] 僅在第一道 canary gate 通過後才執行 utility trial，且 strict KPI 語意不變，不把 inline／未授權案例算成 read。
-- [ ] Cortex follow-up 落地後再完成跨 repo review 與 runtime handoff gate，本次 candidate 不提前宣稱完成。
+Remaining Cortex adapter、canary、utility trial 與 cross-repo handoff follow-up
+另記於 `docs/issue-146-implementation-notes.md`，避免 active OpenSpec `tasks.md`
+以未完成 checkbox 混入本次 pre-archive candidate。

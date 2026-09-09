@@ -13,8 +13,10 @@
 - `paulsha_hippo.task_memory_payload` 已落地 envelope builder/validator，固定最多三筆、授權過濾、deterministic ordering 與 shareable-safe redaction。
 - `summarize_delivery_outcome()` 已固定 inline/snapshot 不計 read、無 `returned` 不推導成功、`returned`+`applied` 才算 applied。
 
-## Remaining pre-archive work
+## Follow-up outside the active OpenSpec tasks
 
-- Cortex thin adapter 仍由 hamanpaul/paulsha-cortex#857 沿現行 routing 接入。
-- 每個 delivery/capability path 仍需至少 5 筆 canary，且 eligible authorized retrieval >=95% 後才進 utility trial。
-- Manager 端的 authoritative preflight、跨 repo review 與 archive/merge 動作不在本檔宣稱完成。
+- Cortex thin adapter 仍由 hamanpaul/paulsha-cortex#857 沿現行 routing 接入，不在本 repo 複製 Hippo core。
+- 每個 delivery/capability path 仍需至少 5 筆 canary，且要用 per-job authorization evidence 證明 eligible authorized retrieval >=95%。
+- 只有在第一道 canary gate 通過後才進 utility trial；strict KPI 語意維持不變，不把 inline 或未授權案例算成 read。
+- Cortex follow-up 落地後，才補做跨 repo review 與 runtime handoff gate。
+- Manager 端的 authoritative preflight、archive、merge 與 issue closure 動作不在本檔宣稱完成。
