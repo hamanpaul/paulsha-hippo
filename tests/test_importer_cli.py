@@ -142,8 +142,11 @@ class Stage2IntegrationCheckScriptTest(unittest.TestCase):
     def test_stage2_integration_check_succeeds_outside_repo_root(self):
         script = REPO_ROOT / "tests" / "stage2_integration_check.sh"
         repo_local_tmp_parent = REPO_ROOT / ".test-work"
+        repo_local_stage2_tmp = REPO_ROOT / ".psc_tmp"
         if repo_local_tmp_parent.exists():
             subprocess.run(["rm", "-rf", str(repo_local_tmp_parent)], check=False)
+        if repo_local_stage2_tmp.exists():
+            subprocess.run(["rm", "-rf", str(repo_local_stage2_tmp)], check=False)
 
         completed = subprocess.run(
             ["bash", str(script)],
@@ -156,6 +159,7 @@ class Stage2IntegrationCheckScriptTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertIn("[stage2] ok", completed.stdout)
         self.assertFalse(repo_local_tmp_parent.exists())
+        self.assertFalse(repo_local_stage2_tmp.exists())
 
 
 if __name__ == "__main__":

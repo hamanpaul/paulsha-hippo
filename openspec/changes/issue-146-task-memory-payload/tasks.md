@@ -22,6 +22,7 @@ work_item: issue-146-task-memory-payload
 - [ ] 每個 delivery/capability path 至少 5 筆 canary，eligible authorized retrieval >=95%。
 - [ ] 通過第一道 gate 後才執行 utility trial。
 - [x] Governed preflight repair：runtime-health 測試固定改用 `/` 這個穩定且非暫存的既有 cwd fixture，避免 disposable HOME／temp checkout 被誤判為 `cwd-temp-worktree`。
+- [x] Governed preflight repair：`stage2_integration_check.sh` 的 MOC fixture 改放進 EXIT 會清掉的 `TMP_DIR`，並讓 `tests/test_skillopt_valset.py` 清掉空的 `.test-work/skillopt-valset` 父目錄，避免 pytest 後留下 worktree residue。
 - [x] `python3 -m pytest tests/ -q`。
 - [x] `python3 -m policy_check --repo .`。
 - [x] `openspec validate --all --strict`。

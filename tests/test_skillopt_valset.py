@@ -20,6 +20,7 @@ CFG = AtomizerConfig(
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_SANDBOX_ROOT = _REPO_ROOT / ".test-work" / "skillopt-valset"
 
 
 def _split_ids(result: dict[str, list[dict[str, object]]]) -> dict[str, list[str]]:
@@ -31,7 +32,7 @@ def _split_ids(result: dict[str, list[dict[str, object]]]) -> dict[str, list[str
 
 class BuildValsetTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = _REPO_ROOT / ".test-work" / "skillopt-valset" / self._testMethodName
+        self.root = _SANDBOX_ROOT / self._testMethodName
         if self.root.exists():
             shutil.rmtree(self.root)
         self.inbox_root = self.root / "inbox"
@@ -42,6 +43,11 @@ class BuildValsetTests(unittest.TestCase):
     def tearDown(self) -> None:
         if self.root.exists():
             shutil.rmtree(self.root)
+        if _SANDBOX_ROOT.exists() and not any(_SANDBOX_ROOT.iterdir()):
+            _SANDBOX_ROOT.rmdir()
+        test_work_root = _SANDBOX_ROOT.parent
+        if test_work_root.exists() and not any(test_work_root.iterdir()):
+            test_work_root.rmdir()
 
     def _write_inbox_doc(
         self,
