@@ -72,7 +72,7 @@ def summarize_delivery_outcome(
 ) -> dict[str, Any]:
     """Summarize delivery/read semantics without inflating read KPI."""
 
-    normalized_mode = _normalize_mode(mode)
+    normalized_mode = _normalize_mode(mode, field="mode")
     normalized_events = _normalize_events(events or ())
     content_returned = normalized_mode == "note_fetch" and any(
         event["kind"] == "returned" for event in normalized_events
@@ -159,7 +159,9 @@ def _normalize_delivery(delivery: Any) -> dict[str, Any]:
     if not isinstance(delivery, Mapping):
         raise ValueError("delivery must be a mapping")
     normalized = deepcopy(dict(delivery))
-    normalized["mode"] = _normalize_mode(delivery.get("mode"))
+    normalized["mode"] = _normalize_mode(
+        delivery.get("mode"), field="delivery.mode"
+    )
 
     capabilities = delivery.get("capabilities")
     if not isinstance(capabilities, Mapping):
@@ -244,10 +246,10 @@ def _normalize_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     return normalized
 
 
-def _normalize_mode(mode: Any) -> str:
-    value = _require_text(mode, field="delivery.mode")
+def _normalize_mode(mode: Any, *, field: str) -> str:
+    value = _require_text(mode, field=field)
     if value not in ALLOWED_DELIVERY_MODES:
-        raise ValueError(f"delivery.mode must be one of {sorted(ALLOWED_DELIVERY_MODES)}")
+        raise ValueError(f"{field} must be one of {sorted(ALLOWED_DELIVERY_MODES)}")
     return value
 
 

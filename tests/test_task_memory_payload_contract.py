@@ -327,3 +327,32 @@ def test_delivery_outcome_requires_returned_event_and_keeps_inline_snapshot_out_
     assert failed["counts_as_read"] is False
     assert failed["counts_as_applied"] is False
     assert failed["failure_reason"] == "permission_denied"
+
+
+def test_mode_validation_errors_identify_the_calling_contract_field():
+    contract = _contract()
+
+    with pytest.raises(ValueError, match=r"^mode must be one of"):
+        contract.summarize_delivery_outcome(mode="unsupported", events=[])
+
+    payload = contract.build_task_memory_payload(
+        schema_version="1",
+        task_id="task-146-invalid-mode",
+        intent="summarize task memory needed for the current job",
+        candidates=[],
+        delivery={
+            "mode": "ineligible",
+            "capabilities": {
+                "inline": False,
+                "snapshot": False,
+                "note_fetch": False,
+            },
+        },
+        evidence=[],
+        producer={"id": "hippo-core"},
+        adapter={"id": "host-adapter"},
+    )
+    payload["delivery"]["mode"] = "unsupported"
+
+    with pytest.raises(ValueError, match=r"^delivery\.mode must be one of"):
+        contract.validate_task_memory_payload(payload)
