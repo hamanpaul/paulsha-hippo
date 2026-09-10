@@ -214,7 +214,7 @@ PYTHONPATH="$ROOT_DIR" python3 -m paulsha_hippo.cli bundle \
 grep -Fq '"raw_excluded": true' "$DREAM_ROOT/bundle/manifest.json"
 
 echo "[stage2] dream(moc) + search over fixtures"
-MOC_ROOT="$(mktemp -d "$TMP_BASE/moc-XXXXXX")"
+MOC_ROOT="$(mktemp -d "$TMP_DIR/moc-XXXXXX")"
 mkdir -p "$MOC_ROOT/inbox/research/claude/2026-06-03"
 cp "$ROOT_DIR/tests/fixtures/atomizer/raw/s1.md" \
    "$MOC_ROOT/inbox/research/claude/2026-06-03/s1.md"

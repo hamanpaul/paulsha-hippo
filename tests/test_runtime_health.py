@@ -15,6 +15,7 @@ from paulsha_hippo import ops
 
 _BTIME = 1751900000
 _STARTTIME_TICKS = 5_000_000
+_STABLE_EXISTING_CWD = Path("/")
 
 
 def make_fake_proc(base: Path) -> Path:
@@ -119,13 +120,13 @@ class DreamProcessReportTest(unittest.TestCase):
         add_fake_process(
             self.proc, 4243,
             [sys.executable, "-m", "paulsha_hippo.cli", "dream", "run"],
-            cwd_target=Path.home())
+            cwd_target=_STABLE_EXISTING_CWD)
         # 非 dream 的 hippo 進程（importer）不進 dream 報告
         add_fake_process(
             self.proc, 4244,
             [sys.executable, "-m", "paulsha_hippo.importer.cli", "ingest",
              "--queue-item", "/q.json", "--memory-root", "/mem"],
-            cwd_target=Path.home())
+            cwd_target=_STABLE_EXISTING_CWD)
 
         with mock.patch.object(ops.os, "kill",
                                side_effect=AssertionError("報告面不得發 signal")):
@@ -176,12 +177,13 @@ class DreamProcessReportTest(unittest.TestCase):
             (canonical_bin / "python3").resolve().parent,
             (orphan_bin / "python3").resolve().parent)
 
-        # cwd 用 Path.home()：存在且非暫存區，隔離出唯一 reason 只能來自 interpreter
-        # 比對（self.base 在 tempdir 下會另外觸發 cwd-temp-worktree）。
+        # 用穩定且非暫存的既有目錄，避免 governed preflight 把 disposable HOME
+        # （/tmp/<random>）誤帶進 cwd-temp-worktree，才能隔離唯一 reason 來自
+        # interpreter 比對（self.base 在 tempdir 下會另外觸發 cwd-temp-worktree）。
         add_fake_process(
             self.proc, 4242,
             [str(orphan_bin / "python3"), "-m", "paulsha_hippo.cli", "dream", "run"],
-            cwd_target=Path.home())
+            cwd_target=_STABLE_EXISTING_CWD)
 
         reports = ops.dream_process_report(
             proc_root=self.proc,
@@ -203,7 +205,7 @@ class DreamProcessReportTest(unittest.TestCase):
         add_fake_process(
             self.proc, 4242,
             [str(venv_bin / "python3"), "-m", "paulsha_hippo.cli", "dream", "run"],
-            cwd_target=Path.home())
+            cwd_target=_STABLE_EXISTING_CWD)
 
         reports = ops.dream_process_report(
             proc_root=self.proc,

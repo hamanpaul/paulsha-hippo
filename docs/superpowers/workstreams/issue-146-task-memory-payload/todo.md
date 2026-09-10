@@ -15,10 +15,10 @@ work_item: issue-146-task-memory-payload
 
 ## Tasks
 
-- [ ] payload envelope/schema 與 bounded intent candidate contract（RED/GREEN）
-- [ ] capability-aware delivery modes 與 tool-neutral evidence（RED/GREEN）
-- [ ] strict KPI compatibility、inline-not-read 與 fail-closed 測試
-- [ ] Hippo core 最小實作與 shareable redaction
+- [x] payload envelope/schema 與 bounded intent candidate contract（RED/GREEN）
+- [x] capability-aware delivery modes 與 tool-neutral evidence（RED/GREEN）
+- [x] strict KPI compatibility、inline-not-read 與 fail-closed 測試
+- [x] Hippo core 最小實作與 shareable redaction
 - [ ] Cortex thin adapter 依 #857 沿現行 routing 接入
 - [ ] 每 path 至少 5 筆 canary，eligible authorized retrieval >=95%
 - [ ] 通過第一道 gate 後才執行 utility trial
