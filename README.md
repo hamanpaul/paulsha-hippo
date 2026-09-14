@@ -43,6 +43,8 @@ Project registry：設 `project_registry.auto_write: true`（預設 off）後，
 pipeline：hooks ingress → raw → atomize 蒸餾 → ledger/moc → dream（清晨整理）→ wakeup（回灌）。
 `paulsha_hippo/lib/`：自足共用件（lifecycle schema／idle／jsonl 原語），與 [paulshaclaw](https://github.com/hamanpaul/paulshaclaw) 共用。
 
+[互動式架構圖](docs/architecture/architecture.html)（架構事實權威：[`facts.json`](docs/architecture/facts.json)）
+
 ## Version
 
 目前 release candidate 為 `0.1.1`（Issue 34 語意保全、外部 CLI atomization 與可逆 recovery；尚未 tag/release）。版本記錄見 `CHANGELOG.md`；
