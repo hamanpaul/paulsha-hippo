@@ -1,0 +1,446 @@
+{
+  "schema_version": 1,
+  "document_type": "architecture-facts",
+  "repository": {
+    "url": "https://github.com/hamanpaul/paulsha-hippo",
+    "revision": "2ad12050be6262f2ddeef2af512d1361fa53161c"
+  },
+  "scope": {
+    "name": "Hippo 高階執行期記憶生命週期",
+    "includes": [
+      "agent session 擷取與 importer ingress",
+      "atomization、外部 headless backend 與 publication",
+      "dream 維護、ledger、MOC/FTS index 與 wakeup/recall 回灌"
+    ],
+    "excludes": [
+      "安裝、升級與 release packaging 細節",
+      "一次性 migration 與 recovery 子命令內部",
+      "tests、歷史 plans 與 archived OpenSpec changes"
+    ]
+  },
+  "components": [
+    {
+      "id": "agent-hosts",
+      "label": "Agent Hosts",
+      "type": "external",
+      "responsibility": "執行 Claude、Codex 與 Copilot session，產生待擷取內容並消費回灌記憶。",
+      "sublabel": "agent runtimes",
+      "basis": "declared",
+      "evidence": [
+        {
+          "path": "README.md",
+          "line": 23,
+          "end_line": 26,
+          "excerpt_sha256": "ba421fe35d65e6d063289acd3860a3d1aa6fd6a217fa8ac11e1c9e44c8b780dc",
+          "claim": "README 宣告支援的三種 host 與隨包提供的 session hooks。"
+        }
+      ]
+    },
+    {
+      "id": "atomizer",
+      "label": "Atomizer",
+      "type": "backend",
+      "responsibility": "將 inbox session 確定性拆分、promotion、驗證並發布為原子 knowledge slices。",
+      "sublabel": "split → promote → publish",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/pipeline.py",
+          "line": 1241,
+          "end_line": 1258,
+          "excerpt_sha256": "149898a3229df036bff2c06e499f900558a59fef755699c0df996bc5b39141b1",
+          "claim": "Atomizer run 依序執行 split pass 與 promote pass。"
+        }
+      ]
+    },
+    {
+      "id": "dream-orchestrator",
+      "label": "Dream Orchestrator",
+      "type": "backend",
+      "responsibility": "在單一 writer gate 下協調 atomize、janitor、followups 與 MOC/index 維護。",
+      "sublabel": "scheduled consolidation",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/dream/cli.py",
+          "line": 111,
+          "end_line": 130,
+          "excerpt_sha256": "b9fccefa65ef3ac6424f29e724cbf14f2c1ec545083e8155937be04b35cb351e",
+          "claim": "Dream 建立並執行 atomize pass，保留執行結果供後續 reconciliation。"
+        }
+      ]
+    },
+    {
+      "id": "external-backends",
+      "label": "External Headless CLIs",
+      "type": "external",
+      "responsibility": "依宣告式 profile 在隔離 subprocess 中接收 stdin prompt 並回傳 promotion proposal。",
+      "sublabel": "tiered profiles + fallback",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/agent_exec.py",
+          "line": 71,
+          "end_line": 97,
+          "excerpt_sha256": "4194ed1c9b24239bb4b4a12dd327d33705ceee18db373f2bb989727dacb1ec45",
+          "claim": "Agent client 以 allowlisted environment、stdin prompt 與空暫存 cwd 執行外部 CLI。"
+        }
+      ]
+    },
+    {
+      "id": "importer",
+      "label": "Importer",
+      "type": "backend",
+      "responsibility": "解析與去敏 queue payload，決定 project/bucket/idempotency，再原子落盤 inbox 與 import ledger。",
+      "sublabel": "normalize + classify + persist",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/importer/pipeline.py",
+          "line": 669,
+          "end_line": 700,
+          "excerpt_sha256": "8dbd758d4d15296a9cd99a5226e15d00c7e469449fb99a3979628f2fbee33849",
+          "claim": "Importer 在鎖內 archive queue、原子寫 inbox、append ledger 並移除已處理 queue。"
+        }
+      ]
+    },
+    {
+      "id": "inbox-store",
+      "label": "Raw Inbox",
+      "type": "database",
+      "responsibility": "保存依 bucket、tool、日期分流的 normalized session markdown，等待 atomization。",
+      "sublabel": "memory_root/inbox",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/importer/pipeline.py",
+          "line": 565,
+          "end_line": 573,
+          "excerpt_sha256": "9710f0164024b591f29672dc1a8c4fc9a006dfcf50a810a37c7edbfb7bb29a3c",
+          "claim": "Importer 依分類、工具與日期決定 inbox markdown 路徑。"
+        }
+      ]
+    },
+    {
+      "id": "knowledge-store",
+      "label": "Knowledge Store",
+      "type": "database",
+      "responsibility": "以 content-derived slice ID 保存已提交的原子知識與 provenance。",
+      "sublabel": "memory_root/knowledge",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/pipeline.py",
+          "line": 654,
+          "end_line": 704,
+          "excerpt_sha256": "23b699bfdb1600b6506b3dddb38d306f2a516b69e64b5b5bd01ea9dfc442597a",
+          "claim": "Publication transaction 以 content identity 建立 knowledge target，prepare 後 commit。"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-index",
+      "label": "MOC / Retrieval Index",
+      "type": "database",
+      "responsibility": "將有效 knowledge slices 建成 MOC 與 SQLite FTS5 index，供 project-scoped recall。",
+      "sublabel": "retrieval.db + MOCs",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/moc/search.py",
+          "line": 51,
+          "end_line": 68,
+          "excerpt_sha256": "bd676de876d287bbe6c76a2147ae68550c86379afefe675df4144e829cc61496",
+          "claim": "Search 模組定義 canonical retrieval DB、coverage 與 writer lock 路徑。"
+        }
+      ]
+    },
+    {
+      "id": "runtime-ledgers",
+      "label": "Runtime Ledgers",
+      "type": "database",
+      "responsibility": "以 append-only 記錄保存 import、processing、publication、dream 與 usage 生命週期證據。",
+      "sublabel": "runtime/ledger/*.jsonl",
+      "basis": "inferred",
+      "reasoning": "Importer 與 Dream 各自在 runtime 流程中 append 不同 ledger；高階架構將這些同根、append-only 的權威記錄歸為一個資料元件。",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/dream/orchestrator.py",
+          "line": 141,
+          "end_line": 153,
+          "excerpt_sha256": "9b224cc81356ceec9e0a897b07c659ae041ba27820eef8eacbf9998fffb119e1",
+          "claim": "Dream run 將完整狀態與 health append 到 dream ledger。"
+        },
+        {
+          "path": "paulsha_hippo/importer/pipeline.py",
+          "line": 690,
+          "end_line": 699,
+          "excerpt_sha256": "818ae9f22ab9111b949e787e2eae53f57316e4ac592d40f58413231ff19bd29f",
+          "claim": "Importer 對成功與 terminal decision 都 append import ledger。"
+        }
+      ]
+    },
+    {
+      "id": "session-hooks",
+      "label": "Session Hooks",
+      "type": "backend",
+      "responsibility": "在 host lifecycle 邊界擷取 payload、寫入唯一 queue item，並 best-effort 觸發 importer。",
+      "sublabel": "SessionEnd / Stop",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/hooks/codex_session_end.py",
+          "line": 141,
+          "end_line": 155,
+          "excerpt_sha256": "586c28da342055dbadd87b788bbcade031c574b7bdd019dae36a0f9a8143b508",
+          "claim": "Codex hook 原子寫入唯一 queue 檔後呼叫 importer trigger。"
+        }
+      ]
+    },
+    {
+      "id": "wakeup-recall",
+      "label": "Wakeup / Recall",
+      "type": "backend",
+      "responsibility": "解析目前 project，建立 orientation 或 prompt-scoped shortlist，經 boundary redaction 後回灌 agent context。",
+      "sublabel": "orientation + task retrieval",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/hooks/_wakeup_common.py",
+          "line": 275,
+          "end_line": 304,
+          "excerpt_sha256": "6b9b482f791dc2f3f44362726890d83a6194ac45820b99c7d9d55031c98c0a42",
+          "claim": "SessionStart helper 解析 project 並建立 orientation；缺 prompt-time hook 時加入顯式 recall 指引。"
+        }
+      ]
+    }
+  ],
+  "boundaries": [],
+  "relations": [
+    {
+      "id": "agent-hosts-to-session-hooks",
+      "from": "agent-hosts",
+      "to": "session-hooks",
+      "label": "session lifecycle events",
+      "variant": "emphasis",
+      "basis": "declared",
+      "evidence": [
+        {
+          "path": "README.md",
+          "line": 23,
+          "end_line": 26,
+          "excerpt_sha256": "ba421fe35d65e6d063289acd3860a3d1aa6fd6a217fa8ac11e1c9e44c8b780dc",
+          "claim": "支援的 hosts 透過隨包 session hooks 接入 Hippo。"
+        }
+      ]
+    },
+    {
+      "id": "atomizer-to-external-backends",
+      "from": "atomizer",
+      "to": "external-backends",
+      "label": "validated prompt / proposal",
+      "variant": "dashed",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/llm_promoter.py",
+          "line": 346,
+          "end_line": 385,
+          "excerpt_sha256": "48b3f2d6c24be223e0bc193ea298d454cba4c288be0f0fba1b34c98d744aa178",
+          "claim": "LLMPromoter 將 prompt 交給 routed/cached agent client，保存 provenance 並驗證回傳 proposal。"
+        }
+      ]
+    },
+    {
+      "id": "atomizer-to-knowledge-store",
+      "from": "atomizer",
+      "to": "knowledge-store",
+      "label": "committed atomic slices",
+      "variant": "emphasis",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/pipeline.py",
+          "line": 654,
+          "end_line": 704,
+          "excerpt_sha256": "23b699bfdb1600b6506b3dddb38d306f2a516b69e64b5b5bd01ea9dfc442597a",
+          "claim": "Atomizer 將 accepted slices staged 到 knowledge path 並以 transaction commit。"
+        }
+      ]
+    },
+    {
+      "id": "atomizer-to-runtime-ledgers",
+      "from": "atomizer",
+      "to": "runtime-ledgers",
+      "label": "publication + relation evidence",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/pipeline.py",
+          "line": 687,
+          "end_line": 703,
+          "excerpt_sha256": "db5ab7b541f1465b52cc206e25dcf3adf6bd3b53e5ea8e64a44969ff448b5912",
+          "claim": "Publication transaction prepares slice items、edge specs 與 processing metadata 後 commit。"
+        }
+      ]
+    },
+    {
+      "id": "dream-to-atomizer",
+      "from": "dream-orchestrator",
+      "to": "atomizer",
+      "label": "scheduled atomize pass",
+      "variant": "dashed",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/dream/cli.py",
+          "line": 111,
+          "end_line": 130,
+          "excerpt_sha256": "b9fccefa65ef3ac6424f29e724cbf14f2c1ec545083e8155937be04b35cb351e",
+          "claim": "Dream 建立 atomize_fn 並執行 atomizer pipeline。"
+        }
+      ]
+    },
+    {
+      "id": "dream-to-retrieval-index",
+      "from": "dream-orchestrator",
+      "to": "retrieval-index",
+      "label": "MOC + index rebuild",
+      "variant": "dashed",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/dream/cli.py",
+          "line": 171,
+          "end_line": 218,
+          "excerpt_sha256": "90bdeb711ad52aab262dbeccb337ca17b90845592bd2d7d680dcb2afdb13a32d",
+          "claim": "Dream 的 MOC pass 執行 MOC/index 並對本輪 produced slices 做索引 reconciliation。"
+        }
+      ]
+    },
+    {
+      "id": "importer-to-inbox-store",
+      "from": "importer",
+      "to": "inbox-store",
+      "label": "normalized session markdown",
+      "variant": "emphasis",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/importer/pipeline.py",
+          "line": 669,
+          "end_line": 700,
+          "excerpt_sha256": "8dbd758d4d15296a9cd99a5226e15d00c7e469449fb99a3979628f2fbee33849",
+          "claim": "Importer 將 rendered normalized session 原子寫入 inbox。"
+        }
+      ]
+    },
+    {
+      "id": "inbox-store-to-atomizer",
+      "from": "inbox-store",
+      "to": "atomizer",
+      "label": "eligible inbox documents",
+      "variant": "emphasis",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/atomizer/pipeline.py",
+          "line": 65,
+          "end_line": 73,
+          "excerpt_sha256": "8722a5f2abd4d33dc486e170e8264aa1091b30d797fba3dc7181ff094f44d8e5",
+          "claim": "Atomizer 枚舉 memory root inbox 下待處理的 markdown session documents。"
+        }
+      ]
+    },
+    {
+      "id": "knowledge-store-to-retrieval-index",
+      "from": "knowledge-store",
+      "to": "retrieval-index",
+      "label": "eligible knowledge slices",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/moc/search.py",
+          "line": 265,
+          "end_line": 309,
+          "excerpt_sha256": "aac8fd2605bbd6fcc0204dd8906f8998a884c48b7d4ca5c079f5b58953245442",
+          "claim": "Index builder 讀取 knowledge root、lifecycle 與 usage，寫入 FTS 與 slice metadata tables。"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-index-to-wakeup-recall",
+      "from": "retrieval-index",
+      "to": "wakeup-recall",
+      "label": "project-scoped shortlist",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/hooks/_shortlist_common.py",
+          "line": 385,
+          "end_line": 418,
+          "excerpt_sha256": "d75009ce9fd90d1838497bfc3a933004b58ead8981f62972dbd155e66f3c12d1",
+          "claim": "Prompt-time/explicit recall 解析 project 與 query，查詢 retrieval index 後建立 shortlist。"
+        }
+      ]
+    },
+    {
+      "id": "runtime-ledgers-to-retrieval-index",
+      "from": "runtime-ledgers",
+      "to": "retrieval-index",
+      "label": "lifecycle + usage weights",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/moc/search.py",
+          "line": 276,
+          "end_line": 283,
+          "excerpt_sha256": "fffa61c0803f5e6de63b69c4f4792bf67b2add1a3e5247c14a840f5a619bbaa3",
+          "claim": "Index build 讀取 lifecycle events 與 usage ledger aggregation 作為 active/ranking inputs。"
+        }
+      ]
+    },
+    {
+      "id": "session-hooks-to-importer",
+      "from": "session-hooks",
+      "to": "importer",
+      "label": "unique queue item",
+      "variant": "emphasis",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/hooks/codex_session_end.py",
+          "line": 141,
+          "end_line": 155,
+          "excerpt_sha256": "586c28da342055dbadd87b788bbcade031c574b7bdd019dae36a0f9a8143b508",
+          "claim": "Session hook 原子提交 queue path 後 best-effort 觸發 importer。"
+        }
+      ]
+    },
+    {
+      "id": "wakeup-recall-to-agent-hosts",
+      "from": "wakeup-recall",
+      "to": "agent-hosts",
+      "label": "additionalContext / recall result",
+      "variant": "emphasis",
+      "basis": "observed",
+      "evidence": [
+        {
+          "path": "paulsha_hippo/hooks/codex_session_start.py",
+          "line": 34,
+          "end_line": 47,
+          "excerpt_sha256": "5f43c55b83853ed4fbde871a5023d8b617c8f209c10a1897c3ca442583268272",
+          "claim": "Codex SessionStart 將 orientation/recall guidance 放入 hook additionalContext。"
+        }
+      ]
+    }
+  ],
+  "unknowns": [
+    {
+      "id": "external-backend-retention",
+      "question": "外部 headless CLI 所連線的 provider 是否保留 prompt 或 proposal？",
+      "impact": "Hippo 只能證明本地 subprocess 邊界與 credential ownership，不能宣告 provider 端資料保留政策。"
+    }
+  ],
+  "conflicts": []
+}
