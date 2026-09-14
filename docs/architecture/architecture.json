@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "paulsha-hippo 記憶生命週期架構",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/hamanpaul/paulsha-hippo",
+      "provider": "github",
+      "revision": "2ad12050be6262f2ddeef2af512d1361fa53161c"
+    },
+    "views": [
+      {
+        "id": "capture-to-knowledge",
+        "label": "擷取到知識",
+        "focus": ["agent-hosts", "session-hooks", "importer", "inbox-store", "atomizer", "knowledge-store"],
+        "note": "沿著主要寫入路徑，從 agent session 到 committed atomic slices。"
+      },
+      {
+        "id": "dream-maintenance",
+        "label": "Dream 維護",
+        "focus": ["dream-orchestrator", "atomizer", "runtime-ledgers", "retrieval-index"],
+        "note": "Dream 協調 atomize 與 MOC/index reconciliation，並留下 run evidence。"
+      },
+      {
+        "id": "retrieval-loop",
+        "label": "回灌循環",
+        "focus": ["knowledge-store", "runtime-ledgers", "retrieval-index", "wakeup-recall", "agent-hosts"],
+        "note": "Knowledge 與 lifecycle/usage evidence 形成 project-scoped recall，再回到 agent context。"
+      }
+    ],
+    "viewBox": [1350, 820]
+  },
+  "components": [
+    {
+      "id": "agent-hosts",
+      "type": "external",
+      "label": "Agent Hosts",
+      "sublabel": "agent runtimes",
+      "sources": [{"path": "README.md", "line": 23, "end_line": 26}],
+      "pos": [30, 330],
+      "size": [200, 72]
+    },
+    {
+      "id": "atomizer",
+      "type": "backend",
+      "label": "Atomizer",
+      "sublabel": "split → promote → publish",
+      "sources": [{"path": "paulsha_hippo/atomizer/pipeline.py", "line": 1241, "end_line": 1258}],
+      "pos": [930, 160],
+      "size": [150, 72]
+    },
+    {
+      "id": "dream-orchestrator",
+      "type": "backend",
+      "label": "Dream Orchestrator",
+      "sublabel": "scheduled consolidation",
+      "sources": [{"path": "paulsha_hippo/dream/cli.py", "line": 111, "end_line": 130}],
+      "pos": [30, 60],
+      "size": [165, 72]
+    },
+    {
+      "id": "external-backends",
+      "type": "external",
+      "label": "External Headless CLIs",
+      "sublabel": "tiered profiles + fallback",
+      "sources": [{"path": "paulsha_hippo/atomizer/agent_exec.py", "line": 71, "end_line": 97}],
+      "pos": [1140, 60],
+      "size": [175, 72]
+    },
+    {
+      "id": "importer",
+      "type": "backend",
+      "label": "Importer",
+      "sublabel": "normalize + classify + persist",
+      "sources": [{"path": "paulsha_hippo/importer/pipeline.py", "line": 669, "end_line": 700}],
+      "pos": [430, 160],
+      "size": [230, 72]
+    },
+    {
+      "id": "inbox-store",
+      "type": "database",
+      "label": "Raw Inbox",
+      "sublabel": "memory_root/inbox",
+      "sources": [{"path": "paulsha_hippo/importer/pipeline.py", "line": 565, "end_line": 573}],
+      "pos": [700, 160],
+      "size": [150, 72]
+    },
+    {
+      "id": "knowledge-store",
+      "type": "database",
+      "label": "Knowledge Store",
+      "sublabel": "memory_root/knowledge",
+      "sources": [{"path": "paulsha_hippo/atomizer/pipeline.py", "line": 654, "end_line": 704}],
+      "pos": [930, 540],
+      "size": [150, 72]
+    },
+    {
+      "id": "retrieval-index",
+      "type": "database",
+      "label": "MOC / Retrieval Index",
+      "sublabel": "retrieval.db + MOCs",
+      "sources": [{"path": "paulsha_hippo/moc/search.py", "line": 51, "end_line": 68}],
+      "pos": [700, 540],
+      "size": [150, 72]
+    },
+    {
+      "id": "runtime-ledgers",
+      "type": "database",
+      "label": "Runtime Ledgers",
+      "sublabel": "runtime/ledger/*.jsonl",
+      "sources": [
+        {"path": "paulsha_hippo/dream/orchestrator.py", "line": 141, "end_line": 153},
+        {"path": "paulsha_hippo/importer/pipeline.py", "line": 690, "end_line": 699}
+      ],
+      "pos": [1140, 560],
+      "size": [165, 72]
+    },
+    {
+      "id": "session-hooks",
+      "type": "backend",
+      "label": "Session Hooks",
+      "sublabel": "SessionEnd / Stop",
+      "sources": [{"path": "paulsha_hippo/hooks/codex_session_end.py", "line": 141, "end_line": 155}],
+      "pos": [230, 160],
+      "size": [150, 72]
+    },
+    {
+      "id": "wakeup-recall",
+      "type": "backend",
+      "label": "Wakeup / Recall",
+      "sublabel": "orientation + task retrieval",
+      "sources": [{"path": "paulsha_hippo/hooks/_wakeup_common.py", "line": 275, "end_line": 304}],
+      "pos": [430, 540],
+      "size": [230, 72]
+    }
+  ],
+  "boundaries": [],
+  "connections": [
+    {"id": "agent-hosts-to-session-hooks", "from": "agent-hosts", "to": "session-hooks", "label": "session lifecycle events", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "labelAt": [200, 300]},
+    {"id": "atomizer-to-external-backends", "from": "atomizer", "to": "external-backends", "label": "validated prompt / proposal", "variant": "dashed", "labelAt": [1110, 155]},
+    {"id": "atomizer-to-knowledge-store", "from": "atomizer", "to": "knowledge-store", "label": "committed atomic slices", "variant": "emphasis", "labelAt": [990, 390]},
+    {"id": "atomizer-to-runtime-ledgers", "from": "atomizer", "to": "runtime-ledgers", "label": "publication + relation evidence", "fromSide": "right", "toSide": "left", "via": [[1110, 196], [1110, 596]], "labelAt": [1095, 470]},
+    {"id": "dream-to-atomizer", "from": "dream-orchestrator", "to": "atomizer", "label": "scheduled atomize pass", "variant": "dashed", "fromSide": "right", "toSide": "top", "via": [[1005, 96]], "labelAt": [570, 80]},
+    {"id": "dream-to-retrieval-index", "from": "dream-orchestrator", "to": "retrieval-index", "label": "MOC + index rebuild", "variant": "dashed", "fromSide": "left", "toSide": "left", "via": [[10, 96], [10, 760], [675, 760], [675, 576]], "labelAt": [350, 775]},
+    {"id": "importer-to-inbox-store", "from": "importer", "to": "inbox-store", "label": "normalized session markdown", "variant": "emphasis", "labelAt": [675, 145]},
+    {"id": "inbox-store-to-atomizer", "from": "inbox-store", "to": "atomizer", "label": "eligible inbox documents", "variant": "emphasis", "labelAt": [890, 145]},
+    {"id": "knowledge-store-to-retrieval-index", "from": "knowledge-store", "to": "retrieval-index", "label": "eligible knowledge slices", "labelAt": [890, 525]},
+    {"id": "retrieval-index-to-wakeup-recall", "from": "retrieval-index", "to": "wakeup-recall", "label": "project-scoped shortlist", "labelAt": [675, 525]},
+    {"id": "runtime-ledgers-to-retrieval-index", "from": "runtime-ledgers", "to": "retrieval-index", "label": "lifecycle + usage weights", "fromSide": "bottom", "toSide": "bottom", "via": [[1222.5, 760], [775, 760]], "labelAt": [1000, 775]},
+    {"id": "session-hooks-to-importer", "from": "session-hooks", "to": "importer", "label": "unique queue item", "variant": "emphasis", "labelAt": [415, 145]},
+    {
+      "id": "wakeup-recall-to-agent-hosts",
+      "from": "wakeup-recall",
+      "to": "agent-hosts",
+      "label": "additionalContext / recall result",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [[400, 576], [130, 576], [130, 410]],
+      "labelAt": [260, 600]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主要循環",
+      "items": ["session 擷取後先進 queue/importer", "原子知識 commit 後才進 retrieval", "wakeup/recall 將 project-scoped context 回灌 host"]
+    },
+    {
+      "dot": "emerald",
+      "title": "可重建證據",
+      "items": ["facts 固定於 source commit 2ad12050", "每個元件與關係都有 source range + SHA-256", "Archify JSON/HTML 只是 facts 的 projection"]
+    },
+    {
+      "dot": "rose",
+      "title": "證據上限",
+      "items": ["外部 CLI 由隔離 subprocess 執行", "provider 端是否保留 prompt/proposal 仍為 unknown", "圖不宣稱遠端資料保留政策"]
+    }
+  ]
+}
