@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `.cortex/work-items.yaml` 補登錄 12 個已交付 cortex work item 的 `github_issue` link（含 closeout 票 #153），清掉 cortex daemon 的 `missing_issue` 反覆觀測；不建 run、不派工。
+
 ### Added
 
 - #146 正式規劃：通用 task memory payload、capability-aware delivery、tool-neutral evidence 與 Cortex host adapter 依賴（僅規劃，不代表 runtime 已完成）。
