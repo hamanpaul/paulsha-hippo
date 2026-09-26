@@ -36,6 +36,7 @@
 
 設定：runtime distiller 唯一來源為 `~/.config/paulsha-hippo/config.yaml`；`HIPPO_*` 僅覆寫路徑。外部 CLI 自行負責登入與 launcher，Hippo 不讀取外部 agent 的認證狀態。
 Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。
+Task memory provider：`hippo task-memory provide|fetch` 提供給外部 adapter 使用的 stdin/stdout JSON protocol；它只接受明確授權 Hippo 且能由 project registry 唯一映射的 repo，並以 manifest/hash 限制 note fetch。完整 envelope、錯誤碼與接線方式見 `docs/task-memory-provider.md`。
 蒸餾只使用宣告式 external headless profiles：Tier 1 `claude`/`codex`、Tier 2 `agy`/`cg`、Tier 3 `co-gem`/`claude-gem`/custom local。每個 profile 自訂 traits、task classes、model、effort 與 tokenized argv；prompt 一律走 stdin，fallback 順序與 bounded budget 見 `docs/backend-matrix.md`。
 
 ## 架構

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -315,6 +316,31 @@ def _build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("--limit", type=int, default=10)
     search_p.add_argument("--include-decayed", action="store_true")
     search_p.set_defaults(func=_search)
+
+    task_memory_p = memory_subparsers.add_parser(
+        "task-memory",
+        help="Cortex task-memory JSON protocol（唯讀、project scoped）",
+    )
+    task_memory_sub = task_memory_p.add_subparsers(
+        dest="task_memory_command", required=True
+    )
+    for command, help_text in (
+        ("provide", "從 stdin envelope 產生 task-memory payload"),
+        ("fetch", "依原 envelope、manifest 與 note_id 取回 note"),
+    ):
+        task_memory_cmd = task_memory_sub.add_parser(command, help=help_text)
+        task_memory_cmd.add_argument(
+            "--memory-root",
+            default=None,
+            help="Hippo memory root；省略時採 HIPPO_MEMORY_ROOT／既有預設",
+        )
+        task_memory_cmd.add_argument(
+            "--timeout-seconds",
+            type=_task_memory_timeout_arg,
+            default=10.0,
+            help="provider 執行上限（0.05–60 秒，預設 10）",
+        )
+        task_memory_cmd.set_defaults(func=_task_memory_protocol)
 
     index_p = memory_subparsers.add_parser("index", help="檢索索引維護")
     index_subparsers = index_p.add_subparsers(dest="index_command", required=True)
@@ -699,6 +725,74 @@ def _search(args: argparse.Namespace) -> int:
     from .moc.cli import run as search_run
 
     return search_run(args)
+
+
+def _task_memory_timeout_arg(value: str) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("timeout must be a number") from exc
+    if not math.isfinite(seconds) or not 0.05 <= seconds <= 60.0:
+        raise argparse.ArgumentTypeError("timeout must be between 0.05 and 60 seconds")
+    return seconds
+
+
+def _task_memory_protocol(args: argparse.Namespace) -> int:
+    """CLI subprocess boundary: stdout carries JSON only; stderr carries code only."""
+
+    import io
+    import logging
+    import sys
+    from contextlib import redirect_stderr
+
+    from .task_memory_provider import (
+        TaskMemoryProvider,
+        TaskMemoryProviderError,
+        deadline,
+        parse_protocol_json,
+        read_stdin_bounded,
+        serialize_protocol_json,
+    )
+
+    previous_logging_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        # Legacy path resolution can emit a deprecation notice directly to
+        # stderr. Protocol callers must receive only the bounded error code.
+        with redirect_stderr(io.StringIO()):
+            provider = TaskMemoryProvider(memory_root=args.memory_root or paths.memory_root())
+            with deadline(args.timeout_seconds):
+                request = parse_protocol_json(read_stdin_bounded(sys.stdin))
+                if args.task_memory_command == "provide":
+                    response = provider.provide(request)
+                elif args.task_memory_command == "fetch":
+                    response = provider.fetch(request)
+                else:
+                    raise TaskMemoryProviderError("invalid-request")
+                encoded = serialize_protocol_json(response)
+        _write_task_memory_stdout(sys.stdout, encoded)
+        return 0
+    except TaskMemoryProviderError as exc:
+        sys.stderr.write(f"hippo-task-memory: {exc.code}\n")
+        return exc.exit_code
+    except TimeoutError:
+        sys.stderr.write("hippo-task-memory: timeout\n")
+        return 11
+    except Exception:
+        sys.stderr.write("hippo-task-memory: provider-error\n")
+        return 18
+    finally:
+        logging.disable(previous_logging_disable)
+
+
+def _write_task_memory_stdout(stream, encoded: bytes) -> None:
+    binary = getattr(stream, "buffer", None)
+    if binary is not None:
+        binary.write(encoded)
+        binary.flush()
+        return
+    stream.write(encoded.decode("utf-8"))
+    stream.flush()
 
 
 def _index_verify(args: argparse.Namespace) -> int:

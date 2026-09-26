@@ -1,0 +1,1 @@
+新增 production task-memory provider 與 `hippo task-memory provide|fetch` subprocess JSON protocol，供外部 adapter 在 live 環境取用。provider 僅在來源清單明列 `hippo`、且 repo remote 唯一對應既有 project registry slug 時搜尋；不允許全域搜尋。輸出包含 canonical SHA-256 manifest，fetch 僅取本次 manifest 綁定 note，並驗證 redacted bytes 的 hash/version。此路徑不寫入既有 offered/read/applied ledger。CLI 契約與接線說明見 `docs/task-memory-provider.md`。
