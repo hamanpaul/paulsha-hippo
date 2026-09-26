@@ -1,0 +1,7 @@
+---
+type: feat
+---
+- #158（#148 H1）push shortlist 確定性收窄 shadow 量測：新增 `shortlist.push_shadow.{enabled,bm25_min_score,max_k,time_budget_ms}` 設定（預設關閉；`bm25_min_score: 0.0` 未校準不設門檻、`max_k: 1`、`time_budget_ms: 50`）。開啟後兩條 UserPromptSubmit hook 照舊注入，另以「`score = -bm25` 門檻＋最多 0–3 則」從同一批已注入的 claim 收窄，將收窄前後的 note id、bm25、名次與注入字元量寫進獨立的 `runtime/ledger/push_shadow.jsonl`；注入內容、offered ledger 與 per-session map 逐位元不變（hook 進程 stdout 測試佐證），不重跑檢索、不呼叫外部 LLM／子行程／網路，失敗與超過時間預算只記 `hooks.log` 並丟棄該筆紀錄；`hippo recall` 不記 shadow；shadow ledger 不記 prompt／query 原文，只記 FTS query 的 sha256 與 token 數。
+- 新增 `hippo shortlist eval`：讀取凍結 query 集（每個 query 附 BM25 top-12 候選 id、分數、相關性標註、每列字元數與標註者／方法），比較現行 top-3 與收窄策略，輸出 Precision@3、Noise@3、Relevant-missed@12 與注入字元量；`--sweep auto` 以樣本內所有 score 為格點校準門檻，推薦「不比 baseline 多漏相關 note」的最大門檻。純計算、不讀 runtime config，同一輸入逐位元可重現。
+- 新增 `hippo shortlist freeze`：唯讀地以與 prompt hook 相同的 FTS 淨化與 `search()` 產生待標註的凍結 query 集骨架（`relevant: null`、每列字元數依實際排版與 redaction 計算），不記 offered、不寫 memory root。
+- 新增 `docs/push-shadow-baseline.md`（shadow 設定與 ledger schema、凍結 query 集格式、指標定義、門檻校準方式、第一版真實樣本的抽樣與標註建議）與合成範例 `tests/fixtures/shortlist_eval/synthetic_frozen_queries.json`；不改 recall／retrieval 排序演算法。

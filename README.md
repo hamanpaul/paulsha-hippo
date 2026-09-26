@@ -28,7 +28,7 @@
 
 ## Usage
 
-日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo show --agent <slice_id>`（精簡 note 視圖，省 ~70% token）／`hippo followups list|verify|close|extract`（可行動語句 ledger）／`hippo knowledge backfill-provenance|link-supersedes|mark-episodic`（一次性 migration，先 dry-run）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
+日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo show --agent <slice_id>`（精簡 note 視圖，省 ~70% token）／`hippo followups list|verify|close|extract`（可行動語句 ledger）／`hippo knowledge backfill-provenance|link-supersedes|mark-episodic`（一次性 migration，先 dry-run）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo shortlist eval|freeze`（push shortlist BM25 基準線：凍結 query 集評估與待標註骨架）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
 跨 CLI 消費能力（codex/copilot 的 prompt-time／read attribution 實測）見 `docs/cross-cli-capability-matrix.md`。
 唯讀 7／30 天記憶 KPI 稽核可使用 repo-local `custom-skills/hippo-memory-kpi/`；它分開呈現 session→atomic note、machine-valid/searchable 與嚴格 `offer → read → applied` 漏斗，另含 `followups` 區塊統計每個 window 的 open／resolved-in-source 筆數，且不呼叫 `hippo recall` 污染分母。
 蒸餾失敗顯性化：backend 不可用／重試超限的 session 進 `parked`（證據在 `runtime/queue/_failed/`），修復後 `hippo requeue` 恢復；`dream run` 以 global lock 保證單一 writer，並發第二實例記 log 後跳過。
@@ -36,6 +36,7 @@
 
 設定：runtime distiller 唯一來源為 `~/.config/paulsha-hippo/config.yaml`；`HIPPO_*` 僅覆寫路徑。外部 CLI 自行負責登入與 launcher，Hippo 不讀取外部 agent 的認證狀態。
 Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。
+Push shortlist 雜訊基準線（#158）：設 `shortlist.push_shadow.enabled: true`（預設 off）後，prompt hook 照舊注入，另把「BM25 分數門檻＋最多 0–3 則」的確定性收窄結果寫進 `runtime/ledger/push_shadow.jsonl`（注入內容逐位元不變、不呼叫 LLM）；`hippo shortlist eval` 在凍結 query 集上輸出 Precision@3／Noise@3／Relevant-missed@12／注入字元量並校準門檻。格式、指標與校準方式見 `docs/push-shadow-baseline.md`。
 Task memory provider：`hippo task-memory provide|fetch` 提供給外部 adapter 使用的 stdin/stdout JSON protocol；它只接受明確授權 Hippo 且能由 project registry 唯一映射的 repo，並以 manifest/hash 限制 note fetch。完整 envelope、錯誤碼與接線方式見 `docs/task-memory-provider.md`。
 蒸餾只使用宣告式 external headless profiles：Tier 1 `claude`/`codex`、Tier 2 `agy`/`cg`、Tier 3 `co-gem`/`claude-gem`/custom local。每個 profile 自訂 traits、task classes、model、effort 與 tokenized argv；prompt 一律走 stdin，fallback 順序與 bounded budget 見 `docs/backend-matrix.md`。
 

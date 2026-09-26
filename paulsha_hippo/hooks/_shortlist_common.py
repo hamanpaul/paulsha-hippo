@@ -11,6 +11,7 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
+from paulsha_hippo import push_shadow
 from paulsha_hippo.importer.config import default_projects_path, load_projects_config
 from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
@@ -382,16 +383,57 @@ def _applied_hint(root: Path, tool: str, session_id: str) -> str:
     )
 
 
+def _record_push_shadow(root: Path, tool: str, session_id: str, project: str, query: str,
+                        hits: list[dict], claim: list[dict], block: str, hint: str,
+                        injected: str, flags, show_cmd: str, started_at: float) -> None:
+    """#158 push shadow：以現行管線已算好的產物記一筆收窄 shadow 事件。永不 raise。
+
+    只讀 hits／claim／block／hint／injected，不修改任何一個——注入內容因此與 shadow
+    關閉時逐位元相同。push_shadow.record 自身已 best-effort；這裡再包一層，確保即使
+    record 以外的呼叫（組 render closure 等）出錯也不會冒到 build_shortlist_and_record
+    的外層 except（那會把已 commit 的注入吞成 ''）。
+    """
+    try:
+        config = getattr(flags, "push_shadow", None)
+        if config is None or not config.enabled:
+            return
+
+        def _render(keep: list[int]) -> str:
+            return format_shortlist([claim[i] for i in keep], hint=flags.read_hint,
+                                    show_command=show_cmd)
+
+        push_shadow.record(
+            root, tool=tool, session_id=session_id, project=project, query=query,
+            hits=hits, claim=claim, block=block, hint=hint, injected=injected,
+            config=config, started_at=started_at, render=_render,
+            log=lambda msg: log_warn(root, tool, msg))
+    except Exception as exc:
+        try:
+            log_warn(root, tool, f"push shadow failed (injection unaffected): {exc}")
+        except Exception:
+            pass
+
+
 def build_shortlist_and_record(root: Path, tool: str, session_id: str,
                                cwd: str | None, prompt: str,
-                               *, bypass_early_stop: bool = False) -> str:
+                               *, bypass_early_stop: bool = False,
+                               record_push_shadow: bool = True) -> str:
     """Resolve project, search by prompt, build shortlist, record offered. Returns '' if nothing.
 
     bypass_early_stop：跳過 OFFER_STOP_AFTER_EVENTS 早停判斷（其餘去重／redaction／
     publish 邏輯不變）。預設 False，供 UserPromptSubmit 自動 hook 使用（維持早停）；
     `hippo recall` CLI（顯式召回，使用者主動操作）改傳 True——早停是為了抑制「自動、
     session 沒在讀」的持續 offer 噪音，不應靜默擋掉使用者主動要求的一次召回。
+
+    record_push_shadow：#158 push shadow 只量「未經請求的自動注入」。預設 True（兩條
+    UserPromptSubmit hook 不帶參數即適用，舊版 hook 腳本搭新套件也不失效）；`hippo
+    recall` 屬使用者主動拉取，傳 False。實際是否記錄仍由 `shortlist.push_shadow.enabled`
+    （預設關閉）決定；shadow 永不改變本函式的回傳值。
     """
+    try:
+        started_at = push_shadow.clock()  # 只供 shadow 記 pipeline_ms；失敗不得影響注入
+    except Exception:
+        started_at = 0.0
     try:
         # tool 進入 offered-map 檔名；recall 的 --tool 為外部輸入——非法即整條
         # pipeline fail-closed（不注入、不記 offered），不讓歸因破損的 shortlist 流出。
@@ -473,10 +515,18 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             # 發布：先 fsync offered ledger（單一真值＋commit point）後更新 map cache。ledger
             # append 失敗會 raise，由下方外層 fail-closed 回 ''——不出現「ledger 已記但 agent 收不到
             # shortlist」的膨脹；ledger 成功後的硬中止只落在「ledger 有、map 無」安全側，由 reconcile
-            # 重建（見 _publish_offered）。commit point 之後僅剩兩個既有 str 的串接（不會拋），故
+            # 重建（見 _publish_offered）。commit point 之後僅剩兩個既有 str 的串接（不會拋）與
+            # 永不 raise 的 #158 push shadow（_record_push_shadow），故
             # 不存在「offer 已 durable 落盤但回傳被吞成 ''」的永久遺漏窗口。
             _publish_offered(root, tool, session_id, project, mpath, offered, collapsed=collapsed)
-        return block + "\n" + hint
+        injected = block + "\n" + hint
+        if record_push_shadow:
+            # commit point 之後：shadow 僅唯讀既有產物、開關判斷也在其 try 內、永不 raise
+            # （見 _record_push_shadow），維持「offer 已 durable 落盤就一定回傳注入」的不變量。
+            # 鎖已釋放，不拉長臨界區。
+            _record_push_shadow(root, tool, session_id, project, query, hits, claim, block,
+                                hint, injected, flags, show_cmd, started_at)
+        return injected
     except Exception as exc:
         log_warn(root, tool, f"shortlist failed: {exc}")
         return ""

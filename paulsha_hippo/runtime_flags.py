@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from paulsha_hippo import paths
+from paulsha_hippo.push_shadow import PushShadowConfig, parse_config as _parse_push_shadow
 
 _READ_HINTS = ("read", "show")
 
@@ -14,6 +15,9 @@ class HygieneFlags:
     collapse_same_topic: bool = True
     read_hint: str = "show"
     followups_enabled: bool = True
+    # #158（#148 H1）：push shortlist 確定性收窄 shadow 量測；預設關閉，開啟後注入不變、
+    # 只多寫 runtime/ledger/push_shadow.jsonl。鍵：`shortlist.push_shadow.*`。
+    push_shadow: PushShadowConfig = PushShadowConfig()
     # 刻意不含 `episodic_filter`：那個鍵由 atomizer 自己讀（`AtomizerConfig.
     # episodic_filter` → `pipeline._publish` 的降層分支），這裡再放一份沒有任何
     # 讀取端，只會讓人以為改這裡就會生效。`atomizer.yaml` 的鍵本身保留不動。
@@ -42,4 +46,5 @@ def load_flags(config_path: Path | None = None) -> HygieneFlags:
         collapse_same_topic=_bool(shortlist.get("collapse_same_topic"), True),
         read_hint=hint if hint in _READ_HINTS else "show",
         followups_enabled=_bool(followups.get("enabled"), True),
+        push_shadow=_parse_push_shadow(shortlist.get("push_shadow")),
     )
