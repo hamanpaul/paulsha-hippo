@@ -16,7 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Mapping, Sequence
+from typing import Any, Callable, ClassVar, Mapping, Protocol, Sequence
 
 
 ROUTER_CONTRACT_VERSION = "1"
@@ -210,6 +210,21 @@ class AgentRunError(RuntimeError):
 
 
 ResponseValidator = Callable[[str], object]
+
+
+class ProfileHealth(Protocol):
+    """跨 session／跨 process 的 profile 健康狀態（issue #157）。
+
+    Router 只透過這兩個方法讀寫；實作（``paulsha_hippo.agent_health``）負責
+    持久化與退避策略。任何例外都被 router 吞掉——健康狀態是建議性的，不得
+    讓蒸餾本身失敗。
+    """
+
+    def blocked_reason(self, profile: "AgentProfile") -> str | None:
+        """回傳目前不應嘗試此 profile 的原因；可嘗試時回 None。"""
+
+    def record_outcome(self, profile: "AgentProfile", result: "AgentRunResult") -> None:
+        """記錄一次真實 attempt 的結果（成功或失敗）。"""
 
 
 def sanitize_stderr(value: object, *, limit: int = 500) -> str:
@@ -499,6 +514,23 @@ def _validate_fallback_on(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(category for category in FALLBACK_ON if category in values)
 
 
+# Claude Code 的預設系統提示把模型設定成「終端機上的對話助理」並要求 Markdown
+# 排版；它會壓過 user prompt 裡「不得有 markdown fence／前後散文」的輸出契約
+# （issue #157：以 main 的 prompt 組裝與 claude argv 對合成 session 實測，6 次
+# 中 4 次輸出被包進 ```json fence 或前置散文，嚴格 parser 在模型跑完整段生成後
+# 才判 invalid_output）。``--system-prompt`` 以這段任務中立的輸出契約取代預設
+# 系統提示後 8/8 皆為合法輸出（title 類純文字任務照常輸出單行標題）。它只約束
+# 輸出框架，不描述任何 schema，因此 atomization／title／skillopt 可以共用。
+# 字串必須維持 argv-safe：不得含 shell metacharacter、大寫 PROMPT 或 {NAME}
+# placeholder（見 ``_validate_argv``）。
+DISTILLER_SYSTEM_PROMPT = (
+    "You are a non-interactive text-transformation function invoked by a program, "
+    "not a chat assistant. Reply with exactly the output the user message asks for, "
+    "in exactly the format it specifies. Your reply is consumed verbatim by a strict "
+    "machine parser: never wrap it in Markdown or code fences, and never add headings, "
+    "commentary, or any other text before or after it."
+)
+
 # tier-1 max_session_chunks (issue #89): 1800s session-deadline cap (#85) /
 # 240s-per-chunk ~= 7.5 chunks, so 7 keeps a 7-chunk large session on tier-1
 # (claude/codex) instead of pushing it to tier-2 cg, whose large-payload
@@ -511,7 +543,7 @@ _CG_MAX_SESSION_CHUNKS = 6
 
 def default_profiles() -> tuple[AgentProfile, ...]:
     rows = (
-        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--print"), _TIER1_MAX_SESSION_CHUNKS),
+        ("claude", 1, 10, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "sonnet", "high", ("medium", "high", "xhigh"), ("claude", "--model", "{MODEL}", "--effort", "{EFFORT}", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence", "--system-prompt", DISTILLER_SYSTEM_PROMPT, "--print"), _TIER1_MAX_SESSION_CHUNKS),
         ("codex", 1, 20, ("judge", "reasoner"), ("atomization", "title", "skillopt"), "gpt-5.6-sol", "high", ("high",), ("codex", "exec", "--model", "{MODEL}", "-c", "model_reasoning_effort=high", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool", "-"), _TIER1_MAX_SESSION_CHUNKS),
         ("agy", 2, 10, ("fast", "responsive"), ("title", "skillopt"), "default", "medium", ("low", "medium", "high"), ("agy", "--model", "{MODEL}", "--effort", "{EFFORT}", "--mode", "plan", "--sandbox", "--print"), None),
         ("cg", 2, 20, ("heavy-implementation", "fast"), ("atomization", "title", "skillopt"), "default", "high", ("medium", "high", "xhigh"), ("cg", "--model", "{MODEL}", "--effort", "{EFFORT}", "--headless", "--stdin"), _CG_MAX_SESSION_CHUNKS),
@@ -689,6 +721,7 @@ class ExternalAgentRouter:
         max_agent_calls: int = FIXED_MAX_AGENT_CALLS,
         executor: Callable[[AgentProfile, str, int], tuple[str, str, int | None]] | None = None,
         execution_path: str | None = None,
+        health: ProfileHealth | None = None,
     ) -> None:
         validate_profiles(profiles)
         self.profiles = tuple(sorted(profiles, key=lambda profile: (profile.tier, profile.priority, profile.id)))
@@ -700,6 +733,10 @@ class ExternalAgentRouter:
         if self.deadline_seconds <= 0 or self.max_attempts <= 0 or self.max_agent_calls <= 0:
             raise ProfileConfigError("router budgets must be positive")
         self._circuit_open_until: dict[str, float] = {}
+        # 開啟 circuit 的那次失敗（category／exit code），供之後的略過紀錄說明
+        # 原因（issue #157：被 circuit 擋下的 profile 不得在 provenance 消失）。
+        self._circuit_reason: dict[str, str] = {}
+        self._health = health
         self._failures: list[AgentRunResult] = []
         self._last_error: AgentRunError | None = None
         self.last_result: AgentRunResult | None = None
@@ -797,6 +834,50 @@ class ExternalAgentRouter:
             return "policy"
         return category
 
+    @staticmethod
+    def _skip_record(
+        profile: AgentProfile, attempt_index: int, reason: str
+    ) -> AgentRunResult:
+        """Provenance-only record for a profile the router did not execute."""
+        return AgentRunResult(
+            profile.id,
+            profile.revision,
+            profile.tier,
+            attempt_index,
+            profile.model,
+            profile.effort,
+            None,
+            "unavailable",
+            profile.command_fingerprint(),
+            0.0,
+            "ineligible",
+            sanitize_stderr(reason),
+            None,
+            None,
+            profile.priority,
+            RESPONSE_SCHEMA_VERSION,
+        )
+
+    def _circuit_skip_reason(self, profile: AgentProfile) -> str:
+        return f"circuit_open after {self._circuit_reason.get(profile.id, 'an earlier failure')}"
+
+    def _health_block(self, profile: AgentProfile) -> str | None:
+        if self._health is None:
+            return None
+        try:
+            reason = self._health.blocked_reason(profile)
+        except Exception:  # noqa: BLE001 - advisory state must never break routing
+            return None
+        return str(reason) if reason else None
+
+    def _health_record(self, profile: AgentProfile, result: AgentRunResult) -> None:
+        if self._health is None:
+            return
+        try:
+            self._health.record_outcome(profile, result)
+        except Exception:  # noqa: BLE001 - advisory state must never break routing
+            return
+
     def _record_skipped_profiles(
         self,
         attempts: list[AgentRunResult],
@@ -809,10 +890,12 @@ class ExternalAgentRouter:
         Each remaining enabled, task-class-matching profile gets one
         ``failure_category="ineligible"`` record in the existing ineligible
         style: zero elapsed time, no agent call consumed, ``reason`` as the
-        sanitized stderr. Profiles whose circuit breaker is currently open are
-        *not* recorded -- the main loop silently ``continue``s over an open
-        circuit even with budget to spare, so recording one here as
-        budget-skipped would misstate provenance. These records are appended
+        sanitized stderr. A profile whose circuit breaker is currently open,
+        or which the persistent health state holds in backoff, would not have
+        been executed even with budget to spare, so it is recorded with that
+        reason instead of the budget reason -- never as budget-skipped
+        (issue #157 replaced the former silent omission, which let such a
+        profile vanish from provenance). These records are appended
         only after the loop has already decided to break: they never affect
         dispatch order, deadline/call-budget arithmetic, fallback semantics,
         or which attempt the exhausted raise reports. Because they land after
@@ -825,27 +908,10 @@ class ExternalAgentRouter:
             if not (profile.enabled and self.task_class in profile.task_classes):
                 continue
             if self._circuit_open_until.get(profile.id, 0.0) > now:
-                continue
-            attempts.append(
-                AgentRunResult(
-                    profile.id,
-                    profile.revision,
-                    profile.tier,
-                    len(attempts) + 1,
-                    profile.model,
-                    profile.effort,
-                    None,
-                    "unavailable",
-                    profile.command_fingerprint(),
-                    0.0,
-                    "ineligible",
-                    sanitize_stderr(reason),
-                    None,
-                    None,
-                    profile.priority,
-                    RESPONSE_SCHEMA_VERSION,
-                )
-            )
+                skip_reason = self._circuit_skip_reason(profile)
+            else:
+                skip_reason = self._health_block(profile) or reason
+            attempts.append(self._skip_record(profile, len(attempts) + 1, skip_reason))
 
     _LAST_FROM_ATTEMPTS: ClassVar[object] = object()
 
@@ -981,10 +1047,17 @@ class ExternalAgentRouter:
         # category/profile/stderr (and therefore park behavior).
         terminal: AgentRunResult | None = None
         calls = 0
+        # Circuit-open / backoff skip records (issue #157) are provenance-only:
+        # they must not consume the attempt budget, or a healthy profile later
+        # in the chain could be crowded out by profiles that were never run.
+        provenance_only = 0
         validated: dict[int, str] = {}
         chunk_results: dict[int, AgentRunResult] = {}
         for profile_idx, profile in enumerate(self.profiles):
-            if len(attempts) >= self.max_attempts or calls >= session_call_budget:
+            if (
+                len(attempts) - provenance_only >= self.max_attempts
+                or calls >= session_call_budget
+            ):
                 break
             if time.monotonic() - started >= session_deadline:
                 self._record_skipped_profiles(
@@ -992,6 +1065,18 @@ class ExternalAgentRouter:
                 )
                 break
             if self._circuit_open_until.get(profile.id, 0.0) > time.monotonic():
+                # Issue #157: an open circuit used to be a silent ``continue``.
+                # When every profile was circuit-open the session parked as
+                # backend_unavailable with zero attempts and no reason at all.
+                # Record why the profile was skipped (no call consumed); the
+                # record never becomes the terminal attempt of a real failure.
+                if profile.enabled and self.task_class in profile.task_classes:
+                    attempts.append(
+                        self._skip_record(
+                            profile, len(attempts) + 1, self._circuit_skip_reason(profile)
+                        )
+                    )
+                    provenance_only += 1
                 continue
             eligible, reason = profile.eligible(
                 task_class=self.task_class,
@@ -1004,26 +1089,18 @@ class ExternalAgentRouter:
                 # is a real fallback transition and must remain in provenance,
                 # while still consuming zero agent calls.
                 if profile.enabled and self.task_class in profile.task_classes:
-                    ineligible_result = AgentRunResult(
-                        profile.id,
-                        profile.revision,
-                        profile.tier,
-                        len(attempts) + 1,
-                        profile.model,
-                        profile.effort,
-                        None,
-                        "unavailable",
-                        profile.command_fingerprint(),
-                        0.0,
-                        "ineligible",
-                        sanitize_stderr(reason),
-                        None,
-                        None,
-                        profile.priority,
-                        RESPONSE_SCHEMA_VERSION,
-                    )
+                    ineligible_result = self._skip_record(profile, len(attempts) + 1, reason)
                     attempts.append(ineligible_result)
                     terminal = ineligible_result
+                continue
+            backoff_reason = self._health_block(profile)
+            if backoff_reason is not None:
+                # Issue #157: a profile the persistent health state holds in
+                # backoff (deterministic invocation/credential failure seen in
+                # an earlier session) is not tried again until the backoff
+                # expires; the skip is recorded with its reason, zero cost.
+                attempts.append(self._skip_record(profile, len(attempts) + 1, backoff_reason))
+                provenance_only += 1
                 continue
             attempt_index = len(attempts) + 1
             attempt_started = time.monotonic()
@@ -1115,6 +1192,7 @@ class ExternalAgentRouter:
                     ),
                 )
                 attempts.append(result)
+                self._health_record(profile, result)
                 self.last_result = result
                 self.attempts = tuple(attempts)
                 self.chunk_provenance = tuple(chunk_results[index] for index in range(total_chunks))
@@ -1152,7 +1230,11 @@ class ExternalAgentRouter:
                 )
                 attempts.append(result)
                 terminal = result
+                self._health_record(profile, result)
                 self._circuit_open_until[profile.id] = time.monotonic() + 60.0
+                self._circuit_reason[profile.id] = category + (
+                    f" (exit {caught.exit_code})" if caught.exit_code is not None else ""
+                )
                 if category not in ALLOWED_FALLBACK_CATEGORIES or category not in profile.fallback_on:
                     if category == "budget":
                         # The session-wide chain budget (deadline or call
@@ -1166,12 +1248,20 @@ class ExternalAgentRouter:
                             attempts, self.profiles[profile_idx + 1:], "session_budget"
                         )
                     break
+        if terminal is None and attempts:
+            # Every enabled profile was skipped (circuit-open / backoff) before
+            # any real attempt: report the last skip record so the exhausted
+            # error carries the per-profile reasons instead of a bare
+            # "fallback exhausted". Category stays ``ineligible`` exactly as
+            # the former ``last=None`` path reported it.
+            terminal = attempts[-1]
         self._raise_exhausted(attempts, terminal)
 
 
 __all__ = [
     "AgentProfile", "AgentRunError", "AgentRunResult", "ExternalAgentRouter",
-    "ALLOWED_FALLBACK_CATEGORIES", "FALLBACK_ON", "NON_FALLBACK_CATEGORIES",
+    "ALLOWED_FALLBACK_CATEGORIES", "DISTILLER_SYSTEM_PROMPT", "FALLBACK_ON",
+    "NON_FALLBACK_CATEGORIES", "ProfileHealth",
     "ProfileConfigError", "ROUTER_CONTRACT_VERSION", "RESPONSE_SCHEMA_VERSION",
     "ResponseValidator", "cache_identity", "child_environment", "classify_failure",
     "default_profiles", "effective_path", "fingerprint_argv",

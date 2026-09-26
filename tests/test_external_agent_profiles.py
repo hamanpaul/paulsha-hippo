@@ -312,6 +312,34 @@ def test_default_claude_profile_does_not_run_in_plan_permission_mode():
         assert flag in claude.argv
 
 
+def test_default_claude_profile_replaces_cli_system_prompt_with_output_contract():
+    """issue #157：claude profile 必須以 ``--system-prompt`` 取代 Claude Code 預設系統提示。
+
+    Claude Code 的預設系統提示是「終端機上的對話助理」，要求以 Markdown 排版；
+    它壓過 user prompt 裡「不得有 markdown fence／前後散文」的契約。以 main 的
+    prompt 組裝與 claude profile argv 對合成 session 實測：6 次中 4 次輸出
+    被包進 ```json fence 或前置散文摘要，嚴格 parser 判
+    ``agent output must be one JSON value without surrounding noise``——模型跑完
+    整段生成（數十到數百秒）才失敗。只加上 ``--system-prompt``、其餘 argv 不變：
+    8/8 皆為合法 schema-1 JSON，且 title 類純文字任務照常輸出單行標題。
+    """
+    from paulsha_hippo.agent_profiles import DISTILLER_SYSTEM_PROMPT
+
+    claude = default_profiles()[0]
+    pairs = tuple(zip(claude.argv, claude.argv[1:]))
+    assert ("--system-prompt", DISTILLER_SYSTEM_PROMPT) in pairs
+    lowered = DISTILLER_SYSTEM_PROMPT.casefold()
+    assert "markdown" in lowered and "code fence" in lowered
+    # 任務中立：title／skillopt 也共用這個 profile，不能寫死 JSON。
+    assert "json" not in lowered
+    # 防護旗標保持不動。
+    assert ("--tools", "") in pairs
+    for flag in ("--safe-mode", "--disable-slash-commands", "--strict-mcp-config"):
+        assert flag in claude.argv
+    # 必須通過既有 argv 安全驗證（無 shell 語法、無 PROMPT placeholder）。
+    ExternalAgentRouter((claude,))
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -1270,10 +1298,12 @@ def test_router_mid_attempt_budget_break_records_skipped_profile_provenance(monk
     assert excinfo.value.profile_id == "claude"
 
 
-def test_router_deadline_break_does_not_record_circuit_open_profile(monkeypatch):
-    """A remaining profile whose circuit breaker is open would have been
-    silently skipped by the main loop even with budget to spare; the
-    deadline-break skip records must not claim it was lost to the deadline."""
+def test_router_deadline_break_records_circuit_open_profile_with_its_own_reason(monkeypatch):
+    """A remaining profile whose circuit breaker is open would not have been
+    executed even with budget to spare; the deadline-break skip records must
+    not claim it was lost to the deadline. Issue #157 replaced the former
+    silent omission (which let the profile vanish from provenance) with a
+    record carrying the circuit reason instead of ``session_deadline``."""
     import time
     from paulsha_hippo.agent_profiles import AgentRunError
 
@@ -1292,12 +1322,21 @@ def test_router_deadline_break_does_not_record_circuit_open_profile(monkeypatch)
     router = ExternalAgentRouter((claude, codex, cg, local_vllm), executor=execute)
     router._circuit_open_until["cg"] = current_time[0] + 3600.0
 
-    with pytest.raises(AgentRunError, match="fallback exhausted"):
+    with pytest.raises(AgentRunError, match="fallback exhausted") as excinfo:
         router.run("prompt")
 
     assert [attempt.profile_id for attempt in router.attempts] == [
-        "claude", "codex", "local-vllm",
+        "claude", "codex", "cg", "local-vllm",
     ]
+    by_id = {attempt.profile_id: attempt for attempt in router.attempts}
+    assert by_id["codex"].stderr == "session_deadline"
+    assert by_id["local-vllm"].stderr == "session_deadline"
+    assert by_id["cg"].failure_category == "ineligible"
+    assert by_id["cg"].stderr.startswith("circuit_open")
+    assert by_id["cg"].stderr != "session_deadline"
+    # provenance 變多，raise 仍來自最後一個真跑的 attempt。
+    assert excinfo.value.category == "timeout"
+    assert excinfo.value.profile_id == "claude"
 
 
 def test_router_skip_records_may_exceed_max_attempts(monkeypatch):

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .agent_exec import CachingAgentClient
+from ..agent_health import ProfileHealthStore, profile_health_path
 from ..agent_profiles import ExternalAgentRouter
 from . import config as atomizer_config
 from . import pipeline
@@ -76,12 +77,19 @@ def _build_promoter(
     if promoter_name != "llm":
         return IdentityPromoter()
 
+    # issue #157：確定性必敗的 profile（呼叫格式錯誤、憑證失效）跨 session／跨
+    # dream run 持久退避，doctor 讀同一個檔案。dry-run 只讀不寫。
+    health = ProfileHealthStore(
+        profile_health_path(memory_root),
+        read_only=bool(getattr(args, "dry_run", False)),
+    )
     inner = ExternalAgentRouter(
         config.external_profiles,
         task_class="atomization",
         deadline_seconds=config.router_deadline_seconds,
         max_attempts=config.router_max_attempts,
         max_agent_calls=config.router_max_agent_calls,
+        health=health,
     )
     model = config.external_profiles[0].model if config.external_profiles else "unknown"
     cached_client = CachingAgentClient(

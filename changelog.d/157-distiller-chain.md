@@ -1,0 +1,9 @@
+---
+type: fix
+---
+- 修 issue #157（蒸餾鏈三段式浪費，皆已在 main 重現）：
+  - **全部 profile 被判不可用時沒有原因**：router 對 circuit 開啟的 profile 靜默 `continue`，同一 run 的第一個 session 在數秒內打穿整條鏈後，60 秒 cooldown 內後續每個 session 都以 `backend_unavailable`、`attempts=0`、空 `attempts_detail` 被 park。現在被 circuit 擋下的 profile 會留下 `ineligible` 略過紀錄（`circuit_open after <category>`），不消耗 agent call、不佔 `max_attempts`、真實失敗後也不改變 park 分類；全部被略過時錯誤訊息與 `attempts_detail` 逐一列出每個 profile 的原因。chain-budget 中斷時，circuit-open 的剩餘 profile 改記自己的原因，不再被省略。
+  - **必敗 profile 每一輪都被先試一次**：新增 `paulsha_hippo/agent_health.py`，把確定性失敗（啟動 30 秒內 nonzero exit，且 stderr 開頭是 CLI 參數解析錯誤或憑證錯誤）寫入 `runtime/agents/profile-health.json` 並指數退避（1 小時起跳、每次加倍、上限 24 小時；呼叫格式錯誤一次即退避，憑證錯誤連續兩個 session 才退避）。退避中的 profile 以 `backoff <kind> until <UTC>` 略過；timeout、invalid_output、quota 等不進退避；成功或 command 變更即清除。`hippo doctor` 在該 profile 顯示 `health=backoff(...)` 與最後 stderr 摘要（只顯示、不改 exit code）；dry-run 不寫狀態。
+  - **cg 必敗的根因**：copilot CLI 1.0.88 把以 `-` 開頭的 `-p` 值當成旗標，而 atomize prompt 一律以 skill frontmatter `---` 開頭，於是每次都回 `Invalid command format`。`contrib/local-harness` 的 copilot launcher 改用 `--prompt=<值>` 綁成單一 token。
+  - **claude invalid_output 的根因**：Claude Code 預設系統提示要求 Markdown 排版，壓過 prompt 的「不得有 fence／前後散文」契約；以 main 的 prompt 組裝與 argv 對合成 session 實測 6 次中 4 次被包進 ```json fence 或前置散文。claude profile argv 加 `--system-prompt <任務中立的輸出契約>` 後 8/8 合法、走 Hippo 真實 router 路徑再 3/3 合法；response parser 嚴格度不變。issue 所稱「約 11 分鐘」是 attempt 層級 elapsed（含已驗證並保留的 chunk），實際浪費是失敗那個 chunk 的生成時間。
+  - `default_profiles()` 與出貨模板 `atomizer.yaml` 同步；部署中的使用者 config 需另行同步 claude argv（repo 外）。

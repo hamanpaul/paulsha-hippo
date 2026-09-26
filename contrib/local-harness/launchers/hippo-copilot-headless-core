@@ -106,8 +106,12 @@ fi
 tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/hippo-copilot-home.XXXXXX")"
 trap 'rm -rf "$tmp_home"' EXIT
 
+# issue #157：prompt 必須用 `--prompt=<值>` 綁成單一 token。hippo 的 atomize
+# prompt 一律以 skill frontmatter `---` 開頭；copilot CLI 1.0.88 的參數解析器把
+# `-p "---…"` 的值當成旗標，回 `error: Invalid command format` 並 exit 1，
+# 導致 cg 對每個蒸餾 prompt 都必敗。
 raw="$(HOME="$tmp_home" "$real_copilot" \
-  -p "$prompt" \
+  --prompt="$prompt" \
   --available-tools=__none__ \
   --disable-builtin-mcps \
   --no-ask-user \

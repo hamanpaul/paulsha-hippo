@@ -52,3 +52,4 @@ echo '測試: 僅回 canonical no_findings JSON' | local-vllm --model local --ef
 
 - gemma4 為 reasoning 模型：thinking 無上限、會吃光 `max_tokens`——guided pass 一律 `enable_thinking:false`；`{EFFORT}` low/medium/high 對應 thinking off／reasoning_effort low（僅 plain 任務）／模型預設。
 - copilot CLI 鏈路的教訓（不要走回頭路）：`--available-tools=`（空值）+`--allow-all-tools` 下工具**真的會執行**；`--deny-tool='*'` 會扼殺回應（空 stdout）。
+- copilot CLI 1.0.88 起，`-p <值>` 的值若以 `-` 開頭會被當成旗標並回 `error: Invalid command format`（exit 1）；hippo 的 atomize prompt 一律以 skill frontmatter `---` 開頭，因此 launcher 必須用 `--prompt=<值>` 綁成單一 token（#157）。
