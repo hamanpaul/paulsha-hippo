@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -73,6 +75,70 @@ def normalize_remote(value: str | None) -> str:
     return "/".join(parts)
 
 
+UNKNOWN_PROJECT = "_unknown"
+
+EPHEMERAL_ROOTS_ENV = "HIPPO_EPHEMERAL_ROOTS"
+_DEFAULT_EPHEMERAL_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+def _is_same_or_ancestor(candidate: str, path: str) -> bool:
+    return path == candidate or path.startswith(candidate.rstrip("/") + "/")
+
+
+def ephemeral_roots() -> tuple[str, ...]:
+    """暫存根目錄（#117）：其下無 remote、未登記的 checkout 不具穩定身分。
+
+    `HIPPO_EPHEMERAL_ROOTS`（以 os.pathsep 分隔的絕對路徑）有設定時完全取代預設值，
+    空字串即停用；未設定時取系統暫存目錄（`/tmp`、`/var/tmp`、`/dev/shm` 與
+    `tempfile.gettempdir()`）。檔案系統根 `/`、HOME 本身與其祖先一律排除——暫存根
+    誤設成這些位置會讓整台機器的 session 全歸 `_unknown`。
+    """
+    raw = os.environ.get(EPHEMERAL_ROOTS_ENV)
+    if raw is not None:
+        candidates = [item.strip() for item in raw.split(os.pathsep)]
+    else:
+        candidates = list(_DEFAULT_EPHEMERAL_ROOTS)
+        try:
+            candidates.append(tempfile.gettempdir())
+        except Exception:
+            pass
+    try:
+        home = os.path.realpath(str(Path.home()))
+    except Exception:
+        home = ""
+    roots: list[str] = []
+    for candidate in candidates:
+        if not candidate or not os.path.isabs(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        if real == "/" or (home and _is_same_or_ancestor(real, home)):
+            continue
+        if real not in roots:
+            roots.append(real)
+    return tuple(roots)
+
+
+def is_ephemeral_path(path: str | os.PathLike[str] | None) -> bool:
+    """path 是否為暫存根本身或其子孫（字面與 realpath 兩種形式皆比對）。"""
+    if not path:
+        return False
+    text = str(path)
+    if not os.path.isabs(text):
+        return False
+    forms = {os.path.normpath(text), os.path.realpath(text)}
+    return any(
+        _is_same_or_ancestor(root, form) for root in ephemeral_roots() for form in forms
+    )
+
+
+def _main_toplevel(toplevel: str) -> str:
+    """linked worktree → 主 repo root；其他情形回傳輸入（best-effort、never raises）。"""
+    try:
+        return _git.git_main_toplevel(toplevel) or toplevel
+    except Exception:
+        return toplevel
+
+
 def resolve_project(
     *,
     cwd: str | None = None,
@@ -107,6 +173,14 @@ def resolve_project(
         toplevel = None
 
     if toplevel:
+        # worktree 收斂（#117）：`<repo>-worktrees/<branch>` 這類不在主 repo root 前綴下的
+        # linked worktree，歸併為主 repo root 後再比對 roots——registry 只登記 roots、
+        # 尚無 remotes 時也能收斂到既有 slug，不落到 raw remote 另開 bucket。
+        identity_root = _main_toplevel(toplevel)
+        if identity_root != toplevel:
+            matched = _best_root_match(identity_root, loaded_projects)
+            if matched:
+                return matched
         try:
             remote = normalize_remote(_git.git_remote(toplevel))
         except Exception:
@@ -121,16 +195,23 @@ def resolve_project(
                     return project.slug
             return remote
 
-        name = Path(toplevel).name
+        # 無 remote、未登記：暫存目錄下的 checkout 不具穩定身分，歸既有 unresolved 類別
+        # `_unknown`（下游 wakeup／shortlist／registry discovery 皆已視為不注入、不落盤），
+        # 不以目錄名產生假 project（#117：`checkout` bucket）。
+        if is_ephemeral_path(identity_root):
+            return UNKNOWN_PROJECT
+        name = Path(identity_root).name
         if name:
             try:
-                if _git.sibling_repo_count(toplevel) >= 2:
-                    parent = Path(toplevel).parent.name
+                if _git.sibling_repo_count(identity_root) >= 2:
+                    parent = Path(identity_root).parent.name
                     return f"{parent}/{name}" if parent else name
             except Exception:
                 pass
             return name
 
     if cwd:
-        return Path(cwd).name or "_unknown"
-    return "_unknown"
+        if is_ephemeral_path(cwd):
+            return UNKNOWN_PROJECT
+        return Path(cwd).name or UNKNOWN_PROJECT
+    return UNKNOWN_PROJECT

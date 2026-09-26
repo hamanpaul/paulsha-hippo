@@ -183,8 +183,9 @@ class RegistryAutoWriteTest(unittest.TestCase):
             name="wt-remoteless.json",
         )
         self.assertEqual(decision["status"], "written")
-        # session 本身的歸屬維持既有 dir-name fallback（worktree 名），不受 gate 影響
-        self.assertEqual(decision["project"], f"{self.base.name}/wt")
+        # session 歸屬收斂到主 repo 的 dir-name fallback（#117 worktree 收斂：不再以 worktree
+        # 目錄名另開 bucket）；gate 照舊擋下 fallback slug 落盤
+        self.assertEqual(decision["project"], f"{self.base.name}/mainrepo")
         # gate：fallback slug 不落盤——registry 完全不寫
         self.assertIsNone(decision.get("discovery"))
         self.assertFalse(self.registry_path.exists())
