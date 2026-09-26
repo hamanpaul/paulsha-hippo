@@ -1,0 +1,4 @@
+---
+type: feat
+---
+- Issue #151 store 佈局與 archive 回收：新增 `paulsha_hippo/storage.py`，`memory_root`（解析 symlink 後）或被 symlink 搬走的 `archive`／`runtime`／`inbox` 等子樹落在持續同步／被掃描樹內時，`hippo doctor` 印出 `storage 位置：⚠` 警示（不改 exit code），`hippo dream run` 啟動與 `hippo init` 對 stderr 警示；偵測預設看祖先目錄的 `.obsidian`／`.stfolder`／`.dropbox`，可用 `HIPPO_SYNC_MARKERS`（取代，`none` 停用）與 `HIPPO_SYNC_ROOTS`（疊加）設定；建議佈局（store 在 vault 外、只借回 knowledge）只列為資訊。新增 `hippo archive gc`（`paulsha_hippo/archive_gc.py`）：以 processing ledger（預設只認 `promoted`，`--include-no-findings` 可納入 `no-findings`）與 import ledger 歸因，回收已落成 knowledge 之 session 的 `archive/{sessions,fragments,queue}` 檔；預設 dry-run 輸出統計與刪除清單（`--list-out`），`--retention-days`（預設 7）保留窗、冪等，`--apply` 須取得 dream lock 並以 dir fd＋`O_NOFOLLOW`＋inode 核對後刪除；未落成、parked、pending-inbox、無法歸因、frontmatter 不符，以及被 knowledge `provenance.path` 引用（避免 janitor 誤判 `source_invalid`）的檔一律保留並列出原因。遷移與回滾步驟見 `docs/storage-layout.md`；實際搬遷屬部署步驟，不在本變更內。

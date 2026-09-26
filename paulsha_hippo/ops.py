@@ -206,6 +206,9 @@ def run_init(*, memory_root: str | None, backend: str, model: str | None,
     committed = _commit_init_atomic(cfg, cfg_body, override, None)
 
     print(f"memory_root: {root}")
+    from . import storage
+
+    storage.warn_if_exposed(Path(root))  # #151：init 即提示 store 落在同步樹內
     print(f"configured external agent profile: {configured_profile}")
     print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
     print("下一步：hippo install hooks && hippo install service --enable")
@@ -480,6 +483,11 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
         failed = True
 
     memory_root = paths.memory_root()
+    # #151：store 實際落點若在持續同步／被掃描樹內只警示，不改 exit code。
+    from . import storage
+
+    for line in storage.placement_lines(storage.check_placement(memory_root)):
+        print(line)
     hooks_dir = memory_root / "hooks"
     print(f"- hooks 部署：{'✓ ' + str(hooks_dir) if hooks_dir.is_dir() else '未部署（hippo install hooks）'}")
     attestation_lines, attestation_failed = _surface_build_attestation(

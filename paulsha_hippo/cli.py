@@ -34,6 +34,16 @@ def _pct_arg(s):
     return v
 
 
+def _retention_days_arg(s: str) -> float:
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--retention-days must be a number") from None
+    if not math.isfinite(v) or v < 0:
+        raise argparse.ArgumentTypeError("--retention-days must be a finite number >= 0")
+    return v
+
+
 def _tool_arg(s: str) -> str:
     """`--tool` 會嵌入 runtime/wakeup 檔名：argparse 層即拒絕非 path-safe token（防 traversal）。"""
     from .hooks._wakeup_common import validate_tool
@@ -536,6 +546,31 @@ def _build_parser() -> argparse.ArgumentParser:
     locks_cleanup.add_argument("--memory-root", required=True)
     locks_cleanup.add_argument("--apply", action="store_true")
     locks_cleanup.set_defaults(func=_locks_cleanup_legacy)
+
+    archive_p = memory_subparsers.add_parser("archive", help="archive 維運（#151 容量回收）")
+    archive_sub = archive_p.add_subparsers(dest="archive_command", required=True)
+    archive_gc = archive_sub.add_parser(
+        "gc",
+        help="回收對應 session 已落成 knowledge 的 archive 檔（以 processing/import ledger "
+             "為準；預設 dry-run，--apply 才刪）",
+    )
+    archive_gc.add_argument("--memory-root", required=True)
+    archive_gc.add_argument(
+        "--retention-days", type=_retention_days_arg, default=7.0,
+        help="安全保留窗：落成時間或檔案 mtime 未滿 N 天者保留（預設 7；0 表示不保留）")
+    archive_gc.add_argument(
+        "--include-no-findings", action="store_true",
+        help="把 no-findings（已蒸餾但未產出 knowledge）的 session 也視為可回收；預設只收 promoted")
+    archive_gc.add_argument(
+        "--list-out", default=None,
+        help="刪除清單寫入此檔（每行 <相對路徑>\\t<bytes>\\t<session_key>）；未給時清單列在 JSON 報告")
+    archive_gc.add_argument("--now", default=None, help="ISO8601 時間戳；未給時取當下 UTC")
+    archive_gc_mode = archive_gc.add_mutually_exclusive_group()
+    archive_gc_mode.add_argument("--dry-run", action="store_true", help="只產出報告（預設行為）")
+    archive_gc_mode.add_argument(
+        "--apply", action="store_true",
+        help="實際刪除（需取得 dream lock；dream run 進行中則拒絕）")
+    archive_gc.set_defaults(func=_archive_gc)
 
     ledger_p = memory_subparsers.add_parser("ledger", help="append-only ledger 維運")
     ledger_sub = ledger_p.add_subparsers(dest="ledger_command", required=True)
@@ -2389,6 +2424,30 @@ def _locks_cleanup_legacy(args: argparse.Namespace) -> int:
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     if (result.get("blocked") or result.get("busy")
             or result.get("unknown") or result.get("unsafe_locks_dir")):
+        return 1
+    return 0
+
+
+def _archive_gc(args: argparse.Namespace) -> int:
+    from paulsha_hippo import archive_gc
+
+    now = None
+    if args.now:
+        try:
+            now = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+        except ValueError:
+            print(f"hippo archive gc: error: invalid --now: {args.now}", file=sys.stderr)
+            return 2
+    result = archive_gc.run_archive_gc(
+        Path(args.memory_root),
+        now=now,
+        retention_days=args.retention_days,
+        include_no_findings=args.include_no_findings,
+        apply=args.apply,
+        list_out=args.list_out,
+    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if result.get("error") or result.get("blocked") or result.get("failed"):
         return 1
     return 0
 
