@@ -13,6 +13,7 @@
 
 ### Added
 
+- Hippo #155 task-memory production provider：新增 `hippo task-memory provide|fetch` JSON subprocess protocol，依 project registry 精確授權 repo，重用 MOC scoped search 與 #146 payload helper，產生 canonical SHA-256 manifest；note fetch 僅讀本次 manifest 綁定項目，並以 redacted bytes 驗 hash/version，不寫既有 Hippo usage ledger。契約與 Cortex adapter 接線見 `docs/task-memory-provider.md`。
 - #146 正式規劃：通用 task memory payload、capability-aware delivery、tool-neutral evidence 與 Cortex host adapter 依賴（僅規劃，不代表 runtime 已完成）。
 
 - 新增 repo-local `custom-skills/hippo-memory-kpi/`：唯讀產生 7/30 天 session→atomic note、note machine-valid/searchable、Agent offer→read→applied KPI，固定排除 observer/no-findings 污染並區分 Cortex source material、offer、read、applied 與 Codex 可觀測下限。
