@@ -19,7 +19,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 - 檔頭：固定 3 行 `#` 註解（generated 宣告、override 指引、本文件路徑）。
 - `schema_version`：int，必填，目前 `1`。
 - `projects`：list（空集輸出 inline `projects: []`）。每項：
-  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。**一律由 remote 正規化派生**（raw remote 形，或 config/registry 依 remote 匹配出的 slug）；dir-name / basename fallback slug 不寫入（見 §5 寫入 gate）。**與 `roots` 同源**：session cwd 位於 linked worktree 時，slug 以歸併後的主 repo root 重新推導（不得記 worktree 目錄名 slug 配主 repo root 的矛盾 mapping）。
+  - `slug`：str，必填——importer `resolve_project` 產出的 project 識別。**由 remote 正規化派生**（raw remote 形，或 config/registry 依 remote 匹配出的 slug），或**由恰等於主 repo root 的 registered root 派生**（#117，見 §5 root 登記補登）；dir-name / basename fallback slug 不寫入（見 §5 寫入 gate）。**與 `roots` 同源**：session cwd 位於 linked worktree 時，slug 以歸併後的主 repo root 重新推導（不得記 worktree 目錄名 slug 配主 repo root 的矛盾 mapping）。
   - `roots`：list[str]——絕對路徑；**linked worktree 一律歸併為主 repo root**（`git rev-parse --git-common-dir`）。
   - `remotes`：list[str]——正規化 remote 識別（見 §3）。
   - `aliases`：list[str]——v1 producer 恆輸出 `[]`（hippo 無 alias 發現來源；欄位保留前向相容），inline 形式。
@@ -49,15 +49,25 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 - **Opt-in**：`~/.config/paulsha-hippo/config.yaml` 設 `project_registry.auto_write: true` 才寫（預設 off）。
 - 觸發點：importer ingest 完成（dry-run 不寫）；`slug` 為 `_unknown`、或 roots 與 remotes 全空的 session 不寫。
 - **寫入 gate（remotes 必須是真 remote）**：僅當 slug 由 remote 正規化派生（session 的 git remote，或顯式 payload remote 鍵 `remote_url` / `remote` 經 config/registry 匹配）才寫；驗證逐 remote 套用——只有個別通過驗證的 remote 寫入 `remotes`，payload 夾帶而未通過驗證的不相干 remote 不得搭便車落盤；dir-name / basename fallback slug 一律 skip（記 debug log）——杜絕 remoteless worktree 的自我矛盾 mapping，與已刪 cwd / git 逾時下「垃圾 slug 掛真 remote」的自我強化污染。path 形 `repo` 欄位（toplevel 路徑輸入）僅供解析比對，不得寫入 `remotes`。
+- **root 登記補登（#117）**：slug 由 registry/config 的 root 精確登記派生（registered root **恰等於**主 repo root，非祖先目錄）時，以現場 `git remote get-url origin` 探測到的 remote 補進該 slug 的 `remotes`——否則只登記 roots 的既有 project 永遠補不到 remotes，`<repo>-worktrees/<branch>` 這類不在 root 前綴下的 worktree 只能落 raw remote 另開 knowledge bucket。只信現場探測，payload remote 不得經此路徑落盤；同一 root 被多個 slug 登記、或 remote 已由其他 slug 認領時一律不補（一個 remote 對多個 slug 會讓解析取決於清單順序，task-memory provider 也會判 `scope-mismatch`）。
 - 互斥：固定名 lock `flock(LOCK_EX)`；原子性：寫 `.project-hippo.yaml.tmp` 後 `os.replace`；內容未變則跳寫（冪等）。
 - Fail-open：registry 寫入失敗不影響 ingest 主流程（記 warning）。
 - **分權**：generated 檔不允許手改（檔頭註明；手改內容會在下次寫入被 canonical 化覆蓋）。使用者 override 一律放 manual 檔——hippo 側 legacy `projects.yaml`，或 cortex 側 `project-cortex.yaml`。
+
+### 5.1 既有 registry 的 remotes 一次性 backfill（#117）
+
+`hippo registry backfill-remotes [--memory-root <root>] [--registry <path>] [--projects <path>] [--dry-run|--apply]`：
+
+- 對 union config（legacy manual 檔 ∪ generated registry，同 §6）每個 project 的每個 root 探測 origin remote，判準與 §5 root 登記補登相同；逐項輸出狀態：`add`（將補入）、`present`（已存在）、`conflict`（remote 已由其他 slug 認領，或本次有多個 slug 探測到同一 remote；附 `claimed_by`）、`root-missing`（路徑不存在，如 legacy 佔位符）、`not-a-repo`、`not-repo-root`（root 只在某 repo 之內、不是 toplevel）、`no-remote`。
+- 預設 dry-run，不寫任何檔案。`--apply` 才把 `add` 項目併入 generated registry（legacy manual 檔只讀、不改寫）；在 registry lock 內、`os.replace` 前把原檔 bytes 備份為同目錄 `project-hippo.yaml.bak-117-<UTC 時戳>`，輸出 `backup` 與回復指令 `restore`（原檔不存在時為 `rm <registry>`）。
+- 冪等：重跑時已補項目皆為 `present`，不寫檔、不產生新備份。手寫、缺 `schema_version` 的舊檔會在寫入時 canonical 化（§4），語義不變。
 
 ## 6. 讀取端 merge 語義
 
 - **hippo 讀取端**（`resolve_project` 預設載入）union-read：legacy `projects.yaml` ∪ `project-hippo.yaml`。同 slug 併 roots/remotes/aliases（manual 條目與值序在前）；alias 衝突 manual 優先（記 warning）。legacy `projects.yaml` 不搬移、不改寫（非破壞過渡）。
 - **cortex 讀取端**：`project-cortex.yaml`（curated intent）∪ `project-hippo.yaml`（discovered activity），union 去重＝真正監控集——cortex 側行為不在本 repo 範圍，本文件僅保證檔案契約。
 - Consumer 解析建議：忽略未知欄位；`schema_version` 大於已知版本時 best-effort 讀 v1 欄位。
+- **hippo 解析優先序（#117 補充）**：cwd／顯式 toplevel 的 roots 前綴匹配 → 顯式 payload remote → **linked worktree 歸併為主 repo root 後再比對 roots**（`<repo>-worktrees/<branch>` 與 `.worktrees/<name>` 皆收斂到主 repo 的 slug）→ 現場 git remote 經 `remotes` 對應（未登記回 raw remote）→ 無 remote 時的目錄名 fallback 以**主 repo root** 命名。位於暫存根（預設 `/tmp`、`/var/tmp`、`/dev/shm` 與系統暫存目錄；`HIPPO_EPHEMERAL_ROOTS` 以 `os.pathsep` 分隔覆寫、空字串停用；`/`、HOME 與其祖先一律排除）下、無 remote 且未登記的 checkout 歸 `_unknown`，不以目錄名產生假 project。
 
 ## 7. 版本演進
 

@@ -291,11 +291,33 @@ def record_discovery(
     前向防護：既有檔 schema_version 高於 SCHEMA_VERSION 時拒寫並記 warning
     （回 False），避免舊 producer 把新版檔案降級重繪、刪除未知欄位。
     """
-    if not slug.strip():
-        # 寫入端邊界與 reader（_finalize_registry_item）對齊：全空白 slug 在 parse
-        # 端會被靜默丟棄——若放行落盤，下一筆任意 discovery 的 parse→merge→render
-        # 重繪就把該 entry 無聲永久抹除。writer 不得接受 reader 不承認的輸入。
-        raise ValueError("slug must not be empty or whitespace-only")
+    incoming = ProjectConfig(
+        slug=slug,
+        roots=tuple(str(item) for item in roots if item),
+        remotes=tuple(str(item) for item in remotes if item),
+        aliases=tuple(str(item) for item in aliases if item),
+    )
+    return record_discoveries((incoming,), registry_path=registry_path)
+
+
+def record_discoveries(
+    entries: Sequence[ProjectConfig],
+    *,
+    registry_path: str | Path,
+    backup_path: str | Path | None = None,
+) -> bool:
+    """在同一把 registry lock 內依序併入多筆 discovery；回傳檔案是否變更。
+
+    `backup_path` 有給且內容將變更、原檔存在時，於同一 lock 內、`os.replace` 之前
+    先把原檔 bytes 原樣寫到 backup_path（#117 backfill 的回復點；lock 外備份會與
+    並行 auto-write 競態，回復點可能不是實際被覆寫的版本）。
+    """
+    for entry in entries:
+        if not entry.slug.strip():
+            # 寫入端邊界與 reader（_finalize_registry_item）對齊：全空白 slug 在 parse
+            # 端會被靜默丟棄——若放行落盤，下一筆任意 discovery 的 parse→merge→render
+            # 重繪就把該 entry 無聲永久抹除。writer 不得接受 reader 不承認的輸入。
+            raise ValueError("slug must not be empty or whitespace-only")
     path = Path(registry_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(LOCK_FILENAME)
@@ -303,8 +325,14 @@ def record_discovery(
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
         try:
             try:
-                existing_text: str | None = path.read_text(encoding="utf-8")
-            except (OSError, ValueError):
+                existing_bytes: bytes | None = path.read_bytes()
+            except OSError:
+                existing_bytes = None
+            try:
+                existing_text: str | None = (
+                    existing_bytes.decode("utf-8") if existing_bytes is not None else None
+                )
+            except ValueError:
                 # 壞 bytes 視同缺檔：下一筆 discovery 重寫 canonical bytes（自癒，
                 # 契約 §5 手改情境以 canonical 化覆蓋而非 crash）。
                 existing_text = None
@@ -323,16 +351,18 @@ def record_discovery(
                         path,
                     )
                     return False
-            existing = parse_registry(existing_text) if existing_text is not None else ()
-            incoming = ProjectConfig(
-                slug=slug,
-                roots=tuple(str(item) for item in roots if item),
-                remotes=tuple(str(item) for item in remotes if item),
-                aliases=tuple(str(item) for item in aliases if item),
-            )
-            rendered = render_registry(merge_discovery(existing, incoming))
+            merged = parse_registry(existing_text) if existing_text is not None else ()
+            for entry in entries:
+                merged = merge_discovery(merged, entry)
+            rendered = render_registry(merged)
             if existing_text == rendered:
                 return False
+            if backup_path is not None and existing_bytes is not None:
+                backup = Path(backup_path)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                backup_tmp = backup.with_name(f".{backup.name}.tmp")
+                backup_tmp.write_bytes(existing_bytes)
+                os.replace(backup_tmp, backup)
             tmp_path = path.with_name(TMP_FILENAME)
             tmp_path.write_text(rendered, encoding="utf-8")
             os.replace(tmp_path, path)

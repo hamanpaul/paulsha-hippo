@@ -21,9 +21,12 @@ from . import _git
 from . import registry
 from . import title
 from .classifier import classify_session
+from .config import default_projects_path
 from .frontmatter import render_markdown
 from .project_resolver import normalize_remote
 from .project_resolver import resolve_project
+from .registry import load_union_projects_config
+from .remote_backfill import root_registered_remote
 from .sanitizer import SanitizationError, sanitize_session
 
 _SCOPE_RANK = {"turn": 0, "subagent": 0, "pre_compact": 0, "session_end": 1, "watcher_final": 2}
@@ -472,6 +475,7 @@ def _discovery_candidate(
     main_root: str | None,
     remotes: tuple[str, ...],
     memory_root: Path,
+    probed_remote: str = "",
 ) -> dict[str, Any] | None:
     """Discovery 寫入 gate（#14）：僅當 slug 由 remote 正規化派生時才產生 registry 候選。
 
@@ -490,6 +494,12 @@ def _discovery_candidate(
     slug 實由現場探測 remote 派生時，不相干 remote 不得搭便車落盤（否則真
     remote 恰為該值的無關 repo 會經 union-read remote match 被誤判成本 slug，
     自我強化污染的另一變體）。
+
+    root 登記派生（#117）：slug 由「恰等於主 repo root 的 registered root」派生時，
+    以現場 git 探測的 `probed_remote`（不含 payload remote）補進該 slug——否則只登記
+    roots 的既有 project 永遠補不到 remotes，`<repo>-worktrees/<branch>` 只能落 raw
+    remote 另開 bucket。祖先目錄 root、多 slug 共登同 root、remote 已被其他 slug
+    認領者一律不補（判準見 importer/remote_backfill.py）。
     """
     anchor_remotes = tuple(sorted({value for value in remotes if value}))
     if not slug or slug == "_unknown" or not anchor_remotes:
@@ -503,6 +513,17 @@ def _discovery_candidate(
         for remote in anchor_remotes
         if slug == remote or slug == resolve_project(remote_url=remote, memory_root=str(memory_root))
     )
+    if not validated_remotes and main_root and probed_remote:
+        root_remote = root_registered_remote(
+            slug=slug,
+            main_root=main_root,
+            probed_remote=probed_remote,
+            projects=load_union_projects_config(
+                default_projects_path(memory_root), registry.default_registry_path(memory_root)
+            ),
+        )
+        if root_remote:
+            validated_remotes = (root_remote,)
     if not validated_remotes:
         LOGGER.debug(
             "project registry discovery skipped（slug 非 remote 派生，不落盤）: slug=%s remotes=%s",
@@ -647,6 +668,7 @@ def _preview_queue_item_unlocked(queue_item: str | Path, *, memory_root: str | P
         main_root=main_root,
         remotes=(payload_remote, discovered_remote),
         memory_root=root,
+        probed_remote=discovered_remote,
     )
     decision["rendered"] = render_markdown(
         rendered_session,

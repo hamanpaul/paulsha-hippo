@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from paulsha_hippo.importer.config import ProjectConfig
 from paulsha_hippo.importer.pipeline import ingest_queue_item
-from paulsha_hippo.importer.registry import parse_registry
+from paulsha_hippo.importer.registry import parse_registry, render_registry
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -280,6 +281,100 @@ class RegistryAutoWriteTest(unittest.TestCase):
             name="victim.json",
         )
         self.assertEqual(victim_decision["project"], "github.com/acme/unrelated-victim")
+
+    def seed_registry(self, *projects):
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_path.write_text(render_registry(projects), encoding="utf-8")
+
+    def commit_and_add_sibling_worktree(self, repo, branch="feature-x"):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+        )
+        worktree = self.base / f"{repo.name}-worktrees" / branch
+        worktree.parent.mkdir(exist_ok=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(worktree)],
+            check=True, capture_output=True,
+        )
+        return worktree
+
+    def test_root_registered_project_gets_probed_remote(self):
+        # #117 根因：registry 只有 roots 的既有 project，舊 gate 認定 slug 非 remote 派生而
+        # 永遠不補 remotes——worktree session 只能落 raw remote 另開 bucket。registered root
+        # 恰為主 repo root 時，現場探測到的 origin remote 必須補進該 slug。
+        self.enable_auto_write()
+        repo = self.make_repo()
+        self.seed_registry(ProjectConfig(slug="widget", roots=(str(repo.resolve()),)))
+        decision = self.ingest(self.payload(cwd=repo, session_id="registry-sid-root-probe"))
+        self.assertEqual(decision["project"], "widget")
+        projects = self.read_projects()
+        self.assertEqual([project.slug for project in projects], ["widget"])
+        self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
+        self.assertEqual(projects[0].roots, (str(repo.resolve()),))
+        before = self.registry_path.read_bytes()
+        self.ingest(self.payload(cwd=repo, session_id="registry-sid-root-probe-2"), name="again.json")
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
+    def test_sibling_worktree_session_resolves_registered_slug_and_backfills_remote(self):
+        self.enable_auto_write()
+        repo = self.make_repo()
+        worktree = self.commit_and_add_sibling_worktree(repo)
+        self.seed_registry(ProjectConfig(slug="widget", roots=(str(repo.resolve()),)))
+        decision = self.ingest(self.payload(cwd=worktree, session_id="registry-sid-wt-root"))
+        self.assertEqual(decision["project"], "widget")
+        projects = self.read_projects()
+        self.assertEqual([project.slug for project in projects], ["widget"])
+        self.assertEqual(projects[0].remotes, ("github.com/acme/widget",))
+        self.assertEqual(projects[0].roots, (str(repo.resolve()),))
+
+    def test_root_registration_skips_remote_claimed_by_other_slug(self):
+        # 同一 remote 對到兩個 slug 會讓 remote 解析取決於清單順序、task-memory provider
+        # 判 scope-mismatch——root 路徑補 remotes 前必須確認沒有其他 slug 已認領。
+        self.enable_auto_write()
+        projects_yaml = self.base / "agents" / "config" / "projects.yaml"
+        projects_yaml.parent.mkdir(parents=True, exist_ok=True)
+        projects_yaml.write_text(
+            "projects:\n  widget-manual:\n    remotes:\n      - github.com/acme/widget\n",
+            encoding="utf-8",
+        )
+        repo = self.make_repo()
+        self.seed_registry(ProjectConfig(slug="widget", roots=(str(repo.resolve()),)))
+        before = self.registry_path.read_bytes()
+        decision = self.ingest(self.payload(cwd=repo, session_id="registry-sid-claimed"))
+        self.assertEqual(decision["project"], "widget")
+        self.assertIsNone(decision.get("discovery"))
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
+    def test_parent_root_registration_does_not_capture_nested_repo_remote(self):
+        # registered root 只是主 repo root 的祖先（workspace 目錄）時，巢狀 repo 的 remote
+        # 不屬於該 slug——補登會讓同 remote 的其他 checkout 全被吸進 workspace slug。
+        self.enable_auto_write()
+        repo = self.make_repo()
+        self.seed_registry(ProjectConfig(slug="workspace", roots=(str(self.base.resolve()),)))
+        before = self.registry_path.read_bytes()
+        decision = self.ingest(self.payload(cwd=repo, session_id="registry-sid-parent-root"))
+        self.assertEqual(decision["project"], "workspace")
+        self.assertIsNone(decision.get("discovery"))
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
+    def test_root_registration_never_attaches_payload_only_remote(self):
+        # root 路徑只信現場 git 探測；payload 夾帶的 remote_url 未經探測佐證，不得補登。
+        self.enable_auto_write()
+        repo = self.make_repo(remote=None)
+        self.seed_registry(ProjectConfig(slug="widget", roots=(str(repo.resolve()),)))
+        before = self.registry_path.read_bytes()
+        decision = self.ingest(
+            self.payload(
+                cwd=repo,
+                session_id="registry-sid-payload-remote",
+                remote_url="git@github.com:acme/widget.git",
+            )
+        )
+        self.assertEqual(decision["project"], "widget")
+        self.assertIsNone(decision.get("discovery"))
+        self.assertEqual(self.registry_path.read_bytes(), before)
 
     def test_registry_failure_does_not_break_ingest(self):
         self.enable_auto_write()
