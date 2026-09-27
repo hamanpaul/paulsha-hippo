@@ -16,7 +16,9 @@ def _seed(mr: Path):
 
 
 def _run(mr: Path, payload: dict) -> dict:
-    env = {"PSC_MEMORY_ROOT": str(mr), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path.cwd())}
+    # pytest tmp_path 位於系統暫存目錄：本測試驗注入鏈，不驗 #117 暫存 checkout 判定，故停用暫存根。
+    env = {"PSC_MEMORY_ROOT": str(mr), "PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path.cwd()),
+           "HIPPO_EPHEMERAL_ROOTS": ""}
     p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                        capture_output=True, text=True, env=env)
     assert p.returncode == 0, p.stderr

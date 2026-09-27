@@ -48,7 +48,10 @@ external_agents:
       supported_models: [sonnet]
       effort: high
       supported_efforts: [medium, high, xhigh]
-      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --safe-mode, --disable-slash-commands, --strict-mcp-config, --mcp-config, '{"mcpServers":{}}', --tools, "", --no-session-persistence, --print]
+      # issue #157: --system-prompt 取代 Claude Code 預設（要求 Markdown 排版的）系統提示，
+      # 否則模型常把輸出包進 ```json fence 或前置散文，嚴格 parser 判 invalid_output。
+      # 內容必須與 agent_profiles.DISTILLER_SYSTEM_PROMPT 逐字相同（模板漂移守門測試）。
+      argv: [claude, --model, "{MODEL}", --effort, "{EFFORT}", --safe-mode, --disable-slash-commands, --strict-mcp-config, --mcp-config, '{"mcpServers":{}}', --tools, "", --no-session-persistence, --system-prompt, "You are a non-interactive text-transformation function invoked by a program, not a chat assistant. Reply with exactly the output the user message asks for, in exactly the format it specifies. Your reply is consumed verbatim by a strict machine parser: never wrap it in Markdown or code fences, and never add headings, commentary, or any other text before or after it.", --print]
     - id: codex
       enabled: true
       tier: 1

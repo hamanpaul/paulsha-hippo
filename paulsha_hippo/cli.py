@@ -34,6 +34,16 @@ def _pct_arg(s):
     return v
 
 
+def _retention_days_arg(s: str) -> float:
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--retention-days must be a number") from None
+    if not math.isfinite(v) or v < 0:
+        raise argparse.ArgumentTypeError("--retention-days must be a finite number >= 0")
+    return v
+
+
 def _tool_arg(s: str) -> str:
     """`--tool` 會嵌入 runtime/wakeup 檔名：argparse 層即拒絕非 path-safe token（防 traversal）。"""
     from .hooks._wakeup_common import validate_tool
@@ -349,6 +359,25 @@ def _build_parser() -> argparse.ArgumentParser:
     index_verify.add_argument("--memory-root", required=True)
     index_verify.set_defaults(func=_index_verify)
 
+    registry_p = memory_subparsers.add_parser("registry", help="project registry 維運（#117）")
+    registry_subparsers = registry_p.add_subparsers(dest="registry_command", required=True)
+    backfill_remotes_p = registry_subparsers.add_parser(
+        "backfill-remotes",
+        help="一次性為既有 project 探測 roots 的 origin remote 並補進 generated registry "
+             "（#117）。預設 dry-run 只輸出計畫；--apply 才寫入，寫前備份並輸出回復指令；冪等。")
+    backfill_remotes_p.add_argument(
+        "--memory-root", default=None,
+        help="由 memory root 推導 registry／projects.yaml 預設位置（同 importer）；"
+             "省略時用 paths 預設（~/.agents/config）。")
+    backfill_remotes_p.add_argument(
+        "--registry", default=None, help="generated registry 路徑（覆寫預設 project-hippo.yaml）。")
+    backfill_remotes_p.add_argument(
+        "--projects", default=None, help="legacy manual projects.yaml 路徑（只讀，不改寫）。")
+    bgroup_remotes = backfill_remotes_p.add_mutually_exclusive_group()
+    bgroup_remotes.add_argument("--dry-run", action="store_true")
+    bgroup_remotes.add_argument("--apply", action="store_true")
+    backfill_remotes_p.set_defaults(func=_registry_backfill_remotes)
+
     wakeup_p = memory_subparsers.add_parser("wakeup")
     wakeup_p.add_argument("--memory-root", default=str(paths.memory_root()))
     wakeup_p.add_argument("--project", default=None)
@@ -414,6 +443,21 @@ def _build_parser() -> argparse.ArgumentParser:
     kgroup.add_argument("--dry-run", action="store_true")
     kgroup.add_argument("--apply", action="store_true")
     rekey_p.set_defaults(func=_rekey)
+
+    bucket_report_p = knowledge_subparsers.add_parser(
+        "bucket-report",
+        help="唯讀 impact report（#117）：以 union registry（預設疊加 registry backfill-remotes "
+             "的補登計畫）重新推導各 knowledge note 的目標 slug，列出哪些 bucket 會併到哪個 "
+             "slug、各幾筆與 _unknown 成因分類；不搬檔、不寫任何檔案。")
+    bucket_report_p.add_argument("--memory-root", required=True)
+    bucket_report_p.add_argument(
+        "--registry", default=None, help="generated registry 路徑（覆寫預設 project-hippo.yaml）。")
+    bucket_report_p.add_argument(
+        "--projects", default=None, help="legacy manual projects.yaml 路徑。")
+    bucket_report_p.add_argument(
+        "--no-backfill-overlay", action="store_true",
+        help="只用現況 registry 推導，不疊加 backfill-remotes 的補登計畫。")
+    bucket_report_p.set_defaults(func=_knowledge_bucket_report)
 
     entity_hubs_p = knowledge_subparsers.add_parser(
         "entity-hubs",
@@ -536,6 +580,31 @@ def _build_parser() -> argparse.ArgumentParser:
     locks_cleanup.add_argument("--memory-root", required=True)
     locks_cleanup.add_argument("--apply", action="store_true")
     locks_cleanup.set_defaults(func=_locks_cleanup_legacy)
+
+    archive_p = memory_subparsers.add_parser("archive", help="archive 維運（#151 容量回收）")
+    archive_sub = archive_p.add_subparsers(dest="archive_command", required=True)
+    archive_gc = archive_sub.add_parser(
+        "gc",
+        help="回收對應 session 已落成 knowledge 的 archive/sessions、archive/fragments 衍生副本"
+             "（以 processing ledger 為準；archive/queue raw capture 一律保留；預設 dry-run，--apply 才刪）",
+    )
+    archive_gc.add_argument("--memory-root", required=True)
+    archive_gc.add_argument(
+        "--retention-days", type=_retention_days_arg, default=7.0,
+        help="安全保留窗：落成時間或檔案 mtime 未滿 N 天者保留（預設 7；0 表示不保留）")
+    archive_gc.add_argument(
+        "--include-no-findings", action="store_true",
+        help="把 no-findings（已蒸餾但未產出 knowledge）的 session 也視為可回收；預設只收 promoted")
+    archive_gc.add_argument(
+        "--list-out", default=None,
+        help="刪除清單寫入此檔（每行 <相對路徑>\\t<bytes>\\t<session_key>）；未給時清單列在 JSON 報告")
+    archive_gc.add_argument("--now", default=None, help="ISO8601 時間戳；未給時取當下 UTC")
+    archive_gc_mode = archive_gc.add_mutually_exclusive_group()
+    archive_gc_mode.add_argument("--dry-run", action="store_true", help="只產出報告（預設行為）")
+    archive_gc_mode.add_argument(
+        "--apply", action="store_true",
+        help="實際刪除（需取得 dream lock；dream run 進行中則拒絕）")
+    archive_gc.set_defaults(func=_archive_gc)
 
     ledger_p = memory_subparsers.add_parser("ledger", help="append-only ledger 維運")
     ledger_sub = ledger_p.add_subparsers(dest="ledger_command", required=True)
@@ -835,6 +904,83 @@ def _write_task_memory_stdout(stream, encoded: bytes) -> None:
     stream.flush()
 
 
+def _registry_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    from .importer.config import default_projects_path
+    from .importer.registry import default_registry_path
+
+    memory_root = getattr(args, "memory_root", None)
+    registry = Path(args.registry) if args.registry else default_registry_path(memory_root)
+    projects = Path(args.projects) if args.projects else default_projects_path(memory_root)
+    return registry, projects
+
+
+def _registry_backfill_remotes(args: argparse.Namespace) -> int:
+    """`hippo registry backfill-remotes`：既有 registry 的 remotes 一次性補登（#117）。"""
+    from .importer import remote_backfill
+    from .importer.registry import load_union_projects_config
+
+    registry_path, projects_path = _registry_paths(args)
+    apply = bool(getattr(args, "apply", False))
+    items = remote_backfill.plan_remote_backfill(
+        load_union_projects_config(projects_path, registry_path)
+    )
+    report = {
+        "mode": "apply" if apply else "dry-run",
+        "registry": str(registry_path),
+        "projects": str(projects_path),
+        "items": items,
+        "summary": remote_backfill.summarize_plan(items),
+        "changed": False,
+        "backup": None,
+        "restore": None,
+    }
+    exit_code = 0
+    if apply:
+        messages = {
+            "written": "已寫入 registry；回復請執行 restore 指令（會一併捨棄之後其他 writer 的寫入）。",
+            "unchanged": "寫入當下 registry 已是目標狀態（可能已由其他行程補上），未變更。",
+            "nothing-to-add": "計畫中沒有需要補登的 remote，未變更。",
+        }
+        try:
+            report.update(remote_backfill.apply_remote_backfill(items, registry_path))
+        except (OSError, ValueError) as exc:
+            report["error"] = str(exc)
+            exit_code = 1
+        else:
+            status = report["write_status"]
+            if status == "refused-schema":
+                report["error"] = (
+                    "registry 的 schema_version 高於本 producer 支援版本，拒絕寫入（避免降級刪除新版欄位）。"
+                )
+                exit_code = 1
+            else:
+                report["message"] = messages.get(status, "")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return exit_code
+
+
+def _knowledge_bucket_report(args: argparse.Namespace) -> int:
+    """`hippo knowledge bucket-report`：bucket 合併 dry-run impact report（#117，唯讀）。"""
+    from . import bucket_report
+    from .importer import remote_backfill
+    from .importer.registry import load_union_projects_config
+
+    registry_path, projects_path = _registry_paths(args)
+    projects = load_union_projects_config(projects_path, registry_path)
+    planned: list[dict] = []
+    if not args.no_backfill_overlay:
+        additions = remote_backfill.planned_additions(remote_backfill.plan_remote_backfill(projects))
+        planned = [{"slug": entry.slug, "remotes": list(entry.remotes)} for entry in additions]
+        projects = remote_backfill.overlay_additions(projects, additions)
+    report = bucket_report.build_bucket_report(
+        Path(args.memory_root), projects, planned_remote_backfill=planned
+    )
+    report["registry"] = str(registry_path)
+    report["projects"] = str(projects_path)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _index_verify(args: argparse.Namespace) -> int:
     from .moc.cli import run_index_verify
 
@@ -1049,7 +1195,7 @@ def _retitle_untitled(args: argparse.Namespace) -> int:
     corpus = corpus_for_roots(getattr(args, "instruction_root", None))
 
     def distill(body: str):
-        title, _source = generate_atom_title(body)
+        title, _source = generate_atom_title(body, memory_root=root)
         return title
 
     summary = retitle_mod.retitle_untitled(
@@ -2532,6 +2678,30 @@ def _locks_cleanup_legacy(args: argparse.Namespace) -> int:
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     if (result.get("blocked") or result.get("busy")
             or result.get("unknown") or result.get("unsafe_locks_dir")):
+        return 1
+    return 0
+
+
+def _archive_gc(args: argparse.Namespace) -> int:
+    from paulsha_hippo import archive_gc
+
+    now = None
+    if args.now:
+        try:
+            now = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+        except ValueError:
+            print(f"hippo archive gc: error: invalid --now: {args.now}", file=sys.stderr)
+            return 2
+    result = archive_gc.run_archive_gc(
+        Path(args.memory_root),
+        now=now,
+        retention_days=args.retention_days,
+        include_no_findings=args.include_no_findings,
+        apply=args.apply,
+        list_out=args.list_out,
+    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if result.get("error") or result.get("blocked") or result.get("failed"):
         return 1
     return 0
 

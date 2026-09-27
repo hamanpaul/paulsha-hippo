@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
 
 from paulsha_hippo import paths
+from paulsha_hippo.agent_health import ProfileHealthStore, profile_health_path
 from paulsha_hippo.agent_profiles import (
     AgentProfile,
     ExternalAgentRouter,
@@ -26,6 +28,23 @@ _ATOM_PROMPT = (
     "請用繁體中文為以下筆記內容下一個精簡標題，最多 20 個字、單行、不要標點或引號：\n\n"
     "{body}\n\n標題："
 )
+
+
+# issue #157：title 生成（hook 裡的 importer、retitle）與 dream 共用 profile
+# 健康狀態，確定性必敗的 profile 不再每次重打外部 CLI。memory root 由
+# ``generate_title``／``generate_atom_title`` 的 ``memory_root`` 參數設定，
+# 以 ContextVar 傳到 ``_default_runner``——保留它 ``(text, command, timeout)``
+# 的既有簽名（測試與 operator 以它為替換點）。沒有 memory root 時不讀寫狀態。
+_HEALTH_MEMORY_ROOT: ContextVar[Path | None] = ContextVar(
+    "hippo_title_health_memory_root", default=None
+)
+
+
+def _title_health() -> ProfileHealthStore | None:
+    memory_root = _HEALTH_MEMORY_ROOT.get()
+    if memory_root is None:
+        return None
+    return ProfileHealthStore(profile_health_path(memory_root))
 
 
 def _truncate(text: str, limit: int = _MAX) -> str:
@@ -49,16 +68,24 @@ def _custom_profile(command: tuple[str, ...]) -> AgentProfile:
     )
 
 
-def _configured_router(config: atomizer_config.AtomizerConfig, *, timeout: int) -> ExternalAgentRouter:
+def _configured_router(
+    config: atomizer_config.AtomizerConfig,
+    *,
+    timeout: int,
+    health: ProfileHealthStore | None = None,
+) -> ExternalAgentRouter:
     deadline = config.router_deadline_seconds
     if timeout > 0:
         deadline = min(int(timeout), deadline)
+    # 沒有 memory root 時 router 的建構參數與先前完全相同。
+    extra: dict[str, Any] = {} if health is None else {"health": health}
     return ExternalAgentRouter(
         config.external_profiles,
         task_class="title",
         deadline_seconds=deadline,
         max_attempts=config.router_max_attempts,
         max_agent_calls=config.router_max_agent_calls,
+        **extra,
     )
 
 
@@ -74,7 +101,7 @@ def _default_runner(text: str, command: tuple[str, ...] | None, timeout: int) ->
         # In particular, do not recover from a broken policy/config by silently
         # reconstructing the legacy/default profile set.
         config, _ = atomizer_config.load_config()
-        return _configured_router(config, timeout=timeout).run(text)
+        return _configured_router(config, timeout=timeout, health=_title_health()).run(text)
     custom_profile = _custom_profile(tuple(command))
     return ExternalAgentRouter(
         (custom_profile,),
@@ -91,8 +118,23 @@ def generate_title(
     command: tuple[str, ...] | None = None,
     timeout: int = 60,
     runner: Callable[[str, tuple[str, ...], int], str] | None = None,
+    memory_root: str | Path | None = None,
 ) -> tuple[str, str]:
     """Return ``(title, source)``; successful external CLI output is auditable."""
+    token = _HEALTH_MEMORY_ROOT.set(Path(memory_root) if memory_root is not None else None)
+    try:
+        return _generate_title(session, command=command, timeout=timeout, runner=runner)
+    finally:
+        _HEALTH_MEMORY_ROOT.reset(token)
+
+
+def _generate_title(
+    session: dict[str, Any],
+    *,
+    command: tuple[str, ...] | None,
+    timeout: int,
+    runner: Callable[[str, tuple[str, ...], int], str] | None,
+) -> tuple[str, str]:
     prompts = session.get("user_prompts") or []
     first_prompt = prompts[0] if prompts else ""
     summary = session.get("assistant_summary") or ""
@@ -120,8 +162,23 @@ def generate_atom_title(
     command: tuple[str, ...] | None = None,
     timeout: int = 60,
     runner: Callable[[str, tuple[str, ...], int], str] | None = None,
+    memory_root: str | Path | None = None,
 ) -> tuple[str | None, str]:
     """Generate an atom title through the shared external CLI router."""
+    token = _HEALTH_MEMORY_ROOT.set(Path(memory_root) if memory_root is not None else None)
+    try:
+        return _generate_atom_title(body, command=command, timeout=timeout, runner=runner)
+    finally:
+        _HEALTH_MEMORY_ROOT.reset(token)
+
+
+def _generate_atom_title(
+    body: str,
+    *,
+    command: tuple[str, ...] | None,
+    timeout: int,
+    runner: Callable[[str, tuple[str, ...], int], str] | None,
+) -> tuple[str | None, str]:
     if not body.strip():
         return None, "offline"
     text = _ATOM_PROMPT.format(body=body[:1000])
@@ -231,7 +288,7 @@ def apply(session: dict[str, Any], *, memory_root: str | Path, **kwargs: Any) ->
             return session
         except (OSError, json.JSONDecodeError, KeyError):
             pass
-    title, source = generate_title(session, **kwargs)
+    title, source = generate_title(session, memory_root=memory_root, **kwargs)
     if source == "external-agent":
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_name(f".{cache.name}.tmp")
