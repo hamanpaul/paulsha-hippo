@@ -356,16 +356,29 @@ def _build_parser() -> argparse.ArgumentParser:
     h2_run_p.add_argument("--out", required=True, help="records JSONL（私有位置）")
     h2_run_p.add_argument("--deny-terms", default=None, help="私有字詞清單（C 組送出前掃描用）")
     h2_run_p.add_argument("--stability", action="store_true",
-                          help="只對 hidden 依 seed 抽出的 8 題重跑 B、C 一次（repeat=1）")
+                          help="只對 hidden 依協定 seed 抽出的題目（v4：8 題；v4.1：10 題）重跑 B、C 一次（repeat=1）")
     h2_run_p.add_argument("--b-model", default="sonnet")
+    h2_run_p.add_argument("--protocol", choices=("v4", "v4.1"), default="v4",
+                          help="協定版本：決定 C 問法版本與穩定性抽樣（預設 v4，第一輪）")
+    h2_run_p.add_argument("--c-revision", default=None,
+                          help="覆寫 C 問法版本（例如 v4.1 在 dev 修訂後的 rev3）；省略時依協定")
     h2_run_p.set_defaults(func=_h2_run)
-    h2_score_p = h2_sub.add_parser("score", help="#167：計分並依 v4 門檻判定 go／no-go（確定性）")
+    h2_score_p = h2_sub.add_parser("score", help="#167：計分並依協定門檻判定 go／no-go（確定性）")
     h2_score_p.add_argument("--frozen", required=True)
     h2_score_p.add_argument("--gold", required=True, help="gold-final.json（私有）")
     h2_score_p.add_argument("--split-file", required=True)
     h2_score_p.add_argument("--split", choices=("dev", "hidden"), required=True)
     h2_score_p.add_argument("--records", required=True)
+    h2_score_p.add_argument("--protocol", choices=("v4", "v4.1"), default="v4",
+                            help="v4：第一輪門檻；v4.1：分層計分，只看 C 對 A、C 本身與隱私")
     h2_score_p.set_defaults(func=_h2_score)
+    h2_split_p = h2_sub.add_parser(
+        "split", help="v4.1：gold 完成後依 empty／non-empty 分層，用事先登錄的 seed 抽出 dev／hidden（確定性）")
+    h2_split_p.add_argument("--frozen", required=True)
+    h2_split_p.add_argument("--gold", required=True, help="gold-final.json（私有）")
+    h2_split_p.add_argument("--seed", required=True, help="事先登錄的抽樣 seed")
+    h2_split_p.add_argument("--out", required=True, help="split JSON（私有位置）")
+    h2_split_p.set_defaults(func=_h2_split)
 
     task_memory_p = memory_subparsers.add_parser(
         "task-memory",
@@ -2057,18 +2070,20 @@ def _h2_run(args: argparse.Namespace) -> int:
         frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
         task_ids = _h2_load_split(args)
         arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
+        protocol = h2_bench.PROTOCOLS[args.protocol]
+        c_revision = args.c_revision or protocol["c_revision"]
         repeat = 0
         if args.stability:
             if args.split != "hidden":
                 raise ValueError("--stability 只用於 hidden")
-            task_ids = h2_bench.stability_tasks(task_ids)
+            task_ids = h2_bench.stability_tasks(task_ids, protocol["stability_seed"], protocol["stability_n"])
             arms = [a for a in arms if a in ("B", "C")]
             repeat = 1
         deny = h2_offline.load_deny_terms(Path(args.deny_terms) if args.deny_terms else None)
         if "C" in arms and not deny:
             raise ValueError("C 組需要 --deny-terms（送出前掃描）")
         stats = h2_bench.run(
-            frozen, task_ids, arms, Path(args.out), deny_terms=deny, repeat=repeat,
+            frozen, task_ids, arms, Path(args.out), deny_terms=deny, repeat=repeat, c_revision=c_revision,
             jev=h2_bench.JevClient() if "C" in arms else None,
             claude=h2_bench.ClaudeFilter(model=args.b_model) if "B" in arms else None,
             progress=lambda r: print(f"{r['arm']} r{r['repeat']} {r['task_id']:28} {r['selected']} "
@@ -2090,11 +2105,34 @@ def _h2_score(args: argparse.Namespace) -> int:
         task_ids = _h2_load_split(args)
         records = [json.loads(line) for line in Path(args.records).read_text(encoding="utf-8").splitlines()
                    if line.strip()]
-        summary = h2_bench.score(frozen, h2_bench.load_gold(Path(args.gold)), task_ids, records)
+        gold = h2_bench.load_gold(Path(args.gold))
+        if args.protocol == "v4.1":
+            summary = h2_bench.score_v41(frozen, gold, task_ids, records)
+            decision = h2_bench.decide_v41(summary)
+        else:
+            summary = h2_bench.score(frozen, gold, task_ids, records)
+            decision = h2_bench.decide(summary)
     except (OSError, ValueError, KeyError) as exc:
         print(f"hippo h2 score: error: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({"summary": summary, "decision": h2_bench.decide(summary)}, ensure_ascii=False, indent=2))
+    print(json.dumps({"summary": summary, "decision": decision}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _h2_split(args: argparse.Namespace) -> int:
+    """v4.1：gold 分層抽出 dev／hidden。"""
+    from . import h2_bench
+
+    try:
+        frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
+        split = h2_bench.stratified_split(frozen, h2_bench.load_gold(Path(args.gold)), args.seed)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(split, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"hippo h2 split: error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({k: split[k] for k in ("counts", "generalization_scope")}, ensure_ascii=False))
     return 0
 
 

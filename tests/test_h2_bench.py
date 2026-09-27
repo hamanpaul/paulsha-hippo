@@ -213,3 +213,124 @@ def test_cli_score(tmp_path, capsys):
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["summary"]["arms"]["C"]["precision_at_3"] == 1.0
+
+
+# ---------------------------------------------------------------- v4.1
+
+FILL = B.FILL_REPO
+
+
+def _rtask(task_id, repo=FILL, n=3):
+    task = _task(task_id, n=n)
+    task["repo"] = repo
+    return task
+
+
+def test_c_revision_selects_criteria_and_is_recorded(tmp_path):
+    task = _task("t1")
+    request = B.build_c_request(task, "rev2")
+    assert request["questions"]["c1"]["criteria"] == B.C_CRITERIA_REV2
+    assert "not enough" in request["questions"]["c1"]["criteria"]["no"]
+    assert B.build_c_request(task)["questions"]["c1"]["criteria"] == B.C_CRITERIA  # 預設仍是 v4 的 rev1
+    with pytest.raises(B.BenchError):
+        B.build_c_request(task, "rev9")
+    body = {"model": "jev-1.13.0", "answers": _yes_answers(request, {"c1"}), "usage": {"input_tokens": 10}}
+    B.run(_frozen(task), ["t1"], ["C"], tmp_path / "r.jsonl", jev=_jev([(200, body, {})]), c_revision="rev2")
+    assert B._load_records(tmp_path / "r.jsonl")[0]["details"]["c_revision"] == "rev2"
+    assert B.PROTOCOLS["v4.1"]["c_revision"] == "rev2" and B.PROTOCOLS["v4"]["c_revision"] == "rev1"
+
+
+def test_task_strata_and_unresolved_not_counted_in_precision():
+    frozen = _frozen(_task("t1"), _task("t2"), _task("t3"))
+    gold = _gold(frozen, {("t1", 1)})
+    gold["t3#c1"] = "unresolved"
+    assert B.task_strata(frozen, gold) == {"t1": "non-empty", "t2": "empty", "t3": "indeterminate"}
+    metrics = B._arm_metrics(frozen, gold, ["t1", "t3"], {"t1": _rec("C", "t1", ["c1"]), "t3": _rec("C", "t3", ["c1"])})
+    assert metrics["precision_at_3"] == 1.0 and metrics["counts"]["unresolved"] == 1
+
+
+def test_stratified_split_prefers_non_fill_for_hidden_and_is_deterministic():
+    other = "github.com/example/widget"
+    tasks = [_rtask(f"e{i}", other if i < 2 else FILL) for i in range(6)]
+    tasks += [_rtask(f"n{i}", other if i < 1 else FILL) for i in range(8)]
+    tasks.append(_rtask("x0"))
+    tasks.append(_task("u0", egress_task="excluded"))  # C 送不出去：不能白拿 empty 層的一題
+    frozen = _frozen(*tasks)
+    gold = _gold(frozen, {(f"n{i}", 1) for i in range(8)})
+    gold["x0#c2"] = "unresolved"
+    kwargs = {"hidden_empty": 3, "hidden_nonempty": 3, "dev_total": 4, "dev_empty": 1}
+    split = B.stratified_split(frozen, gold, "seed-a", **kwargs)
+    assert {"e0", "e1", "n0"} <= set(split["hidden"]) and len(split["hidden"]) == 6
+    assert len(split["dev"]) == 4 and not set(split["dev"]) & set(split["hidden"])
+    assert sum(t.startswith("e") for t in split["dev"]) == 1
+    assert not {"x0", "u0"} & set(split["dev"] + split["hidden"])
+    assert split["counts"] == {"empty": 6, "non-empty": 8, "indeterminate": 1, "not-sendable": 1,
+                               "hidden_non_cortex": 3}
+    assert split["generalization_scope"] == "cortex-dominant-public-engineering"
+    assert B.stratified_split(frozen, gold, "seed-a", **kwargs) == split
+    with pytest.raises(ValueError, match="empty"):
+        B.stratified_split(frozen, gold, "seed-a", **{**kwargs, "hidden_empty": 6})
+
+
+def _v41_case():
+    frozen = _frozen(_task("n1"), _task("n2"), _task("e1"), _task("e2"))
+    gold = _gold(frozen, {("n1", 2), ("n2", 1), ("n2", 3)})
+    records = [
+        *(_rec("A", t, ["c1", "c2", "c3"]) for t in ("n1", "n2", "e1", "e2")),
+        _rec("B", "n1", ["c2"], 9000, "0.03"), _rec("B", "n2", ["c1"], 9000, "0.03"),
+        _rec("B", "e1", [], 9000, "0.03"), _rec("B", "e2", ["c1"], 9000, "0.03"),
+        _rec("C", "n1", ["c2"], 300, "0.0002", "sent"), _rec("C", "n2", ["c1", "c3"], 300, "0.0002", "sent"),
+        _rec("C", "e1", [], 300, "0.0002", "sent"), _rec("C", "e2", [], 300, "0.0002", "sent"),
+        _rec("C", "n2", ["c3"], 300, "0.0002", "sent", repeat=1), _rec("C", "e1", [], 300, "0.0002", "sent", repeat=1),
+    ]
+    return frozen, gold, records
+
+
+def test_score_v41_hand_computed_and_decide_go():
+    frozen, gold, records = _v41_case()
+    summary = B.score_v41(frozen, gold, ["n1", "n2", "e1", "e2"], records)
+    a, c = summary["arms"]["A"], summary["arms"]["C"]
+    assert summary["strata"] == {"non-empty": 2, "empty": 2, "indeterminate": []}
+    assert a["non-empty"]["precision_at_3"] == 0.5 and a["non-empty"]["irrelevant_per_task"] == 1.5
+    assert c["non-empty"]["precision_at_3"] == 1.0 and c["empty"]["correct_abstain_rate"] == 1.0
+    assert summary["stability"]["C"] == {"pairs": 2, "quality_stable": 2, "identical_selection": 1}
+    decision = B.decide_v41(summary, {**B.GO_THRESHOLDS_V41, "quality_stable_min": 2})
+    assert decision["decision"] == "go", decision["reasons"]
+    assert "c_vs_b_precision" not in decision["gates"]  # B 只報告
+
+
+def test_decide_v41_no_go_on_abstain_stability_and_indeterminate():
+    frozen, gold, records = _v41_case()
+    records = [r for r in records if not (r["arm"] == "C" and r["task_id"] == "e2")]
+    records.append(_rec("C", "e2", ["c1"], 300, "0.0002", "sent"))
+    records = [r for r in records if not (r["arm"] == "C" and r["repeat"] == 1 and r["task_id"] == "n2")]
+    records.append(_rec("C", "n2", ["c2"], 300, "0.0002", "sent", repeat=1))  # 命中掉成 0、不相關增加
+    gold["e1#c1"] = "unresolved"
+    summary = B.score_v41(frozen, gold, ["n1", "n2", "e1", "e2"], records)
+    decision = B.decide_v41(summary, {**B.GO_THRESHOLDS_V41, "quality_stable_min": 2})
+    assert decision["decision"] == "no-go"
+    assert not decision["gates"]["empty_abstain"] and not decision["gates"]["quality_stable"]
+    assert any("無法分層" in r for r in decision["reasons"])
+
+
+def test_cli_split_and_score_v41(tmp_path, capsys):
+    tasks = [_rtask(f"e{i}") for i in range(23)] + [_rtask(f"n{i}") for i in range(29)]
+    frozen = _frozen(*tasks)
+    (tmp_path / "f.json").write_text(json.dumps(frozen))
+    gold = {"pairs": {k: {"gold": v} for k, v in _gold(frozen, {(f"n{i}", 1) for i in range(29)}).items()}}
+    (tmp_path / "g.json").write_text(json.dumps(gold))
+    assert cli.main(["h2", "split", "--frozen", str(tmp_path / "f.json"), "--gold", str(tmp_path / "g.json"),
+                     "--seed", "s1", "--out", str(tmp_path / "s.json")]) == 0
+    split = json.loads((tmp_path / "s.json").read_text())
+    assert len(split["hidden"]) == 40 and len(split["dev"]) == 12 and split["seed"] == "s1"
+    recs = [_rec(arm, t, ["c1"] if t.startswith("n") else [], 300, "0.0002", "sent") for arm in "ABC"
+            for t in split["hidden"]]
+    (tmp_path / "r.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    capsys.readouterr()
+    assert cli.main(["h2", "score", "--protocol", "v4.1", "--frozen", str(tmp_path / "f.json"), "--gold",
+                     str(tmp_path / "g.json"), "--split-file", str(tmp_path / "s.json"), "--split", "hidden",
+                     "--records", str(tmp_path / "r.jsonl")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["decision"]["protocol"] == "v4.1" and out["summary"]["strata"]["empty"] == 20
+    # A 與 C 選得一樣：P@3 沒有比 A 高 20pp；兩者都沒有不相關，「≤ A 的 50%」依字面成立；沒有重跑紀錄。
+    assert out["decision"]["reasons"] == ["未過：nonempty_precision_vs_a", "未過：quality_stable"]

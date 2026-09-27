@@ -14,6 +14,10 @@ B 與 C 看同一份候選：只含通過送出前掃描（``egress == eligible`
 計分依 v4：Precision@3、每題不相關數、task 命中率、正確回 0 則比例為主，另報注入字元量、
 延遲、成本、可送出涵蓋率與被過濾掉的相關候選比例；go 條件見 ``GO_THRESHOLDS``。
 
+v4.1（第二輪，2026-09-27 決策紀錄 v4.1）改問「C 值不值得取代 A」：gold 完成後把題目分成
+empty（top-12 全部不相關）與 non-empty 兩層，依事先登錄的 seed 分層抽出 dev／hidden
+（``stratified_split``）；B 只作參考；門檻見 ``GO_THRESHOLDS_V41``，由 ``score_v41``／``decide_v41`` 計算。
+
 單元測試一律注入 fake transport／runner；API key 只從 environment 的 ``TYPESAFE_API_KEY``
 讀取，CLI 子行程會移除它。金額以 ``decimal.Decimal`` 計算，落盤為字串。
 """
@@ -40,17 +44,24 @@ from paulsha_hippo import h2_offline
 __all__ = [
     "ARMS",
     "C_CRITERIA",
+    "C_REVISIONS",
     "GO_THRESHOLDS",
+    "GO_THRESHOLDS_V41",
+    "PROTOCOLS",
     "BenchError",
     "ClaudeFilter",
     "JevClient",
     "build_c_request",
     "decide",
+    "decide_v41",
     "load_gold",
     "parse_b_reply",
     "run",
     "score",
+    "score_v41",
     "stability_tasks",
+    "stratified_split",
+    "task_strata",
 ]
 
 ARMS = ("A", "B", "C")
@@ -83,6 +94,22 @@ C_CRITERIA = {
     "no": "The note is about a different component or problem, or it is general background that would not change "
           "how this task is carried out.",
 }
+#: rev2：v4.1 的起始版，依 v4 已公開的 hidden 結果事先寫好（不算 v4.1 的 dev 修訂）。第一輪 C 在一張
+#: 沒有相關記憶的 closeout issue 選了同一功能的 3 則先前執行紀錄，rev1 的「同一元件或功能」條款過寬。
+C_INSTRUCTION_REV2 = C_INSTRUCTION
+C_CRITERIA_REV2 = {
+    "yes": "The note states a rule, constraint, known failure, still-valid design decision, or validated result "
+           "that would directly change or confirm how this task is carried out, including repository workflow "
+           "rules the task must follow.",
+    "no": "Sharing the same repository, component, or feature is not enough. Answer no for past execution records, "
+          "status logs, or general background that would not change how this task is carried out, and for notes "
+          "about a different problem.",
+}
+C_REVISIONS = {
+    "rev0": (C_INSTRUCTION_REV0, C_CRITERIA_REV0),
+    "rev1": (C_INSTRUCTION, C_CRITERIA),
+    "rev2": (C_INSTRUCTION_REV2, C_CRITERIA_REV2),
+}
 B_SYSTEM = ("You select memory notes for an engineering agent. You have no tools. "
             "Reply with exactly one JSON object and nothing else.")
 B_INSTRUCTIONS = (
@@ -105,6 +132,32 @@ GO_THRESHOLDS = {
     "egress_coverage_min": 0.80,
     "excluded_relevant_max": 0.05,
 }
+
+
+#: v4.1 門檻（產品效用要求，不是依 v4 觀察值推估）。non-empty／empty 指 gold 分層，延遲與成本看 hidden 全體。
+GO_THRESHOLDS_V41 = {
+    "empty_abstain_min": 0.90,
+    "nonempty_hit_rate_max_drop_vs_a": 0.05,
+    "nonempty_precision_min": 0.80,
+    "nonempty_precision_gain_vs_a": 0.20,
+    "nonempty_irrelevant_max_ratio_vs_a": 0.50,
+    "median_latency_ms_max": 1000,
+    "cost_per_task_usd_max": "0.001",
+    "quality_stable_min": 9,
+    "egress_violations_max": 0,
+    "egress_coverage_min": 0.80,
+    "excluded_relevant_max": 0.05,
+}
+
+#: 各輪協定：C 問法版本、穩定性抽樣的 seed 與題數。
+PROTOCOLS = {
+    "v4": {"c_revision": "rev1", "stability_seed": "h2-20260927", "stability_n": 8},
+    "v4.1": {"c_revision": "rev2", "stability_seed": "h2-v41-20260927", "stability_n": 10},
+}
+
+#: 分層抽樣時優先保留給 hidden 以外 repo 的判斷基準（v4.1：hidden 盡量含非 cortex 的題目）。
+FILL_REPO = "github.com/hamanpaul/paulsha-cortex"
+NON_FILL_HIDDEN_MIN = 6
 
 
 class BenchError(RuntimeError):
@@ -130,15 +183,18 @@ def eligible_candidates(task: dict) -> list:
 
 # ---------------------------------------------------------------- C（JEV）
 
-def build_c_request(task: dict) -> dict | None:
+def build_c_request(task: dict, revision: str = "rev1") -> dict | None:
     """C 組 request（不含 model）；task 或候選不可送出時回 None。"""
+    if revision not in C_REVISIONS:
+        raise BenchError("config", f"未知的 C 問法版本：{revision}")
+    instruction, criteria = C_REVISIONS[revision]
     cands = eligible_candidates(task)
     if task["task_egress"] != "eligible" or not cands:
         return None
     state = {"task": {"title": task["title"], "body": task["body"]},
              "candidates": [{"id": cid(c), "title": c["title"], "excerpt": c["body_view"]} for c in cands]}
-    questions = {cid(c): {"type": "choice", "instructions": C_INSTRUCTION.format(index=i),
-                          "criteria": dict(C_CRITERIA)} for i, c in enumerate(cands)}
+    questions = {cid(c): {"type": "choice", "instructions": instruction.format(index=i),
+                          "criteria": dict(criteria)} for i, c in enumerate(cands)}
     return {"state": state, "questions": questions}
 
 
@@ -299,7 +355,8 @@ def _load_records(path: Path) -> list:
 
 def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, jev: JevClient | None = None,
         claude: ClaudeFilter | None = None, deny_terms: Iterable[str] = (), repeat: int = 0,
-        now: Callable[[], str] | None = None, progress: Callable[[dict], None] | None = None) -> dict:
+        c_revision: str = "rev1", now: Callable[[], str] | None = None,
+        progress: Callable[[dict], None] | None = None) -> dict:
     """對 ``task_ids`` 執行各組並逐筆 append；已有成功紀錄的 (arm, task, repeat) 跳過。"""
     now = now or (lambda: dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     out_path = Path(out_path)
@@ -333,7 +390,7 @@ def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, je
                 elif arm == "C":
                     if jev is None:
                         raise BenchError("config", "C 組需要 JevClient")
-                    request = build_c_request(task)
+                    request = build_c_request(task, c_revision)
                     if request is None:
                         record.update(model="not-sent", egress="task-or-candidates-not-eligible")
                     else:
@@ -346,7 +403,7 @@ def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, je
                             tokens = (body.get("usage") or {}).get("input_tokens")
                             usd = (Decimal(tokens) * JEV_USD_PER_INPUT_MTOK / Decimal(1_000_000)
                                    if isinstance(tokens, int) and not isinstance(tokens, bool) else None)
-                            record.update(selected=sel, details={"c_revision": C_REVISION, "answers": details},
+                            record.update(selected=sel, details={"c_revision": c_revision, "answers": details},
                                           wall_ms=wall, egress="sent",
                                           cost_usd=None if usd is None else str(usd), model=str(body.get("model")),
                                           request_sha256=_sha256(request), response_sha256=_sha256(body))
@@ -379,7 +436,7 @@ def _chars(task: dict, selected: list) -> int:
 
 def _arm_metrics(frozen: dict, gold: dict, task_ids: list, records: dict) -> dict:
     tasks = {t["task_id"]: t for t in frozen["tasks"]}
-    selected_total = relevant_selected = irrelevant_selected = 0
+    selected_total = relevant_selected = irrelevant_selected = unresolved_selected = 0
     hit_tasks = hit_hits = abstain_tasks = abstain_ok = 0
     walls, costs, chars, missing = [], [], [], 0
     for task_id in task_ids:
@@ -392,6 +449,7 @@ def _arm_metrics(frozen: dict, gold: dict, task_ids: list, records: dict) -> dic
         sel = rec["selected"]
         rel = sum(1 for s in sel if labels.get(s) == "relevant")
         irr = sum(1 for s in sel if labels.get(s) == "irrelevant")
+        unresolved_selected += len(sel) - rel - irr
         selected_total += len(sel)
         relevant_selected += rel
         irrelevant_selected += irr
@@ -409,7 +467,8 @@ def _arm_metrics(frozen: dict, gold: dict, task_ids: list, records: dict) -> dic
     return {
         "tasks": len(task_ids),
         "missing": missing,
-        "precision_at_3": round(relevant_selected / selected_total, 6) if selected_total else None,
+        "precision_at_3": (round(relevant_selected / (relevant_selected + irrelevant_selected), 6)
+                           if relevant_selected + irrelevant_selected else None),
         "irrelevant_per_task": round(irrelevant_selected / scored, 6) if scored else None,
         "task_hit_rate": round(hit_hits / hit_tasks, 6) if hit_tasks else None,
         "correct_abstain_rate": round(abstain_ok / abstain_tasks, 6) if abstain_tasks else None,
@@ -418,7 +477,7 @@ def _arm_metrics(frozen: dict, gold: dict, task_ids: list, records: dict) -> dic
         "median_latency_ms": statistics.median(walls) if walls else None,
         "cost_per_task_usd": str(sum(costs, Decimal(0)) / Decimal(len(costs))) if costs else None,
         "counts": {"selected": selected_total, "relevant": relevant_selected, "irrelevant": irrelevant_selected,
-                   "hit_tasks": hit_tasks, "abstain_tasks": abstain_tasks},
+                   "unresolved": unresolved_selected, "hit_tasks": hit_tasks, "abstain_tasks": abstain_tasks},
     }
 
 
@@ -490,3 +549,133 @@ def decide(summary: dict, thresholds: dict | None = None) -> dict:
     return {"decision": "go" if not reasons else "no-go", "gates": gates, "reasons": reasons, "thresholds": t,
             "detail": {"precision_gain": bool(precision_gain), "irrelevant_cut": bool(irrelevant_cut),
                        "latency_cut": bool(latency_cut), "cost_cut": bool(cost_cut)}}
+
+
+# ---------------------------------------------------------------- v4.1：分層、抽樣、計分
+
+def task_strata(frozen: dict, gold: dict, task_ids: Iterable[str] | None = None) -> dict:
+    """依 gold 把題目分成 non-empty（至少一則相關）、empty（全部不相關）與 indeterminate（其餘）。"""
+    wanted = None if task_ids is None else set(task_ids)
+    strata = {}
+    for task in frozen["tasks"]:
+        if wanted is not None and task["task_id"] not in wanted:
+            continue
+        labels = [gold.get(f"{task['task_id']}#{cid(c)}") for c in task["candidates"]]
+        if "relevant" in labels:
+            strata[task["task_id"]] = "non-empty"
+        elif labels and all(label == "irrelevant" for label in labels):
+            strata[task["task_id"]] = "empty"
+        else:
+            strata[task["task_id"]] = "indeterminate"
+    return strata
+
+
+def stratified_split(frozen: dict, gold: dict, seed: str, *, hidden_empty: int = 20, hidden_nonempty: int = 20,
+                     dev_total: int = 12, dev_empty: int = 3) -> dict:
+    """v4.1：gold 完成後分層抽出 dev／hidden。hidden 先抽，同層內非 cortex 的題目優先；dev 從剩下的題目依序抽。
+
+    C 送不出去的題目（task 不可送出，或沒有可送出的候選）不抽：C 在這種題目一定回 0 則，
+    放進 empty 層等於白拿一題「正確回 0 則」。
+    """
+    strata = task_strata(frozen, gold)
+    repos = {t["task_id"]: t.get("repo", "") for t in frozen["tasks"]}
+    unsendable = {t["task_id"] for t in frozen["tasks"] if build_c_request(t) is None}
+    strata = {t: ("not-sendable" if t in unsendable else s) for t, s in strata.items()}
+
+    def order(task_id: str) -> str:
+        return hashlib.sha256(f"{seed}|{task_id}".encode("utf-8")).hexdigest()
+
+    pools = {name: sorted((t for t, s in strata.items() if s == name), key=order) for name in ("empty", "non-empty")}
+    need = {"empty": hidden_empty + dev_empty, "non-empty": hidden_nonempty + dev_total - dev_empty}
+    short = {name: f"{len(pools[name])}/{need[name]}" for name in pools if len(pools[name]) < need[name]}
+    if short:
+        raise ValueError(f"分層題數不足：{short}")
+    hidden = []
+    for name, count in (("empty", hidden_empty), ("non-empty", hidden_nonempty)):
+        hidden += sorted(pools[name], key=lambda t: (repos[t] == FILL_REPO, order(t)))[:count]
+    taken = set(hidden)
+    dev = [t for t in pools["empty"] if t not in taken][:dev_empty]
+    dev += [t for t in pools["non-empty"] if t not in taken][:dev_total - dev_empty]
+    non_fill = sum(1 for t in hidden if repos[t] != FILL_REPO)
+    return {
+        "protocol": "v4.1",
+        "seed": seed,
+        "rule": "gold 分層後依 sha256(seed|task_id) 排序；hidden 先抽（同層非 cortex 優先），dev 從剩餘題目依序抽",
+        "dev": dev,
+        "hidden": hidden,
+        "counts": {"empty": len(pools["empty"]), "non-empty": len(pools["non-empty"]),
+                   "indeterminate": sum(1 for s in strata.values() if s == "indeterminate"),
+                   "not-sendable": len(unsendable), "hidden_non_cortex": non_fill},
+        "generalization_scope": ("cortex-dominant-public-engineering" if non_fill < NON_FILL_HIDDEN_MIN
+                                 else "mixed-public-engineering"),
+    }
+
+
+def _quality_stability(frozen: dict, gold: dict, records: list, arm: str, strata: dict) -> dict:
+    """重跑的品質一致：non-empty 不相關數不增加、原本有命中不可掉成 0；empty 的回 0 則判定不翻轉。"""
+    first = {r["task_id"]: r["selected"] for r in records if r["arm"] == arm and r["repeat"] == 0 and r.get("error") is None}
+    second = {r["task_id"]: r["selected"] for r in records if r["arm"] == arm and r["repeat"] == 1 and r.get("error") is None}
+    stable = 0
+    common = sorted(set(first) & set(second))
+    for task_id in common:
+        def count(sel: list, label: str) -> int:
+            return sum(1 for s in sel if gold.get(f"{task_id}#{s}") == label)
+        if strata.get(task_id) == "non-empty":
+            ok = count(second[task_id], "irrelevant") <= count(first[task_id], "irrelevant") and \
+                (count(first[task_id], "relevant") == 0 or count(second[task_id], "relevant") > 0)
+        elif strata.get(task_id) == "empty":
+            ok = (len(first[task_id]) == 0) == (len(second[task_id]) == 0)
+        else:
+            ok = False
+        stable += ok
+    exact = sum(1 for t in common if set(first[t]) == set(second[t]))
+    return {"pairs": len(common), "quality_stable": stable, "identical_selection": exact}
+
+
+def score_v41(frozen: dict, gold: dict, task_ids: list, records: list) -> dict:
+    strata = task_strata(frozen, gold, task_ids)
+    layers = {name: [t for t in task_ids if strata.get(t) == name] for name in ("non-empty", "empty")}
+    by_arm = {arm: {r["task_id"]: r for r in records if r["arm"] == arm and r["repeat"] == 0 and r.get("error") is None}
+              for arm in ARMS}
+    return {
+        "protocol": "v4.1",
+        "strata": {"non-empty": len(layers["non-empty"]), "empty": len(layers["empty"]),
+                   "indeterminate": sorted(t for t in task_ids if strata.get(t) not in layers)},
+        "arms": {arm: {"all": _arm_metrics(frozen, gold, task_ids, by_arm[arm]),
+                       "non-empty": _arm_metrics(frozen, gold, layers["non-empty"], by_arm[arm]),
+                       "empty": _arm_metrics(frozen, gold, layers["empty"], by_arm[arm])} for arm in ARMS},
+        "privacy": _privacy(frozen, gold, task_ids, by_arm["C"]),
+        "stability": {arm: _quality_stability(frozen, gold, records, arm, strata) for arm in ("B", "C")},
+    }
+
+
+def decide_v41(summary: dict, thresholds: dict | None = None) -> dict:
+    """v4.1 判定：只看 C 對 A、C 本身與隱私；B 只報告。"""
+    t = dict(GO_THRESHOLDS_V41 if thresholds is None else thresholds)
+    a_ne, c_ne = summary["arms"]["A"]["non-empty"], summary["arms"]["C"]["non-empty"]
+    c_empty, c_all = summary["arms"]["C"]["empty"], summary["arms"]["C"]["all"]
+    p = summary["privacy"]
+    reasons = [f"{arm} 缺 {m['all']['missing']} 題" for arm, m in summary["arms"].items() if m["all"]["missing"]]
+    if summary["strata"]["indeterminate"]:
+        reasons.append(f"hidden 含無法分層的題目：{summary['strata']['indeterminate']}")
+    gates = {
+        "privacy_violations": p["egress_violations"] <= t["egress_violations_max"],
+        "privacy_coverage": _ok(p["egress_coverage"]) and p["egress_coverage"] >= t["egress_coverage_min"],
+        "privacy_excluded_relevant": p["excluded_relevant_ratio"] <= t["excluded_relevant_max"],
+        "empty_abstain": _ok(c_empty["correct_abstain_rate"]) and
+            c_empty["correct_abstain_rate"] >= t["empty_abstain_min"],
+        "nonempty_hit_rate_vs_a": _ok(c_ne["task_hit_rate"]) and _ok(a_ne["task_hit_rate"]) and
+            c_ne["task_hit_rate"] >= round(a_ne["task_hit_rate"] - t["nonempty_hit_rate_max_drop_vs_a"], 6),
+        "nonempty_precision_min": _ok(c_ne["precision_at_3"]) and c_ne["precision_at_3"] >= t["nonempty_precision_min"],
+        "nonempty_precision_vs_a": _ok(c_ne["precision_at_3"]) and _ok(a_ne["precision_at_3"]) and
+            c_ne["precision_at_3"] >= round(a_ne["precision_at_3"] + t["nonempty_precision_gain_vs_a"], 6),
+        "nonempty_irrelevant_vs_a": _ok(c_ne["irrelevant_per_task"]) and _ok(a_ne["irrelevant_per_task"]) and
+            c_ne["irrelevant_per_task"] <= a_ne["irrelevant_per_task"] * t["nonempty_irrelevant_max_ratio_vs_a"],
+        "latency": _ok(c_all["median_latency_ms"]) and c_all["median_latency_ms"] <= t["median_latency_ms_max"],
+        "cost": _ok(c_all["cost_per_task_usd"]) and
+            Decimal(c_all["cost_per_task_usd"]) <= Decimal(str(t["cost_per_task_usd_max"])),
+        "quality_stable": summary["stability"]["C"]["quality_stable"] >= t["quality_stable_min"],
+    }
+    reasons += [f"未過：{name}" for name, ok in gates.items() if not ok]
+    return {"protocol": "v4.1", "decision": "go" if not reasons else "no-go", "gates": gates,
+            "reasons": reasons, "thresholds": t}
