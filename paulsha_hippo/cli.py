@@ -593,7 +593,7 @@ def _build_parser() -> argparse.ArgumentParser:
     shortlist_eval_p.set_defaults(func=_shortlist_eval)
     shortlist_freeze_p = shortlist_sub.add_parser(
         "freeze",
-        help="唯讀：對 query 清單跑與 prompt hook 相同的 BM25 top-12，輸出待標註的凍結 query 集骨架")
+        help="唯讀：沿 prompt hook 同一條候選路徑（BM25 top-12＋同主題折疊），輸出待標註的凍結 query 集骨架")
     shortlist_freeze_p.add_argument("--memory-root", required=True)
     shortlist_freeze_p.add_argument("--project", required=True)
     shortlist_freeze_p.add_argument(
@@ -1838,7 +1838,7 @@ def _shortlist_freeze(args: argparse.Namespace) -> int:
         data = sl_eval.freeze_queries(
             Path(args.memory_root), args.project, queries, annotator=args.annotator,
             method=args.method, name=args.name, tool=args.tool)
-    except SearchIndexError as exc:
+    except (SearchIndexError, sl_eval.FreezeError) as exc:
         print(f"hippo shortlist freeze: error: {exc}", file=sys.stderr)
         return 1
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"

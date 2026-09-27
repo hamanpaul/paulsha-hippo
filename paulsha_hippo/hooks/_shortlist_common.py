@@ -15,7 +15,7 @@ from paulsha_hippo import push_shadow
 from paulsha_hippo.importer.config import default_projects_path, load_projects_config
 from paulsha_hippo.importer.project_resolver import resolve_project
 from paulsha_hippo.moc import search as search_mod
-from paulsha_hippo.retrieval import format_shortlist, to_fts_query
+from paulsha_hippo.retrieval import format_shortlist, shortlist_header, shortlist_row, to_fts_query
 from paulsha_hippo.runtime_flags import load_flags
 from paulsha_hippo.topic import collapse_same_topic
 from paulsha_hippo.hooks._wakeup_common import (
@@ -383,6 +383,23 @@ def _applied_hint(root: Path, tool: str, session_id: str) -> str:
     )
 
 
+def claim_candidates(root: Path, hits: list[dict], flags, seen: set[str]
+                     ) -> tuple[list[dict], dict[str, list[str]]]:
+    """可 claim 的候選池（依注入順序）與同主題折疊對照表；claim＝前 SHORTLIST_K 則。
+
+    同主題折疊（flag on 時）→ 去掉無 slice_id 者與本 session 已 offer（seen）者。
+    prompt hook 與 `hippo shortlist freeze`（#158，seen＝空集合＝全新 session）共用這一條
+    路徑，確保凍結樣本的「現況 top-3」就是 hook 實際會注入的那幾則。flag off 時 pool
+    就是原始 hits，行為與折疊上線前逐位元組相同。
+    """
+    collapsed: dict[str, list[str]] = {}
+    pool = hits
+    if flags.collapse_same_topic:
+        pool, collapsed = collapse_same_topic(hits, families=_families(root))
+    eligible = [h for h in pool if h.get("slice_id") and h["slice_id"] not in seen]
+    return eligible, collapsed
+
+
 def _record_push_shadow(root: Path, tool: str, session_id: str, project: str, query: str,
                         hits: list[dict], claim: list[dict], block: str, hint: str,
                         injected: str, flags, show_cmd: str, started_at: float) -> None:
@@ -390,7 +407,7 @@ def _record_push_shadow(root: Path, tool: str, session_id: str, project: str, qu
 
     只讀 hits／claim／block／hint／injected，不修改任何一個——注入內容因此與 shadow
     關閉時逐位元相同。push_shadow.record 自身已 best-effort；這裡再包一層，確保即使
-    record 以外的呼叫（組 render closure 等）出錯也不會冒到 build_shortlist_and_record
+    record 以外的呼叫（組未 redact 的 header／rows 等）出錯也不會冒到 build_shortlist_and_record
     的外層 except（那會把已 commit 的注入吞成 ''）。
     """
     try:
@@ -398,14 +415,12 @@ def _record_push_shadow(root: Path, tool: str, session_id: str, project: str, qu
         if config is None or not config.enabled:
             return
 
-        def _render(keep: list[int]) -> str:
-            return format_shortlist([claim[i] for i in keep], hint=flags.read_hint,
-                                    show_command=show_cmd)
-
+        header = shortlist_header(hint=flags.read_hint, show_command=show_cmd)
+        rows = [shortlist_row(h) for h in claim]
         push_shadow.record(
             root, tool=tool, session_id=session_id, project=project, query=query,
             hits=hits, claim=claim, block=block, hint=hint, injected=injected,
-            config=config, started_at=started_at, render=_render,
+            config=config, started_at=started_at, header=header, rows=rows,
             log=lambda msg: log_warn(root, tool, msg))
     except Exception as exc:
         try:
@@ -482,12 +497,8 @@ def build_shortlist_and_record(root: Path, tool: str, session_id: str,
             # 行為與折疊上線前逐位元組相同。因為每輪的 hits 都重新含最新者，若最新
             # 者已 offer 過（進了 seen），舊者仍會被同一輪的折疊規則再次吃掉——不會
             # 因為「最新者已離開 claim」而讓舊者漏網重新曝光。
-            collapsed: dict[str, list[str]] = {}
-            pool = hits
-            if flags.collapse_same_topic:
-                pool, collapsed = collapse_same_topic(hits, families=_families(root))
-            claim = [h for h in pool
-                     if h.get("slice_id") and h["slice_id"] not in seen][:SHORTLIST_K]
+            eligible, collapsed = claim_candidates(root, hits, flags, seen)
+            claim = eligible[:SHORTLIST_K]
             collapsed = {k: v for k, v in collapsed.items() if any(h["slice_id"] == k for h in claim)}
             if not claim:
                 return ""

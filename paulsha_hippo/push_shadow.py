@@ -106,32 +106,54 @@ def ledger_path(root: Path) -> Path:
     return Path(root) / "runtime" / "ledger" / LEDGER_NAME
 
 
-def _chars_for(block: str, hint: str, n_rows: int, keep: Sequence[int],
-               render: Callable[[list[int]], str] | None) -> tuple[int, bool]:
+def split_rows(redacted_block: str, header: str, rows: Sequence[str]) -> tuple[str, list[str]] | None:
+    """把已 redact 的 shortlist block 結構化切回（提示行, [每則列]）；對不上回 None。
+
+    block＝`"\\n".join([header, *rows])`（未 redact 版本），title 含換行時單則列本身就
+    跨多行，因此不能用「一行一則」對齊。redaction（policy.redact_lines）逐行判斷、命中
+    時把整行換成 placeholder，只在原行以 "\\n" 結尾時保留 "\\n"——"\\n" 的個數與相對位置
+    不變。依未 redact 的 header／rows 各自含幾個 "\\n"，就能在 redact 後的文字上切出
+    每一段，得到與「只注入其中幾則」逐字元相同的長度，不需再跑一次 redaction。
+    """
+    segments = redacted_block.split("\n")
+    spans = [header.count("\n") + 1] + [row.count("\n") + 1 for row in rows]
+    if len(segments) != sum(spans):
+        return None
+    parts: list[str] = []
+    start = 0
+    for span in spans:
+        parts.append("\n".join(segments[start:start + span]))
+        start += span
+    return parts[0], parts[1:]
+
+
+def _chars_for(block: str, hint: str, header: str, rows: Sequence[str],
+               keep: Sequence[int]) -> tuple[int, bool]:
     """收窄後的注入字元量。回傳 (字元數, 是否精確)。
 
-    注入＝`block + "\\n" + hint`，block 為「提示行＋每則一列」且 redaction 逐行替換、
-    不改行數，因此可直接從已 redact 的 block 取提示行與被保留的列，得到與現行管線
-    「只注入這幾則」時逐字元相同的長度，不需再跑一次 redaction。若 block 行數與
-    claim 對不上（例如標題內含換行），退回以未 redact 的重新排版估算並標為不精確。
+    注入＝`block + "\\n" + hint`。以 `split_rows` 從已 redact 的 block 結構化取出提示行
+    與被保留的列（精確）；萬一對不上（redaction 行為改變等），退回以未 redact 的排版
+    估算並標為不精確。
     """
     if not keep:
         return 0, True
-    lines = block.split("\n")
-    if len(lines) == 1 + n_rows:
-        rows = sum(1 + len(lines[1 + i]) for i in keep)
-        return len(lines[0]) + rows + 1 + len(hint), True
-    if render is None:
-        raise ValueError("block rows do not align with claim and no fallback renderer")
-    return len(render(list(keep))) + 1 + len(hint), False
+    split = split_rows(block, header, rows)
+    if split is not None:
+        head, parts = split
+        return len(head) + sum(1 + len(parts[i]) for i in keep) + 1 + len(hint), True
+    return len(header) + sum(1 + len(rows[i]) for i in keep) + 1 + len(hint), False
 
 
 def build_event(*, tool: str, session_id: str, project: str, query: str,
                 hits: Sequence[Mapping[str, Any]], claim: Sequence[Mapping[str, Any]],
                 block: str, hint: str, injected: str, config: PushShadowConfig,
-                pipeline_ms: float, render: Callable[[list[int]], str] | None = None,
+                pipeline_ms: float, header: str, rows: Sequence[str],
                 now: datetime | None = None) -> dict[str, Any]:
-    """由現行管線已算好的產物組 shadow 事件（純函式，不做 IO）。"""
+    """由現行管線已算好的產物組 shadow 事件（純函式，不做 IO）。
+
+    header／rows 為 claim 未 redact 的提示行與各列（`retrieval.shortlist_header`／
+    `shortlist_row`），只用來在已 redact 的 block 上結構化定位各列。
+    """
     rank_of: dict[str, int] = {}
     for index, hit in enumerate(hits):
         sid = hit.get("slice_id")
@@ -141,7 +163,7 @@ def build_event(*, tool: str, session_id: str, project: str, query: str,
     keep = narrowed_indices([h.get("score") for h in claim],
                             min_score=config.bm25_min_score, max_k=config.max_k)
     kept = set(keep)
-    chars_after, exact = _chars_for(block, hint, len(claim), keep, render)
+    chars_after, exact = _chars_for(block, hint, header, rows, keep)
     before = []
     for h, sid in zip(claim, before_ids):
         bm25 = h.get("score")
@@ -186,7 +208,7 @@ def _append_line(path: Path, line: str) -> None:
 def record(root: Path, *, tool: str, session_id: str, project: str, query: str,
            hits: Sequence[Mapping[str, Any]], claim: Sequence[Mapping[str, Any]],
            block: str, hint: str, injected: str, config: PushShadowConfig,
-           started_at: float, render: Callable[[list[int]], str] | None = None,
+           started_at: float, header: str, rows: Sequence[str],
            log: Callable[[str], None] | None = None) -> bool:
     """計算並 append 一筆 shadow 事件。Best-effort：永不 raise，回傳是否已寫入。
 
@@ -206,7 +228,7 @@ def record(root: Path, *, tool: str, session_id: str, project: str, query: str,
         event = build_event(
             tool=tool, session_id=session_id, project=project, query=query, hits=hits,
             claim=claim, block=block, hint=hint, injected=injected, config=config,
-            pipeline_ms=(shadow_start - started_at) * 1000.0, render=render)
+            pipeline_ms=(shadow_start - started_at) * 1000.0, header=header, rows=rows)
         shadow_ms = (clock() - shadow_start) * 1000.0
         if shadow_ms > config.time_budget_ms:
             _warn(f"push shadow over time budget ({shadow_ms:.1f}ms > "

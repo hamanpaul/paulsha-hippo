@@ -9,7 +9,8 @@
 
 輸出 Precision@3、Noise@3、Relevant-missed@12 與注入字元量。全部為純函式、整數累加後
 才除、固定 4 位小數，對同一輸入逐位元可重現；不讀 runtime config、不碰 memory root、
-不呼叫任何 LLM。``freeze_queries`` 另提供「由既有索引產生待標註骨架」的唯讀輔助。
+不呼叫任何 LLM。``freeze_queries`` 另提供「由既有索引、沿 hook 同一條候選路徑產生待標註
+骨架」的唯讀輔助。
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ _DECIMALS = 4
 __all__ = [
     "BASELINE_K", "DEFAULT_MAX_K", "DEFAULT_MIN_SCORE", "FETCH_K", "FREEZE_PLACEHOLDER_SESSION",
     "FROZEN_FORMAT", "FROZEN_VERSION", "MAX_K_LIMIT", "REPORT_FORMAT", "REPORT_VERSION",
-    "Candidate", "FrozenQuery", "FrozenSet", "FrozenSetError", "auto_thresholds", "evaluate",
+    "Candidate", "FreezeError", "FrozenQuery", "FrozenSet", "FrozenSetError", "auto_thresholds", "evaluate",
     "freeze_queries", "load_frozen_set", "render_text", "report", "sweep",
 ]
 
@@ -349,57 +350,80 @@ def render_text(rep: Mapping[str, Any]) -> str:
 # freeze：由既有索引產生待標註骨架（唯讀）
 # ---------------------------------------------------------------------------
 
+class FreezeError(RuntimeError):
+    """freeze 無法產生與 hook 一致的骨架（redaction 失敗或無法結構化對齊）。"""
+
+
 def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, annotator: str,
                    method: str, name: str, tool: str = "claude-code",
                    now: datetime | None = None) -> dict[str, Any]:
-    """對每個 query 跑與 prompt hook 相同的 FTS 淨化＋``search()``（top-12），輸出待標註骨架。
+    """對每個 query 重現 prompt hook 對「全新 session」的候選路徑，輸出待標註骨架。
 
-    唯讀：不記 offered、不寫 runtime 檔。每個候選的 ``chars`` 為 hook 注入該列時的字元數
-    （含換行、經同一 redaction boundary）；``block_overhead_chars`` 為提示行＋applied 指引
-    的字元數（以 claude-code 與固定佔位 session id 計，實際 session id 長度不同時只差常數）。
+    路徑與 hook 相同：FTS 淨化 → ``search()``（該 project、top-12、排除 decayed）→
+    ``claim_candidates``（依 runtime config 的 ``collapse_same_topic`` 同主題折疊、去掉無
+    slice_id 者；seen＝空集合）。因此 ``candidates`` 的前 ``BASELINE_K`` 則就是 hook 對
+    全新 session 實際會注入的那幾則；被折疊掉的 note 不列為候選，記在 ``collapsed``。
+    session 去重與早停屬 session 狀態，凍結樣本不模擬。
+
+    唯讀：不記 offered、不寫 runtime 檔、不寫 log。每個候選的 ``chars`` 是該則在注入
+    中佔的字元數（前導換行＋該列；title 含換行時為多行）——與 hook 相同的排版與同一個
+    redaction boundary，並以 ``push_shadow.split_rows`` 結構化對齊；``block_overhead_chars``
+    是提示行＋applied 指引（以固定佔位 session id 計，實際 session id 長度不同時只差常數）。
     ``relevant`` 一律為 null，須人工標註後 ``hippo shortlist eval`` 才會接受。
     """
     from . import policy
-    from .hooks._shortlist_common import _applied_hint, _summary
+    from .hooks._shortlist_common import _applied_hint, _summary, claim_candidates
     from .hooks._wakeup_common import format_show_command
     from .moc import search as search_mod
-    from .retrieval import format_shortlist, to_fts_query
+    from .push_shadow import split_rows
+    from .retrieval import shortlist_header, shortlist_row, to_fts_query
     from .runtime_flags import load_flags
 
     root = Path(memory_root)
-    read_hint = load_flags().read_hint
+    flags = load_flags()
     show_cmd = format_show_command(root, tool, FREEZE_PLACEHOLDER_SESSION)
+    header = shortlist_header(hint=flags.read_hint, show_command=show_cmd)
     hint_line = _applied_hint(root, tool, FREEZE_PLACEHOLDER_SESSION)
-    header = format_shortlist([{"title": "x"}], hint=read_hint, show_command=show_cmd).split("\n")[0]
-    overhead = len(header) + 1 + len(hint_line)
+
+    def _redact(text: str) -> str:
+        try:
+            redacted = policy.check_boundary(
+                "external_to_raw", text, project_slug=project or "_unknown",
+                session_ref=FREEZE_PLACEHOLDER_SESSION).text
+        except Exception as exc:
+            raise FreezeError(f"redaction boundary failed: {exc}") from exc
+        if text and not redacted:
+            raise FreezeError("redaction boundary suppressed the shortlist")
+        return redacted
+
+    # 非空注入時提示行後面必接 "\n"（逐行 redaction），故以 header + "\n" 計算再扣回換行。
+    overhead = len(_redact(header + "\n")) - 1 + 1 + len(hint_line)
 
     out_queries = []
     for index, text in enumerate(queries, start=1):
         fts = to_fts_query(text)
         hits = (search_mod.search(root, fts, project=project, limit=FETCH_K, include_decayed=False)
                 if fts else [])
-        for hit in hits:
-            hit["summary"] = _summary(hit.get("path", ""), str(hit.get("title") or ""))
-        rows = format_shortlist(hits, hint=read_hint, show_command=show_cmd).split("\n")[1:] if hits else []
-        if hits:
-            block = format_shortlist(hits, hint=read_hint, show_command=show_cmd)
-            redacted = policy.check_boundary(
-                "external_to_raw", block, project_slug=project or "_unknown",
-                session_ref=FREEZE_PLACEHOLDER_SESSION).text.split("\n")
-            if len(redacted) == 1 + len(hits):
-                rows = redacted[1:]
+        pool, collapsed = claim_candidates(root, hits, flags, set()) if hits else ([], {})
         candidates = []
-        for hit, row in zip(hits, rows):
-            candidates.append({
-                "note_id": str(hit.get("slice_id")),
-                "bm25": round(float(hit.get("score")), 6),
-                "relevant": None,
-                "chars": 1 + len(row),
-                "title": str(hit.get("title") or ""),
-                "path": str(hit.get("path") or ""),
-            })
+        if pool:
+            for hit in pool:
+                hit["summary"] = _summary(hit.get("path", ""), str(hit.get("title") or ""))
+            rows = [shortlist_row(hit) for hit in pool]
+            split = split_rows(_redact("\n".join([header, *rows])), header, rows)
+            if split is None:
+                raise FreezeError(f"query {index}: redacted shortlist rows do not align")
+            for hit, row in zip(pool, split[1]):
+                candidates.append({
+                    "note_id": str(hit.get("slice_id")),
+                    "bm25": round(float(hit.get("score")), 6),
+                    "relevant": None,
+                    "chars": 1 + len(row),
+                    "title": str(hit.get("title") or ""),
+                    "path": str(hit.get("path") or ""),
+                })
         out_queries.append({"id": f"q{index:03d}", "query": text, "fts_query": fts,
-                            "candidates": candidates})
+                            "candidates": candidates, "collapsed": collapsed})
     return {
         "format": FROZEN_FORMAT,
         "version": FROZEN_VERSION,
@@ -410,6 +434,7 @@ def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, a
         "method": method,
         "fetch_k": FETCH_K,
         "baseline_k": BASELINE_K,
+        "collapse_same_topic": flags.collapse_same_topic,
         "block_overhead_chars": overhead,
         "queries": out_queries,
     }

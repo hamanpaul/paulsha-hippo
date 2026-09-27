@@ -13,7 +13,7 @@
 
 ### Added
 
-- Push shortlist 雜訊基準線與確定性收窄 shadow 量測（#158，#148 H1）：新增 `shortlist.push_shadow.*` 設定（預設關閉），開啟後 prompt hook 照舊注入，另把「`score = -bm25` 門檻＋最多 0–3 則」的收窄結果（收窄前後 note id、bm25、注入字元量）寫進獨立的 `runtime/ledger/push_shadow.jsonl`，注入內容逐位元不變、不呼叫 LLM、失敗與超時不影響注入、`hippo recall` 不記；新增 `hippo shortlist eval`（凍結 query 集上的 Precision@3／Noise@3／Relevant-missed@12／注入字元量，`--sweep` 校準門檻，逐位元可重現）與唯讀的 `hippo shortlist freeze`（產生待標註骨架）；格式、指標與校準方式見 `docs/push-shadow-baseline.md`。
+- Push shortlist 雜訊基準線與確定性收窄 shadow 量測（#158，#148 H1）：新增 `shortlist.push_shadow.*` 設定（預設關閉），開啟後 prompt hook 照舊注入，另把「`score = -bm25` 門檻＋最多 0–3 則」的收窄結果（收窄前後 note id、bm25、注入字元量）寫進獨立的 `runtime/ledger/push_shadow.jsonl`，注入內容逐位元不變、不呼叫 LLM、失敗與超時不影響注入、`hippo recall` 不記；新增 `hippo shortlist eval`（凍結 query 集上的 Precision@3／Noise@3／Relevant-missed@12／注入字元量，`--sweep` 校準門檻，逐位元可重現）與唯讀的 `hippo shortlist freeze`（沿 hook 同一條候選路徑、含同主題折疊，產生待標註骨架）；格式、指標與校準方式見 `docs/push-shadow-baseline.md`。
 - Hippo #155 task-memory production provider：新增 `hippo task-memory provide|fetch` JSON subprocess protocol，依 project registry 精確授權 repo，重用 MOC scoped search 與 #146 payload helper，產生 canonical SHA-256 manifest；note fetch 僅讀本次 manifest 綁定項目，並以 redacted bytes 驗 hash/version，不寫既有 Hippo usage ledger。契約與 Cortex adapter 接線見 `docs/task-memory-provider.md`。
 - #146 正式規劃：通用 task memory payload、capability-aware delivery、tool-neutral evidence 與 Cortex host adapter 依賴（僅規劃，不代表 runtime 已完成）。
 

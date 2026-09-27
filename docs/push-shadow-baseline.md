@@ -66,7 +66,7 @@ shortlist:
 | `dropped` | `before` 中被收窄掉的 `sl_id`。 |
 | `chars_before` | 現況實際注入的字元數（= hook 回傳字串長度）。 |
 | `chars_after` | 若只注入 `after` 時的字元數；`after` 為空時為 `0`。 |
-| `chars_exact` | `true` 表示 `chars_after` 由已 redact 的 block 逐行擷取，與「現行管線只注入這幾則」逐字元相同；極少數標題含換行、block 行數對不上時退回重新排版估算並標 `false`。 |
+| `chars_exact` | `true` 表示 `chars_after` 是從已 redact 的 block 結構化切出提示行與被保留的列（依未 redact 排版中各段的換行數對齊，標題含換行、整列被 redaction 替換時仍精確），與「現行管線只注入這幾則」逐字元相同；只有對不上時（例如 redaction 行為改變）才退回未 redact 排版估算並標 `false`。 |
 | `pipeline_ms` | 從進入 shortlist 管線到注入字串完成的毫秒數（現況延遲的觀測值）。 |
 | `shadow_ms` | shadow 本身計算的毫秒數。 |
 
@@ -116,7 +116,7 @@ jq -c 'select(.source == "read" or .kind == "applied")
 | `method` | 條件 | 預設標註方法（標準、流程、是否盲標等）；每個 query 可覆寫，規則同上。 |
 | `block_overhead_chars` | | 非負整數，預設 `0`。注入非空時額外計入的固定字元（提示行＋applied 指引）。 |
 | `queries` | ✔ | 非空陣列。 |
-| 其他 | | `description`、`project`、`frozen_at`、`fetch_k`、`baseline_k` 等為說明用途，評估時忽略。 |
+| 其他 | | `description`、`project`、`frozen_at`、`fetch_k`、`baseline_k`、`collapse_same_topic` 等為說明用途，評估時忽略。 |
 
 `queries[]` 欄位：
 
@@ -124,9 +124,10 @@ jq -c 'select(.source == "read" or .kind == "applied")
 |---|---|---|
 | `id` | ✔ | 樣本內唯一。 |
 | `query` | ✔ | 查詢文字（非空）。 |
-| `candidates` | ✔ | BM25 top-12 候選，**依當時檢索排序**排列，0–12 筆；0 筆代表現況不會注入。 |
+| `candidates` | ✔ | BM25 top-12 經 hook 同一條候選路徑（同主題折疊、去除無 slice_id）後的候選，**依 hook 的注入順序**排列，0–12 筆；前 3 筆即現況 push 對全新 session 會注入的內容，0 筆代表現況不會注入。 |
 | `annotator`／`method` | | 覆寫頂層值。 |
 | `fts_query` | | `freeze` 產生的 FTS 淨化結果，說明用途。 |
+| `collapsed` | | `freeze` 記錄的同主題折疊對照（`{保留的 id: [被折疊的 id…]}`），被折疊者不在 `candidates` 內；稽核用途。 |
 
 `candidates[]` 欄位：
 
@@ -181,8 +182,10 @@ hippo shortlist freeze --memory-root <memory_root> --project <slug> \
 ```
 
 - 唯讀：不記 offered、不寫 memory root 任何檔案，也不呼叫 LLM。
-- 對每行 query 跑與 prompt hook 相同的 FTS 淨化與 `search()`（該 project、top-12、排除 decayed），輸出 `relevant: null` 的待標註骨架；`chars` 與 `block_overhead_chars` 依 hook 的實際排版與 redaction 計算（以固定佔位 session id 計，實際 session id 長度不同時只差常數）。
-- 候選是 `search()` 的原始 top-12，未套用 session 去重與同主題折疊。
+- 對每行 query 重現 prompt hook 對**全新 session** 的候選路徑：FTS 淨化 → `search()`（該 project、top-12、排除 decayed）→ 與 hook 共用的 `claim_candidates`（依 config 的 `shortlist.collapse_same_topic` 同主題折疊、去除無 slice_id 者）。`candidates` 的前 3 筆因此就是 hook 實際會注入的那幾則（測試以同一 memory root 比對 hook 注入的 id 與字元數），被折疊掉的 note 記在 `collapsed`。
+- 輸出 `relevant: null` 的待標註骨架；`chars` 與 `block_overhead_chars` 依 hook 的實際排版與同一個 redaction boundary 計算，並以結構化方式對齊各列（標題含換行、整列被 redaction 替換時仍精確；以固定佔位 session id 計，實際 session id 長度不同時只差常數）。
+- 不模擬 session 狀態：session 內去重（已 offer 過的不再 offer）與早停不在凍結樣本內，樣本代表的是「該 prompt 是 session 第一次注入」的情況。
+- 會讀 runtime config（`read_hint`、`collapse_same_topic`），請在與 hook 相同的 config 下執行；`eval` 則完全不讀 config。
 - 骨架含真實 query 與 note 標題／路徑：請輸出到私有位置，不要放進任何 repo。
 
 ### 5.1 第一版真實樣本的建議做法
