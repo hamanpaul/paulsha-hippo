@@ -7,8 +7,11 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-27
+
 ### Changed
 
+- 版號 `0.1.2` → `1.0.0`（MAJOR bump，repo owner 於 2026-09-26 明確核可）：同步 `VERSION`、`pyproject.toml`、兩處 `__version__`、`scripts/build_release_artifact.py` 的 manifest 預設值與斷言真實版號的測試。1.0.0 為 release candidate，readiness gate 從 pending 起算，全數 attest 後才打 `v1.0.0` tag（見 `docs/release-readiness.md`）。
 - `.cortex/work-items.yaml` 補登錄 12 個已交付 cortex work item 的 `github_issue` link（含 closeout 票 #153），清掉 cortex daemon 的 `missing_issue` 反覆觀測；不建 run、不派工。
 
 ### Added

@@ -7,6 +7,37 @@ commit or wheel hash, until the main agent runs the artifact-bound and live
 checks. See below for the currently bound candidate; the 0.1.1 section further
 down is kept as historical record of that release's readiness process.
 
+## 1.0.0 release candidate readiness
+
+**Current state (2026-09-27) — 1.0.0 is a release candidate, not yet tagged.**
+The MAJOR bump from `0.1.2` was explicitly approved by the repo owner on
+2026-09-26. Every gate for this release starts `pending`:
+`reports/verify/release-readiness-matrix.json` still binds the 0.1.2 candidate
+and has not been rebound, so none of its `passed` entries count as 1.0.0
+evidence.
+
+| | |
+|---|---|
+| candidate commit | the merge commit of the 1.0.0 version-bump PR (recorded here when the matrix is rebound) |
+| tag | none yet; `v1.0.0` is cut only after every gate passes |
+| deployed build before this release | `0.1.1` (`35b3553`); `0.1.2` was released but never deployed on the reference host |
+| gates | 0/16 attested |
+
+Scope since `v0.1.2`: 97 commits, including the four fixes that motivated
+this release — the distiller chain (#157), project bucket convergence (#117),
+storage placement warnings and `hippo archive gc` (#151), and the push
+shortlist shadow baseline (#158).
+
+Order of work before tagging:
+
+1. Deploy the candidate on the reference host for testing, keeping a wheel of
+   the previously deployed build for rollback.
+2. Run the release soak on the deployed build, counting only cycles that meet
+   the soak trust criteria.
+3. Rebind the matrix to the candidate with `bind_candidate()` and attest each
+   gate against it.
+4. Tag `v1.0.0` only when all 16 gates pass.
+
 ## 0.1.2 release candidate readiness
 
 **Current state (2026-08-08) — 0.1.2 SHIPPED. All 16 gates passed against
