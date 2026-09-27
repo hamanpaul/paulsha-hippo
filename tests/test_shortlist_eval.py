@@ -279,9 +279,14 @@ def _hook_injection(mr: Path, monkeypatch, prompt: str) -> tuple[str, list[str]]
 
 
 def _assert_freeze_matches_hook(data: dict, injected: str, offered_ids: list[str]) -> None:
+    """freeze 重建的注入字串必須與 hook 實際注入逐位元相同（不只 id 與總字元數）。"""
     cands = data["queries"][0]["candidates"]
     assert [c["note_id"] for c in cands[:E.BASELINE_K]] == offered_ids
+    rebuilt = E.render_injection(data, 0)
+    assert rebuilt.encode("utf-8") == injected.encode("utf-8")
     assert len(injected) == data["block_overhead_chars"] + sum(c["chars"] for c in cands[:E.BASELINE_K])
+    for c in cands:
+        assert c["chars"] == 1 + len(c["row"])
 
 
 def test_cli_freeze_emits_unlabeled_skeleton_readonly(tmp_path, capsys):
@@ -432,6 +437,90 @@ def test_push_shadow_chars_after_exact_with_multiline_title(tmp_path, monkeypatc
         monkeypatch.setattr(SC, "load_flags", lambda: rf.HygieneFlags())
         top1 = SC.build_shortlist_and_record(mr, "claude-code", "sidM", cwd="/x", prompt="SerialWrap UART")
         assert ev["chars_after"] == len(top1)
+
+
+def test_render_injection_selects_given_note_ids_in_candidate_order(tmp_path, monkeypatch):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr, _COLLAPSE_NOTES)
+        data = _freeze(mr, tmp_path, "SerialWrap UART\n")
+        cands = data["queries"][0]["candidates"]
+        top1 = E.render_injection(data, 0, note_ids=[cands[0]["note_id"]])
+        assert top1 == data["block_header"] + "\n" + cands[0]["row"] + "\n" + data["applied_hint"]
+        assert len(top1) == data["block_overhead_chars"] + cands[0]["chars"]
+        assert E.render_injection(data, 0, note_ids=[]) == ""
+
+
+# 第二輪審查 finding 1：--out 父目錄不存在時比照 replay／upgrade plan 自動建立；寫檔失敗要乾淨回報。
+def test_cli_freeze_out_creates_missing_parent_dirs(tmp_path):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        qfile = tmp_path / "q.txt"
+        qfile.write_text("SerialWrap UART\n", encoding="utf-8")
+        out = tmp_path / "private" / "nested" / "frozen.json"
+        rc = cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
+                       "--queries-file", str(qfile), "--annotator", "t", "--method", "m", "--out", str(out)])
+        assert rc == 0
+        assert json.loads(out.read_text(encoding="utf-8"))["format"] == E.FROZEN_FORMAT
+
+
+def test_cli_freeze_out_write_error_is_reported_not_raised(tmp_path, capsys):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        qfile = tmp_path / "q.txt"
+        qfile.write_text("SerialWrap UART\n", encoding="utf-8")
+        target_dir = tmp_path / "is-a-directory"
+        target_dir.mkdir()
+        blocker = tmp_path / "plain-file"
+        blocker.write_text("x", encoding="utf-8")
+        for out in (target_dir, blocker / "child" / "frozen.json"):
+            rc = cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
+                           "--queries-file", str(qfile), "--annotator", "t", "--method", "m",
+                           "--out", str(out)])
+            captured = capsys.readouterr()
+            assert rc == 1
+            assert captured.out == ""
+            assert "hippo shortlist freeze: error:" in captured.err and "--out" in captured.err
+            assert "Traceback" not in captured.err
+
+
+# 第二輪審查 finding 2：freeze 端就拒絕空白標註者／方法（否則產出的檔案 eval 必拒）。
+@pytest.mark.parametrize("flag", ["--annotator", "--method"])
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_cli_freeze_rejects_blank_annotator_or_method(tmp_path, capsys, flag, value):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        qfile = tmp_path / "q.txt"
+        qfile.write_text("SerialWrap UART\n", encoding="utf-8")
+        out = tmp_path / "frozen.json"
+        args = {"--annotator": "t", "--method": "m", flag: value}
+        rc = cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
+                       "--queries-file", str(qfile), "--annotator", args["--annotator"],
+                       "--method", args["--method"], "--out", str(out)])
+        assert rc == 2
+        assert not out.exists()
+        assert flag in capsys.readouterr().err
+
+
+def test_freeze_queries_rejects_blank_annotator_or_method(tmp_path):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        for kwargs in ({"annotator": " ", "method": "m"}, {"annotator": "t", "method": ""}):
+            with pytest.raises(ValueError):
+                E.freeze_queries(mr, "proj", ["SerialWrap"], name="n", **kwargs)
+
+
+def test_cli_freeze_strips_annotator_and_method(tmp_path):
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        data = E.freeze_queries(mr, "proj", ["SerialWrap"], annotator="  alice ", method=" 盲標 ",
+                                name="n")
+        assert data["annotator"] == "alice" and data["method"] == "盲標"
 
 
 def test_cli_freeze_missing_index_exits_1(tmp_path, capsys):
