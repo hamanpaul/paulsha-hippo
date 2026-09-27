@@ -4,6 +4,7 @@ tier: shareable
 secret_scan:
   allow:
     - "tests/test_stage2_memory_policy.py"
+    - "tests/test_h2_offline.py"  # #164：送出前掃描的合成測試資料刻意包含假的本機路徑
     - "tests/test_stage2_memory_policy_cli.py"
 code_paths:
   - ".project-policy.yml"
