@@ -1009,7 +1009,7 @@ def _retitle_untitled(args: argparse.Namespace) -> int:
     corpus = corpus_for_roots(getattr(args, "instruction_root", None))
 
     def distill(body: str):
-        title, _source = generate_atom_title(body)
+        title, _source = generate_atom_title(body, memory_root=root)
         return title
 
     summary = retitle_mod.retitle_untitled(

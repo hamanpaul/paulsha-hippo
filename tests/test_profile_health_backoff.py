@@ -101,7 +101,7 @@ def test_invocation_error_backs_off_across_router_instances(tmp_path):
 
     state_path = agent_health.profile_health_path(tmp_path / "memory")
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    entry = state["profiles"]["cg"]
+    entry = state["task_classes"]["atomization"]["cg"]
     assert entry["kind"] == "invocation"
     assert entry["consecutive_failures"] == 1
     assert entry["blocked_until"] == clock.now + agent_health.BACKOFF_BASE_SECONDS
@@ -134,7 +134,7 @@ def test_backoff_expiry_probes_once_and_doubles_on_repeat(tmp_path):
     calls.clear()
     ExternalAgentRouter(_chain(), executor=_cg_invocation_error(calls), health=store).run("s2")
     assert calls == ["cg", "codex"]  # 退避到期後允許一次探測
-    entry = store.entries()["cg"]
+    entry = _entry(store, "cg")
     assert entry["consecutive_failures"] == 2
     assert entry["blocked_until"] == clock.now + 2 * agent_health.BACKOFF_BASE_SECONDS
 
@@ -147,7 +147,7 @@ def test_backoff_is_capped(tmp_path):
         store.record_outcome(
             profile, _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
         )
-    entry = store.entries()["cg"]
+    entry = _entry(store, "cg")
     assert entry["blocked_until"] - clock.now == agent_health.BACKOFF_CAP_SECONDS
 
 
@@ -186,7 +186,7 @@ def test_non_deterministic_failures_do_not_back_off(tmp_path, category, stderr, 
     profile = _profile("claude")
     store.record_outcome(profile, _result(profile, category=category, stderr=stderr, exit_code=exit_code))
     assert store.blocked_reason(profile) is None
-    assert "claude" not in store.entries()
+    assert "claude" not in store.entries().get("atomization", {})
 
 
 def test_slow_failure_with_invocation_text_is_not_deterministic(tmp_path):
@@ -210,7 +210,7 @@ def test_credential_failure_needs_two_consecutive_sessions(tmp_path):
     )
     store.record_outcome(profile, auth)
     assert store.blocked_reason(profile) is None
-    assert store.entries()["cg"]["consecutive_failures"] == 1
+    assert _entry(store, "cg")["consecutive_failures"] == 1
     store.record_outcome(profile, auth)
     reason = store.blocked_reason(profile)
     assert reason is not None and reason.startswith("backoff credential until ")
@@ -261,8 +261,56 @@ def test_doctor_shows_backoff_state(tmp_path, monkeypatch):
     with mock.patch.object(agent_health.time, "time", return_value=clock.now + 60):
         lines, failed = ops._probe_external_profiles(live=False)
     codex_line = next(line for line in lines if " id=codex " in line)
-    assert "health=backoff(invocation)" in codex_line
+    assert "health[atomization]=backoff(invocation)" in codex_line
     assert "Invalid command format" in codex_line
     claude_line = next(line for line in lines if " id=claude " in line)
-    assert "health=" not in claude_line
+    assert "health[" not in claude_line
     assert failed is False
+
+
+# --- review finding 1：並行寫入 -------------------------------------------------
+
+
+def _entry(store, profile_id, task_class="atomization"):
+    return store.entries()[task_class][profile_id]
+
+
+def _hammer(path_str, start_event, rounds):
+    store = agent_health.ProfileHealthStore(path_str, clock=lambda: 1_790_000_000.0)
+    profile = _profile("cg")
+    result = _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
+    start_event.wait()
+    for _ in range(rounds):
+        store.record_outcome(profile, result)
+
+
+def test_concurrent_writers_do_not_lose_updates(tmp_path):
+    """兩個以上 atomize／dream／importer 行程同時更新時，退避計數不得倒退或消失。"""
+    import multiprocessing
+
+    path = agent_health.profile_health_path(tmp_path / "memory")
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+    workers = [ctx.Process(target=_hammer, args=(str(path), start, 30)) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    start.set()
+    for worker in workers:
+        worker.join(120)
+        assert worker.exitcode == 0
+    store = agent_health.ProfileHealthStore(path, clock=lambda: 1_790_000_000.0)
+    assert _entry(store, "cg")["consecutive_failures"] == 4 * 30
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_save_does_not_depend_on_a_fixed_temp_name(tmp_path):
+    """固定暫存檔名會讓交錯的 writer 互刪對方的暫存檔；佔住舊的固定名稱也必須寫得進去。"""
+    path = agent_health.profile_health_path(tmp_path / "memory")
+    path.parent.mkdir(parents=True)
+    (path.parent / f".{path.name}.tmp").mkdir()
+    store = agent_health.ProfileHealthStore(path, clock=_Clock())
+    profile = _profile("cg")
+    store.record_outcome(
+        profile, _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
+    )
+    assert _entry(store, "cg")["consecutive_failures"] == 1

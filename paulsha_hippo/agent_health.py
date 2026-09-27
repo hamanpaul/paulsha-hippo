@@ -14,20 +14,25 @@ park，代價比多試一次高得多。比對只看 stderr 開頭的一小段�
 （如 codex）會把整段 prompt 回顯到 stderr，session 內容裡出現的錯誤字樣不得
 觸發退避。
 
-健康狀態是建議性的：讀檔失敗、檔案毀損都視為「沒有狀態」；寫檔失敗只放棄
-這次更新。刪除狀態檔即可立即重置所有 profile。
+狀態依 task class 分開（atomization、title、skillopt 各自記錄），dream、直呼
+``hippo atomize``、title importer（hook）與 skillopt 的 router 共用同一個檔案，
+寫入以檔案鎖序列化。健康狀態是建議性的：讀檔失敗、檔案毀損都視為「沒有
+狀態」；寫檔或取鎖失敗只放棄這次更新。刪除狀態檔即可立即重置所有 profile。
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import re
+import secrets
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from .agent_profiles import AgentProfile, AgentRunResult, sanitize_stderr
 
@@ -102,8 +107,18 @@ def _utc(epoch: float) -> str:
 class ProfileHealthStore:
     """``ExternalAgentRouter`` 的 ``ProfileHealth`` 實作（JSON 檔、原子寫入）。
 
-    ``read_only=True``（dry-run）時只讀不寫。每次呼叫都重新讀檔，讓同時跑的
-    doctor／atomize 看到一致的狀態；檔案很小，成本可忽略。
+    狀態依 task class 分開記錄（``task_classes.<task_class>.<profile_id>``）：
+    同一個 profile 的確定性失敗可能只在某類 prompt 出現（cg 的
+    ``Invalid command format`` 只在 prompt 以 ``-`` 開頭時發生），共用一筆狀態
+    會讓 title 的成功清掉 atomization 的退避、兩邊來回翻轉。
+
+    寫入是「讀檔→修改→原子替換」：整段以 ``profile-health.json.lock`` 的
+    阻塞式 ``flock`` 序列化（dream、直呼 ``hippo atomize``、hook 裡的 title
+    importer、skillopt 可能同時更新；比照 ``moc.search._index_write_lock``，
+    鎖檔是 flock rendezvous inode，永不 unlink），暫存檔名每次唯一（比照
+    ``moc.search._unique_tmp``），交錯的 writer 不會互刪對方的暫存檔。讀取不
+    取鎖：檔案只以 ``os.replace`` 整檔替換，讀到的永遠是某一版完整內容。
+    ``read_only=True``（dry-run、doctor）時只讀不寫、也不取鎖。
     """
 
     def __init__(
@@ -121,37 +136,68 @@ class ProfileHealthStore:
     def path(self) -> Path:
         return self._path
 
-    def _load(self) -> dict[str, Any]:
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    @property
+    def lock_path(self) -> Path:
+        return self._path.with_name(f"{self._path.name}.lock")
+
+    def _load(self) -> dict[str, dict[str, dict[str, Any]]]:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             return {}
         if not isinstance(data, dict) or data.get("schema_version") != HEALTH_SCHEMA_VERSION:
             return {}
-        profiles = data.get("profiles")
-        if not isinstance(profiles, dict):
+        task_classes = data.get("task_classes")
+        if not isinstance(task_classes, dict):
             return {}
-        return {
-            str(key): dict(value)
-            for key, value in profiles.items()
-            if isinstance(value, dict)
-        }
+        loaded: dict[str, dict[str, dict[str, Any]]] = {}
+        for task_class, profiles in task_classes.items():
+            if not isinstance(profiles, dict):
+                continue
+            entries = {
+                str(key): dict(value)
+                for key, value in profiles.items()
+                if isinstance(value, dict)
+            }
+            if entries:
+                loaded[str(task_class)] = entries
+        return loaded
 
-    def _save(self, profiles: Mapping[str, Mapping[str, Any]]) -> None:
-        if self._read_only:
-            return
+    @contextmanager
+    def _write_lock(self) -> Iterator[None]:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _unique_tmp(self) -> Path:
+        return self._path.with_name(
+            f".{self._path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp"
+        )
+
+    def _save(self, state: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> None:
         payload = {
             "schema_version": HEALTH_SCHEMA_VERSION,
-            "profiles": {key: dict(profiles[key]) for key in sorted(profiles)},
+            "task_classes": {
+                task_class: {key: dict(profiles[key]) for key in sorted(profiles)}
+                for task_class, profiles in sorted(state.items())
+                if profiles
+            },
         }
-        tmp = self._path.with_name(f".{self._path.name}.tmp")
+        tmp = self._unique_tmp()
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                 encoding="utf-8",
             )
-            tmp.replace(self._path)
+            os.replace(tmp, self._path)
         except OSError as exc:
             _LOG.warning("agent health: cannot persist %s: %s", self._path, exc)
             try:
@@ -159,7 +205,22 @@ class ProfileHealthStore:
             except OSError:
                 pass
 
-    def entries(self) -> dict[str, dict[str, Any]]:
+    def _update(
+        self, mutate: Callable[[dict[str, dict[str, dict[str, Any]]]], bool]
+    ) -> None:
+        """在寫入鎖內重新讀檔、套用 ``mutate``，有變更才寫回。"""
+        if self._read_only:
+            return
+        try:
+            with self._write_lock():
+                state = self._load()
+                if mutate(state):
+                    self._save(state)
+        except OSError as exc:
+            _LOG.warning("agent health: cannot update %s: %s", self._path, exc)
+
+    def entries(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """``{task_class: {profile_id: entry}}``。"""
         return self._load()
 
     @staticmethod
@@ -167,8 +228,10 @@ class ProfileHealthStore:
         # command 變了（例如 operator 修好 argv）→ 舊狀態不再套用。
         return entry.get("command_fingerprint") == profile.command_fingerprint()
 
-    def blocked_reason(self, profile: AgentProfile) -> str | None:
-        entry = self._load().get(profile.id)
+    def blocked_reason(
+        self, profile: AgentProfile, task_class: str = "atomization"
+    ) -> str | None:
+        entry = self._load().get(task_class, {}).get(profile.id)
         if not entry or not self._applies(entry, profile):
             return None
         blocked_until = entry.get("blocked_until")
@@ -180,55 +243,58 @@ class ProfileHealthStore:
         reason = f"backoff {kind} until {_utc(float(blocked_until))} ({failures} consecutive)"
         return f"{reason}: {detail}" if detail else reason
 
-    def record_outcome(self, profile: AgentProfile, result: AgentRunResult) -> None:
+    def record_outcome(
+        self,
+        profile: AgentProfile,
+        result: AgentRunResult,
+        task_class: str = "atomization",
+    ) -> None:
         if self._read_only or result.failure_category in _NO_SIGNAL_CATEGORIES:
             return
-        profiles = self._load()
         kind = persistent_failure_kind(result)
-        if kind is None:
-            # 成功，或是非確定性失敗：代表確定性狀況沒有重現，清掉狀態。
-            if profile.id in profiles:
-                del profiles[profile.id]
-                self._save(profiles)
+        if kind is None and profile.id not in self._load().get(task_class, {}):
+            # 最常見的情況（成功且原本就沒有狀態）不取鎖、不寫檔。
             return
-        now = float(self._clock())
-        previous = profiles.get(profile.id)
-        if (
-            previous
-            and previous.get("kind") == kind
-            and self._applies(previous, profile)
-        ):
-            failures = int(previous.get("consecutive_failures", 0) or 0) + 1
-            first_failed_at = str(previous.get("first_failed_at") or _utc(now))
-        else:
-            failures = 1
-            first_failed_at = _utc(now)
-        threshold = int(PERSISTENT_FAILURE_THRESHOLDS.get(kind, 1))
-        blocked_until: float | None = None
-        if failures >= threshold:
-            exponent = min(failures - threshold, 16)
-            blocked_until = now + min(BACKOFF_BASE_SECONDS * (2 ** exponent), BACKOFF_CAP_SECONDS)
-        profiles[profile.id] = {
-            "kind": kind,
-            "consecutive_failures": failures,
-            "threshold": threshold,
-            "first_failed_at": first_failed_at,
-            "last_failed_at": _utc(now),
-            "blocked_until": blocked_until,
-            "blocked_until_utc": _utc(blocked_until) if blocked_until is not None else None,
-            "command_fingerprint": profile.command_fingerprint(),
-            "profile_revision": profile.revision,
-            "last_failure_category": result.failure_category,
-            "last_exit_code": result.exit_code,
-            "last_stderr": sanitize_stderr(result.stderr)[:_LAST_STDERR_LIMIT],
-        }
-        self._save(profiles)
 
-    def describe(self, profile: AgentProfile) -> str | None:
-        """``hippo doctor`` 用的一行摘要；沒有狀態時回 None。"""
-        entry = self._load().get(profile.id)
-        if not entry:
-            return None
+        def mutate(state: dict[str, dict[str, dict[str, Any]]]) -> bool:
+            profiles = state.setdefault(task_class, {})
+            if kind is None:
+                # 成功，或是非確定性失敗：代表確定性狀況沒有重現，清掉狀態。
+                return profiles.pop(profile.id, None) is not None
+            now = float(self._clock())
+            previous = profiles.get(profile.id)
+            if previous and previous.get("kind") == kind and self._applies(previous, profile):
+                failures = int(previous.get("consecutive_failures", 0) or 0) + 1
+                first_failed_at = str(previous.get("first_failed_at") or _utc(now))
+            else:
+                failures = 1
+                first_failed_at = _utc(now)
+            threshold = int(PERSISTENT_FAILURE_THRESHOLDS.get(kind, 1))
+            blocked_until: float | None = None
+            if failures >= threshold:
+                exponent = min(failures - threshold, 16)
+                blocked_until = now + min(
+                    BACKOFF_BASE_SECONDS * (2 ** exponent), BACKOFF_CAP_SECONDS
+                )
+            profiles[profile.id] = {
+                "kind": kind,
+                "consecutive_failures": failures,
+                "threshold": threshold,
+                "first_failed_at": first_failed_at,
+                "last_failed_at": _utc(now),
+                "blocked_until": blocked_until,
+                "blocked_until_utc": _utc(blocked_until) if blocked_until is not None else None,
+                "command_fingerprint": profile.command_fingerprint(),
+                "profile_revision": profile.revision,
+                "last_failure_category": result.failure_category,
+                "last_exit_code": result.exit_code,
+                "last_stderr": sanitize_stderr(result.stderr)[:_LAST_STDERR_LIMIT],
+            }
+            return True
+
+        self._update(mutate)
+
+    def _describe_entry(self, entry: Mapping[str, Any], profile: AgentProfile) -> str:
         kind = str(entry.get("kind", "unknown"))
         failures = int(entry.get("consecutive_failures", 0) or 0)
         threshold = int(entry.get("threshold", 1) or 1)
@@ -239,11 +305,21 @@ class ProfileHealthStore:
         elif isinstance(blocked_until, (int, float)) and self._clock() < blocked_until:
             state = f"backoff({kind}) until {_utc(float(blocked_until))} failures={failures}"
         elif isinstance(blocked_until, (int, float)):
-            state = f"probe-pending({kind})：退避已到期，下一個 session 會再試一次 failures={failures}"
+            state = f"probe-pending({kind})：退避已到期，下一次呼叫會再試一次 failures={failures}"
         else:
             state = f"degraded({kind}) failures={failures}/{threshold}"
         suffix = f' last="{detail}"' if detail else ""
-        return f"health={state}{suffix}"
+        return f"{state}{suffix}"
+
+    def describe(self, profile: AgentProfile) -> str | None:
+        """``hippo doctor`` 用的一行摘要（逐 task class）；沒有狀態時回 None。"""
+        state = self._load()
+        parts = [
+            f"health[{task_class}]={self._describe_entry(profiles[profile.id], profile)}"
+            for task_class, profiles in sorted(state.items())
+            if profile.id in profiles
+        ]
+        return " ".join(parts) if parts else None
 
 
 __all__ = [

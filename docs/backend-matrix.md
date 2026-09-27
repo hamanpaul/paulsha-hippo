@@ -31,9 +31,15 @@ circuit cooldown。只允許明確的失敗類別 fallback；安全設定錯誤�
   profile 以 `backoff <kind> until <UTC>` 略過；到期後允許一次探測，成功或非確定性
   結果即清除狀態，command 變更後舊狀態不再套用。timeout、invalid_output、quota 等
   不進退避。
-- `hippo doctor` 的 external agent profiles 段落在該 profile 後面顯示
-  `health=backoff(<kind>) until <UTC>`（或 `degraded`／`probe-pending`／`stale`）與
-  最後一次 stderr 摘要；只顯示、不改 exit code。刪除狀態檔即可立即重置。
+- 狀態依 task class 分開記錄：dream／`hippo atomize`／skillopt rollout 記在
+  `atomization`，title importer（hook）與 `hippo retitle` 記在 `title`，skillopt 的
+  judge／optimizer 記在 `skillopt`。同一個 profile 的確定性失敗可能只在某類 prompt
+  出現（cg 的呼叫格式錯誤只在 prompt 以 `-` 開頭時發生），分開記錄才不會互相清掉。
+  各路徑可能同時寫入，讀改寫以同目錄的 `profile-health.json.lock` 檔案鎖序列化，
+  暫存檔名每次唯一。dry-run 只讀不寫。
+- `hippo doctor` 的 external agent profiles 段落在該 profile 後面逐 task class 顯示
+  `health[<task_class>]=backoff(<kind>) until <UTC>`（或 `degraded`／`probe-pending`／
+  `stale`）與最後一次 stderr 摘要；只顯示、不改 exit code。刪除狀態檔即可立即重置。
 
 所有 profile 必須使用 `shell=False` 的 tokenized argv；prompt 只走 stdin。`{PROMPT}`、
 shell alias/function、shell metacharacter、`--yolo`、`--autopilot`、permission bypass

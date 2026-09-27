@@ -215,15 +215,17 @@ ResponseValidator = Callable[[str], object]
 class ProfileHealth(Protocol):
     """跨 session／跨 process 的 profile 健康狀態（issue #157）。
 
-    Router 只透過這兩個方法讀寫；實作（``paulsha_hippo.agent_health``）負責
-    持久化與退避策略。任何例外都被 router 吞掉——健康狀態是建議性的，不得
-    讓蒸餾本身失敗。
+    Router 只透過這兩個方法讀寫，並帶上自己的 task class（狀態依 task class
+    分開記錄）；實作（``paulsha_hippo.agent_health``）負責持久化與退避策略。
+    任何例外都被 router 吞掉——健康狀態是建議性的，不得讓蒸餾本身失敗。
     """
 
-    def blocked_reason(self, profile: "AgentProfile") -> str | None:
+    def blocked_reason(self, profile: "AgentProfile", task_class: str) -> str | None:
         """回傳目前不應嘗試此 profile 的原因；可嘗試時回 None。"""
 
-    def record_outcome(self, profile: "AgentProfile", result: "AgentRunResult") -> None:
+    def record_outcome(
+        self, profile: "AgentProfile", result: "AgentRunResult", task_class: str
+    ) -> None:
         """記錄一次真實 attempt 的結果（成功或失敗）。"""
 
 
@@ -865,7 +867,7 @@ class ExternalAgentRouter:
         if self._health is None:
             return None
         try:
-            reason = self._health.blocked_reason(profile)
+            reason = self._health.blocked_reason(profile, self.task_class)
         except Exception:  # noqa: BLE001 - advisory state must never break routing
             return None
         return str(reason) if reason else None
@@ -874,7 +876,7 @@ class ExternalAgentRouter:
         if self._health is None:
             return
         try:
-            self._health.record_outcome(profile, result)
+            self._health.record_outcome(profile, result, self.task_class)
         except Exception:  # noqa: BLE001 - advisory state must never break routing
             return
 

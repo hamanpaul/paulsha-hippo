@@ -27,7 +27,11 @@ work_item: issue-157-distiller-chain
 
 ### D3：狀態檔與可見性
 
-狀態寫在 `<memory_root>/runtime/agents/profile-health.json`（原子寫入；讀檔失敗或毀損視為無狀態；寫檔失敗只記 warning）。router 透過 `ProfileHealth` 協定讀寫，任何例外都吞掉，不讓建議性狀態影響蒸餾。dry-run 使用唯讀 store。`hippo doctor` 以唯讀 store 在 profile 行尾顯示 `health=backoff(...)`／`degraded`／`probe-pending`／`stale` 與最後 stderr 摘要，不改 exit code。
+狀態寫在 `<memory_root>/runtime/agents/profile-health.json`，依 task class 分開（`task_classes.<task_class>.<profile_id>`）。router 透過 `ProfileHealth` 協定讀寫並帶上自己的 task class，任何例外都吞掉，不讓建議性狀態影響蒸餾。dream、直呼 `hippo atomize`（不取 dream lock）、hook 裡的 title importer、skillopt 可能同時寫入：讀改寫以同目錄 `profile-health.json.lock` 的阻塞式 flock 序列化（比照 `moc.search._index_write_lock`，鎖檔永不 unlink；不放在 `runtime/locks/`，以免被 `hippo locks cleanup-legacy` 歸為未知鎖檔而擋下 `--apply`），暫存檔名每次唯一（比照 `moc.search._unique_tmp`）。讀取不取鎖：檔案只以 `os.replace` 整檔替換。成功且原本無狀態時不取鎖也不寫檔。讀檔失敗或毀損視為無狀態，寫檔或取鎖失敗只記 warning。dry-run 使用唯讀 store。
+
+### D6：title 與 skillopt 路徑共用 store，但依 task class 分開
+
+skillopt rollout 的 router 是 `atomization` task class、送同一份以 `---` 開頭的 atomize prompt，cg 的呼叫格式錯誤在這條路徑同樣必敗，因此與 dream 共用 `atomization` 狀態。title importer 在每個 session 結束的 hook 裡跑，憑證失效這類確定性失敗若不退避會每次重打外部 CLI。title prompt 以中文開頭，cg 在 title 路徑不會觸發呼叫格式錯誤；若所有 task class 共用一筆狀態，title 的成功會清掉 atomization 的退避、兩邊來回翻轉，所以狀態依 task class 分開。title 的 `_default_runner(text, command, timeout)` 是既有替換點，memory root 以 ContextVar 從 `generate_title`／`generate_atom_title` 的 `memory_root` 參數傳入，沒有 memory root 時不讀寫狀態。`hippo doctor` 以唯讀 store 在 profile 行尾顯示 `health=backoff(...)`／`degraded`／`probe-pending`／`stale` 與最後 stderr 摘要，不改 exit code。
 
 ### D4：claude 以 `--system-prompt` 修根因，不放寬 parser
 
@@ -43,3 +47,5 @@ launcher 屬 `contrib/`，不進 wheel；修正後仍需部署到 `~/.local/bin/
 - `tests/test_profile_health_backoff.py`：跨 router 實例退避、到期探測與加倍、上限、成功清除、非確定性失敗不退避（含 codex 回顯與慢失敗）、憑證門檻、command 變更失效、毀損檔、唯讀、doctor 顯示。
 - `tests/test_external_agent_profiles.py`：claude argv 的 `--system-prompt` 契約；既有 circuit-open 測試改為驗證新的略過原因。
 - `tests/test_copilot_launcher_prompt_binding.py`：假 copilot 記錄 argv，驗證 `--prompt=` 單一 token。
+- `tests/test_profile_health_backoff.py`（PR #162 審查）：4 個行程各 30 次並發更新不遺失；佔住舊的固定暫存檔名仍寫得進去。
+- `tests/test_profile_health_wiring.py`（PR #162 審查）：title importer 記錄並遵守退避；沒有 memory root 時不寫狀態；skillopt 三個 router 共用 store（dry-run 唯讀）；skillopt rollout 遵守 dream 記下的 atomization 退避；task class 互不影響。

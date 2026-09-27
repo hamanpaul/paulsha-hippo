@@ -28,7 +28,14 @@ work_item: issue-157-distiller-chain
 - [x] 先寫測試：假 copilot 記錄 argv，以 `---` 開頭的 prompt 必須是單一 `--prompt=` token（main 上 RED：`Invalid command format`）。
 - [x] 實作：`hippo-copilot-headless-core` 改用 `--prompt="$prompt"`。
 
-## Task 5：文件與收尾
+## Task 5：PR #162 審查修正
+
+- [x] 先寫測試：4 個行程並發更新同一 profile，最終計數必須是 120（前一版實作 RED：只剩 30）；佔住舊的固定暫存檔名時仍寫得進去（RED：狀態沒寫入）。
+- [x] 實作：讀改寫以 `profile-health.json.lock` 的 flock 序列化，暫存檔名每次唯一。
+- [x] 先寫測試：title importer、`hippo retitle`、skillopt 三個 router 讀寫同一個 store；task class 互不影響（RED：title 沒有狀態、skillopt router 沒有 `health`）。
+- [x] 實作：狀態依 task class 分開；title 以 ContextVar 傳 memory root；skillopt 依 `--dry-run` 決定唯讀；doctor 逐 task class 顯示。
+
+## Task 6：文件與收尾
 
 - [x] `docs/backend-matrix.md`、`contrib/local-harness/README.md` 同步；`changelog.d/157-distiller-chain.md` 並鏡像 `CHANGELOG.md [Unreleased]`。
 - [x] 全套測試、`openspec validate --all --strict`、`policy_check` 通過。
