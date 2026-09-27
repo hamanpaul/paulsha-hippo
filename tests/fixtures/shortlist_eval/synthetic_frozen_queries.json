@@ -1,0 +1,47 @@
+{
+  "format": "hippo-shortlist-frozen-queries",
+  "version": 1,
+  "name": "synthetic-sample-v1",
+  "description": "合成的小型凍結 query 集，只供測試與格式示範；query、note id、分數與標註全為虛構，不代表任何真實記憶。",
+  "annotator": "synthetic-fixture",
+  "method": "人工設計的合成標註：每個候選依預先設定的情境直接給 relevant true/false，用來覆蓋門檻與截斷的邊界案例。",
+  "fetch_k": 12,
+  "baseline_k": 3,
+  "block_overhead_chars": 200,
+  "queries": [
+    {
+      "id": "q01",
+      "query": "sqlite fts5 bm25 ranking",
+      "candidates": [
+        {"note_id": "sl-0000000000000101", "bm25": -6.0, "relevant": true, "chars": 120, "title": "FTS5 bm25 排序語意"},
+        {"note_id": "sl-0000000000000102", "bm25": -4.0, "relevant": false, "chars": 100, "title": "SQLite WAL 模式"},
+        {"note_id": "sl-0000000000000103", "bm25": -1.5, "relevant": false, "chars": 90, "title": "JSON 欄位索引"},
+        {"note_id": "sl-0000000000000104", "bm25": -1.2, "relevant": true, "chars": 80, "title": "unicode61 tokenizer 與 CJK"}
+      ]
+    },
+    {
+      "id": "q02",
+      "query": "git worktree prune stale",
+      "candidates": [
+        {"note_id": "sl-0000000000000201", "bm25": -5.0, "relevant": true, "chars": 110, "title": "worktree prune 前先確認分支"},
+        {"note_id": "sl-0000000000000202", "bm25": -4.5, "relevant": true, "chars": 105, "title": "stale worktree 鎖檔清理"},
+        {"note_id": "sl-0000000000000203", "bm25": -0.8, "relevant": false, "chars": 95, "title": "git gc 排程"}
+      ]
+    },
+    {
+      "id": "q03",
+      "query": "hook latency budget",
+      "annotator": "synthetic-fixture-second-pass",
+      "method": "覆寫示範：本題改由第二位合成標註者標註。",
+      "candidates": [
+        {"note_id": "sl-0000000000000301", "bm25": -2.5, "relevant": false, "chars": 100, "title": "CI 逾時設定"},
+        {"note_id": "sl-0000000000000302", "bm25": -1.0, "relevant": false, "chars": 100, "title": "shell 啟動時間"}
+      ]
+    },
+    {
+      "id": "q04",
+      "query": "release checklist version bump",
+      "candidates": []
+    }
+  ]
+}

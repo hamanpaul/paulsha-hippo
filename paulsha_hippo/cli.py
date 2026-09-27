@@ -640,6 +640,46 @@ def _build_parser() -> argparse.ArgumentParser:
     recall_p.add_argument("--session-id", required=True)
     recall_p.set_defaults(func=_recall)
 
+    shortlist_p = memory_subparsers.add_parser(
+        "shortlist", help="push shortlist 基準線：凍結 query 集評估與待標註骨架（#158）")
+    shortlist_sub = shortlist_p.add_subparsers(dest="shortlist_command", required=True)
+    shortlist_eval_p = shortlist_sub.add_parser(
+        "eval",
+        help="讀凍結 query 集，輸出 Precision@3／Noise@3／Relevant-missed@12／注入字元量"
+             "（確定性、可重現；不讀 runtime config、不呼叫 LLM）")
+    shortlist_eval_p.add_argument(
+        "--queries", required=True, help="凍結 query 集 JSON（格式見 docs/push-shadow-baseline.md）")
+    shortlist_eval_p.add_argument(
+        "--min-score", type=_shortlist_min_score_arg, default=None,
+        help="收窄門檻：只保留 score（= -bm25）>= 此值者；預設 0＝不設門檻")
+    shortlist_eval_p.add_argument(
+        "--max-k", type=_shortlist_max_k_arg, default=None,
+        help="收窄後最多保留幾則（0–3，只從 baseline 前 3 則內取）；預設 1")
+    shortlist_eval_p.add_argument(
+        "--sweep", type=_shortlist_sweep_arg, default=None,
+        help="門檻校準：auto（樣本內所有 score 值）或逗號分隔的門檻清單；輸出推薦門檻")
+    shortlist_eval_p.add_argument("--json", action="store_true")
+    shortlist_eval_p.set_defaults(func=_shortlist_eval)
+    shortlist_freeze_p = shortlist_sub.add_parser(
+        "freeze",
+        help="唯讀：沿 prompt hook 同一條候選路徑（BM25 top-12＋同主題折疊），輸出待標註的凍結 query 集骨架")
+    shortlist_freeze_p.add_argument("--memory-root", required=True)
+    shortlist_freeze_p.add_argument("--project", required=True)
+    shortlist_freeze_p.add_argument(
+        "--queries-file", required=True, help="純文字，一行一個 query；空行與 # 開頭略過")
+    shortlist_freeze_p.add_argument(
+        "--annotator", required=True, type=_nonblank_arg("--annotator"), help="標註者（寫入凍結集；不可空白）")
+    shortlist_freeze_p.add_argument(
+        "--method", required=True, type=_nonblank_arg("--method"), help="標註方法說明（寫入凍結集；不可空白）")
+    shortlist_freeze_p.add_argument("--name", default="frozen-queries")
+    shortlist_freeze_p.add_argument(
+        "--tool", default="claude-code", type=_tool_arg, help="計算注入字元量時採用的 hook tool")
+    shortlist_freeze_p.add_argument(
+        "--out", default=None,
+        help="輸出檔路徑；父目錄不存在時自動建立（比照 replay／upgrade plan），既有檔案會被覆寫；"
+             "寫入失敗時 stderr 回報並 exit 1。省略時印到 stdout")
+    shortlist_freeze_p.set_defaults(func=_shortlist_freeze)
+
     show_p = memory_subparsers.add_parser(
         "show", help="印出一筆 knowledge note；--agent 只印精簡 header＋body（省 ~70%% token）")
     show_p.add_argument("ref", help="slice_id 或檔案路徑")
@@ -1863,14 +1903,117 @@ def _recall(args: argparse.Namespace) -> int:
 
     bypass_early_stop=True：顯式 recall 是使用者主動操作，意圖明確，不受
     OFFER_STOP_AFTER_EVENTS 早停（自動 UserPromptSubmit hook 專用的雜訊抑制）影響。
+    record_push_shadow=False：#158 push shadow 只量未經請求的自動注入，顯式 recall 不記。
     """
     from .hooks._shortlist_common import build_shortlist_and_record
 
     block = build_shortlist_and_record(
         Path(args.memory_root), args.tool, args.session_id, args.cwd, args.prompt,
-        bypass_early_stop=True)
+        bypass_early_stop=True, record_push_shadow=False)
     if block:
         print(block)
+    return 0
+
+
+def _nonblank_arg(flag: str):
+    """argparse type：拒絕空字串或全空白（exit 2），回傳去除前後空白的值。"""
+    def _parse(s: str) -> str:
+        value = s.strip()
+        if not value:
+            raise argparse.ArgumentTypeError(f"{flag} must not be blank")
+        return value
+    return _parse
+
+
+def _shortlist_min_score_arg(s: str) -> float:
+    try:
+        value = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid score: {s!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("--min-score must be a finite number >= 0")
+    return value
+
+
+def _shortlist_max_k_arg(s: str) -> int:
+    from .push_shadow import MAX_K_LIMIT
+
+    try:
+        value = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid max-k: {s!r}") from None
+    if not 0 <= value <= MAX_K_LIMIT:
+        raise argparse.ArgumentTypeError(f"--max-k must be within 0–{MAX_K_LIMIT}")
+    return value
+
+
+def _shortlist_sweep_arg(s: str) -> "str | list[float]":
+    text = s.strip()
+    if text == "auto":
+        return "auto"
+    parts = [p.strip() for p in text.split(",")]
+    if not text or any(not p for p in parts):
+        raise argparse.ArgumentTypeError("--sweep must be 'auto' or a comma-separated list of scores")
+    return [_shortlist_min_score_arg(p) for p in parts]
+
+
+def _shortlist_eval(args: argparse.Namespace) -> int:
+    """#158：凍結 query 集上的 BM25 push 基準線評估（純計算、逐位元可重現）。"""
+    from . import shortlist_eval as sl_eval
+
+    try:
+        frozen = sl_eval.load_frozen_set(Path(args.queries))
+    except sl_eval.FrozenSetError as exc:
+        print(f"hippo shortlist eval: error: {exc}", file=sys.stderr)
+        return 2
+    min_score = sl_eval.DEFAULT_MIN_SCORE if args.min_score is None else args.min_score
+    max_k = sl_eval.DEFAULT_MAX_K if args.max_k is None else args.max_k
+    thresholds = None
+    if args.sweep == "auto":
+        thresholds = sl_eval.auto_thresholds(frozen)
+    elif args.sweep is not None:
+        thresholds = args.sweep
+    result = sl_eval.report(frozen, min_score=min_score, max_k=max_k, thresholds=thresholds)
+    if args.json:
+        sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    else:
+        sys.stdout.write(sl_eval.render_text(result))
+    return 0
+
+
+def _shortlist_freeze(args: argparse.Namespace) -> int:
+    """#158：唯讀產生待標註的凍結 query 集骨架（不記 offered、不寫 memory root）。"""
+    from . import shortlist_eval as sl_eval
+    from .moc.search import SearchIndexError
+
+    try:
+        lines = Path(args.queries_file).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"hippo shortlist freeze: error: cannot read queries file: {exc}", file=sys.stderr)
+        return 2
+    queries = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    if not queries:
+        print("hippo shortlist freeze: error: queries file has no queries", file=sys.stderr)
+        return 2
+    try:
+        data = sl_eval.freeze_queries(
+            Path(args.memory_root), args.project, queries, annotator=args.annotator,
+            method=args.method, name=args.name, tool=args.tool)
+    except (SearchIndexError, sl_eval.FreezeError) as exc:
+        print(f"hippo shortlist freeze: error: {exc}", file=sys.stderr)
+        return 1
+    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if args.out:
+        out = Path(args.out)
+        try:
+            # 比照 replay／upgrade plan：父目錄不存在時自動建立。
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"hippo shortlist freeze: error: cannot write --out {out}: {exc}", file=sys.stderr)
+            return 1
+    else:
+        sys.stdout.write(text)
     return 0
 
 

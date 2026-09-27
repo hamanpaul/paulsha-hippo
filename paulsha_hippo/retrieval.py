@@ -62,13 +62,21 @@ def format_shortlist(hits: list[dict], *, hint: str = "read", show_command: str 
     """
     if not hits:
         return ""
-    lines = [_SHORTLIST_HINT_SHOW.format(cmd=show_command) if hint == "show" and show_command else _SHORTLIST_HINT]
-    for h in hits:
-        title = (h.get("title") or "").strip() or "(untitled)"
-        summary = (h.get("summary") or "").strip()
-        path = h.get("path") or ""
-        line = f"- [{title}] — {summary} — {path}"
-        if h.get("slice_id"):
-            line += f" — {h['slice_id']}"
-        lines.append(line)
-    return "\n".join(lines)
+    return "\n".join([shortlist_header(hint=hint, show_command=show_command)]
+                     + [shortlist_row(h) for h in hits])
+
+
+def shortlist_header(*, hint: str = "read", show_command: str = "") -> str:
+    """format_shortlist 的提示行（第一段）。拆出供 #158 shadow／freeze 做結構化字元計算。"""
+    return _SHORTLIST_HINT_SHOW.format(cmd=show_command) if hint == "show" and show_command else _SHORTLIST_HINT
+
+
+def shortlist_row(h: dict) -> str:
+    """format_shortlist 的單則列（title 含換行時本身即多行）。format_shortlist 以 "\n" 串接各段。"""
+    title = (h.get("title") or "").strip() or "(untitled)"
+    summary = (h.get("summary") or "").strip()
+    path = h.get("path") or ""
+    line = f"- [{title}] — {summary} — {path}"
+    if h.get("slice_id"):
+        line += f" — {h['slice_id']}"
+    return line

@@ -120,6 +120,11 @@ skill_path: skills/atomize-knowledge-slice.md
 shortlist:
   collapse_same_topic: true   # 同 project／family 同主題只留最新（fix 2a）
   read_hint: show             # show：hint 建議 `hippo show --agent`；read：舊行為
+  push_shadow:                # #158：push 收窄 shadow 量測（docs/push-shadow-baseline.md）
+    enabled: false   # #158 預設關閉；開啟後注入不變，只多寫 runtime/ledger/push_shadow.jsonl
+    bm25_min_score: 0.0       # score=-bm25 門檻；0＝未校準、不設門檻（以 `hippo shortlist eval --sweep` 校準）
+    max_k: 1                  # 收窄後最多幾則（0–3，只從現行注入的 claim 內取）
+    time_budget_ms: 50        # shadow 計算上限；超過即丟棄該筆紀錄，不影響注入
 followups:
   enabled: true               # follow-up ledger 抽取／verify／brief 一行（fix 5）
 episodic_filter: true         # session 狀態句 slice 降層 episodic（fix 4）
