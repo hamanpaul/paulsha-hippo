@@ -13,6 +13,7 @@
 
 ### Added
 
+- Issue #151 store 佈局與 archive 回收：`memory_root`（解析 symlink 後）落在持續同步／被掃描樹（預設偵測 `.obsidian`／`.stfolder`／`.dropbox`，可用 `HIPPO_SYNC_MARKERS`／`HIPPO_SYNC_ROOTS` 設定）時，`hippo doctor` 警示（不改 exit code）、`hippo dream run` 啟動與 `hippo init` 對 stderr 警示。新增 `hippo archive gc`：以 processing ledger 為準回收已落成 knowledge（預設 `promoted`，可加 `--include-no-findings`）之 session 的 `archive/sessions`、`archive/fragments` 衍生副本；`archive/queue` raw capture 是 recovery／backfill 來源，一律保留。預設 dry-run 輸出統計與刪除清單、`--retention-days` 保留窗、冪等，`--apply` 需 dream lock 並逐檔核對 inode；未落成、parked、pending、無法歸因與被 knowledge provenance 引用者一律保留。遷移與回滾步驟見 `docs/storage-layout.md`。
 - Hippo #155 task-memory production provider：新增 `hippo task-memory provide|fetch` JSON subprocess protocol，依 project registry 精確授權 repo，重用 MOC scoped search 與 #146 payload helper，產生 canonical SHA-256 manifest；note fetch 僅讀本次 manifest 綁定項目，並以 redacted bytes 驗 hash/version，不寫既有 Hippo usage ledger。契約與 Cortex adapter 接線見 `docs/task-memory-provider.md`。
 - #146 正式規劃：通用 task memory payload、capability-aware delivery、tool-neutral evidence 與 Cortex host adapter 依賴（僅規劃，不代表 runtime 已完成）。
 
