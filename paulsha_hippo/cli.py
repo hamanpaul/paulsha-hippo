@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -326,6 +327,26 @@ def _build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("--limit", type=int, default=10)
     search_p.add_argument("--include-decayed", action="store_true")
     search_p.set_defaults(func=_search)
+
+    h2_p = memory_subparsers.add_parser(
+        "h2", help="#148 H2 離線 benchmark：凍結 as-of BM25 基準線（#164；唯讀、不呼叫 LLM）")
+    h2_sub = h2_p.add_subparsers(dest="h2_command", required=True)
+    h2_freeze_p = h2_sub.add_parser(
+        "freeze",
+        help="複製索引快照，對 task 檔逐題做 as-of 純 bm25 檢索（top-12），輸出凍結候選集與覆蓋統計"
+             "（格式見 docs/h2-offline-baseline.md；輸出含記憶內文，只能放私有位置）")
+    h2_freeze_p.add_argument("--memory-root", required=True)
+    h2_freeze_p.add_argument("--tasks", required=True, help="task 檔 JSON（format=hippo-h2-tasks）")
+    h2_freeze_p.add_argument("--out-dir", required=True, help="私有輸出目錄（索引快照＋frozen-candidates.json）")
+    h2_freeze_p.add_argument(
+        "--allow-repo", action="append", required=True,
+        help="public 允許清單中的 repo（github.com/<owner>/<repo>），可重複指定")
+    h2_freeze_p.add_argument(
+        "--deny-terms", default=None,
+        help="私有字詞清單檔（一行一個，不分大小寫子字串比對）；不進 repo")
+    h2_freeze_p.add_argument(
+        "--snapshot", default=None, help="沿用既有索引快照重跑（驗證可重現性）；省略時複製現行索引")
+    h2_freeze_p.set_defaults(func=_h2_freeze)
 
     task_memory_p = memory_subparsers.add_parser(
         "task-memory",
@@ -1978,6 +1999,26 @@ def _shortlist_eval(args: argparse.Namespace) -> int:
         sys.stdout.write(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
     else:
         sys.stdout.write(sl_eval.render_text(result))
+    return 0
+
+
+def _h2_freeze(args: argparse.Namespace) -> int:
+    """#164：凍結 H2 離線 benchmark 的 as-of BM25 候選集（唯讀讀取 memory root，不呼叫 LLM）。"""
+    import datetime as _dt
+
+    from . import h2_offline
+
+    try:
+        tasks = h2_offline.load_tasks(Path(args.tasks))
+        deny_terms = h2_offline.load_deny_terms(Path(args.deny_terms) if args.deny_terms else None)
+        summary = h2_offline.freeze(
+            Path(args.memory_root), tasks, Path(args.out_dir), deny_terms=deny_terms,
+            allowlist=args.allow_repo, frozen_at=_dt.datetime.now(_dt.timezone.utc),
+            snapshot=Path(args.snapshot) if args.snapshot else None)
+    except (h2_offline.H2TaskError, OSError, sqlite3.Error) as exc:
+        print(f"hippo h2 freeze: error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 

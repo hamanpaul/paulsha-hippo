@@ -1,0 +1,11 @@
+---
+type: feat
+---
+- #164（#148 H2 C 組前置）新增 `hippo h2 freeze`：H2 離線 benchmark 的凍結 as-of BM25 基準線。
+  - **as-of 檢索：** task（public 已關閉 issue 的標題＋內文摘錄）經 `to_fts_query()` 淨化，在所屬 project 索引中檢索；只保留 `captured_at` 早於 issue 建立時間的 slice，時間不可信或提到自身 issue 號碼的排除。
+  - **排序：** 依純 FTS5 bm25 取 top-12，A 組＝前 3。刻意不用正式排序的 link_weight、已讀加權與 active 旗標，避免未來資訊洩漏。
+  - **凍結：** 索引先複製成快照並記 sha256；同一份快照＋task 檔＋私有字詞清單重跑，digest 相同。
+  - **送出前掃描（C 組用）：** 只取標題＋內文前 800 字元；命中本機絕對路徑、email、private IP、疑似 secret 或私有字詞清單者整則標為不可送出，task 文字也要掃。私有字詞清單由私有檔案提供，不進 repo，輸出只記 sha256。
+  - 唯讀、不呼叫 LLM；輸出含記憶內文，只放私有位置。
+- 新增 `scripts/h2_sample_tasks.py`：依固定 seed 與配額，從 public 允許清單的已關閉 issue 抽出 44 題 task（12 題開發＋32 題 hidden 候選池）。
+- 新增 `docs/h2-offline-baseline.md`：檢索規則、送出前掃描、格式、私有資料放置，以及 task 抽樣與 hidden 組成規則。

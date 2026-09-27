@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### Added
+- #164（#148 H2 C 組前置）`hippo h2 freeze`：H2 離線 benchmark 的凍結 as-of BM25 基準線。
+  - as-of 檢索：只取 issue 建立前的 slice；
+  - 純 bm25 top-12，A 組＝前 3；
+  - 索引快照＋digest，可重現；
+  - 送出前掃描：只取標題＋內文前 800 字元；私有字詞清單不進 repo。
+- `scripts/h2_sample_tasks.py`：以固定 seed 與配額抽出 44 題 public issue task。
+- `docs/h2-offline-baseline.md`：規則、格式、私有資料放置，以及 task 抽樣與 hidden 組成規則。
+
 ## [1.0.0] - 2026-09-27
 
 ### Changed
