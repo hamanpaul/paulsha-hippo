@@ -62,13 +62,26 @@ JEV_USD_PER_INPUT_MTOK = Decimal("0.042")
 _SECRET_ENV = ("TYPESAFE_API_KEY",)
 _RETRYABLE = frozenset({429, 529})
 
-C_INSTRUCTION = ("Would including `candidates[{index}]` materially help an agent plan or execute `task`? "
-                 "Judge only from the text shown.")
-C_CRITERIA = {
+#: C 的問法版本。rev0 在開發集上過度字面：gold 判相關的 39 則中 JEV 只說 yes 8 則（例如 task 必須遵守的
+#: repo 流程規則被讀成「一般背景」）。依 JEV 官方 literal-reading 建議，把隱含條件寫進 criteria（rev1，
+#: 開發集上唯一一次修訂；B 維持與 gold 標註者相同的定義）。
+C_REVISION = "rev1"
+C_INSTRUCTION_REV0 = ("Would including `candidates[{index}]` materially help an agent plan or execute `task`? "
+                      "Judge only from the text shown.")
+C_CRITERIA_REV0 = {
     "yes": "The memory contains a directly applicable constraint, known failure, prior decision, or validated "
            "experience that would change, confirm, or prevent a concrete decision in this task.",
     "no": "The memory only shares the same repository or topic, is general background, is an execution trace "
           "with no direct use for this task, or is about unrelated work.",
+}
+C_INSTRUCTION = ("Should an engineer read `candidates[{index}]` before working on `task`? "
+                 "Judge only from the text shown.")
+C_CRITERIA = {
+    "yes": "The note is about the same component, failure, feature, or workflow as the task, or it states a rule, "
+           "constraint, known failure, prior decision, or validated result that applies to carrying out this task, "
+           "including repository workflow rules the task must follow.",
+    "no": "The note is about a different component or problem, or it is general background that would not change "
+          "how this task is carried out.",
 }
 B_SYSTEM = ("You select memory notes for an engineering agent. You have no tools. "
             "Reply with exactly one JSON object and nothing else.")
@@ -333,7 +346,8 @@ def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, je
                             tokens = (body.get("usage") or {}).get("input_tokens")
                             usd = (Decimal(tokens) * JEV_USD_PER_INPUT_MTOK / Decimal(1_000_000)
                                    if isinstance(tokens, int) and not isinstance(tokens, bool) else None)
-                            record.update(selected=sel, details=details, wall_ms=wall, egress="sent",
+                            record.update(selected=sel, details={"c_revision": C_REVISION, "answers": details},
+                                          wall_ms=wall, egress="sent",
                                           cost_usd=None if usd is None else str(usd), model=str(body.get("model")),
                                           request_sha256=_sha256(request), response_sha256=_sha256(body))
                 else:
