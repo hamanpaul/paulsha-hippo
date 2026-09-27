@@ -206,6 +206,9 @@ def run_init(*, memory_root: str | None, backend: str, model: str | None,
     committed = _commit_init_atomic(cfg, cfg_body, override, None)
 
     print(f"memory_root: {root}")
+    from . import storage
+
+    storage.warn_if_exposed(Path(root))  # #151：init 即提示 store 落在同步樹內
     print(f"configured external agent profile: {configured_profile}")
     print(f"config: {cfg}{'' if cfg in committed else '（既存，未覆寫）'}")
     print("下一步：hippo install hooks && hippo install service --enable")
@@ -480,6 +483,11 @@ def run_doctor(*, fix_backend: bool = False, live_probe: bool = False,
         failed = True
 
     memory_root = paths.memory_root()
+    # #151：store 實際落點若在持續同步／被掃描樹內只警示，不改 exit code。
+    from . import storage
+
+    for line in storage.placement_lines(storage.check_placement(memory_root)):
+        print(line)
     hooks_dir = memory_root / "hooks"
     print(f"- hooks 部署：{'✓ ' + str(hooks_dir) if hooks_dir.is_dir() else '未部署（hippo install hooks）'}")
     attestation_lines, attestation_failed = _surface_build_attestation(
@@ -649,6 +657,27 @@ def _live_probe_env_enabled() -> bool:
     }
 
 
+def _profile_health_store():
+    """doctor 用的唯讀 profile health store（issue #157）；無法解析時回 None。"""
+    from . import agent_health
+
+    try:
+        return agent_health.ProfileHealthStore(
+            agent_health.profile_health_path(paths.memory_root()), read_only=True
+        )
+    except Exception:  # noqa: BLE001 - doctor must keep reporting without it
+        return None
+
+
+def _profile_health_note(health, profile) -> str | None:
+    if health is None:
+        return None
+    try:
+        return health.describe(profile)
+    except Exception:  # noqa: BLE001 - advisory state; never break doctor
+        return None
+
+
 def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
     """Report canonical tier/profile contract in the service-effective env."""
     from paulsha_hippo.atomizer import config as atomizer_config
@@ -662,6 +691,7 @@ def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
         return ["- canonical external profile 未設定"], False
     probe_env, service_effective = _probe_environment()
     service_path = probe_env.get("PATH", _FALLBACK_SERVICE_PATH)
+    health = _profile_health_store()
     lines: list[str] = []
     failed = False
     for profile in profiles:
@@ -670,6 +700,11 @@ def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
             f"enabled={str(profile.enabled).lower()} model={profile.model} "
             f"effort={profile.effort} command={profile.command_fingerprint()[:12]}"
         )
+        # issue #157：持久退避狀態只顯示、不改 doctor exit code——退避本身是
+        # router 已經在處理的已知狀況，不是部署缺陷。
+        health_note = _profile_health_note(health, profile)
+        if health_note:
+            label = f"{label} {health_note}"
         eligible, reason = profile.eligible(
             task_class="atomization", path=service_path
         )

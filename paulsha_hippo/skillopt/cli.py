@@ -11,6 +11,7 @@ from typing import Any
 from paulsha_hippo import paths
 from paulsha_hippo.atomizer import cli as atomizer_cli
 from paulsha_hippo.atomizer import config as atomizer_config
+from paulsha_hippo.agent_health import ProfileHealthStore, profile_health_path
 from paulsha_hippo.agent_profiles import (
     FIXED_TIMEOUT_SECONDS,
     ExternalAgentRouter,
@@ -241,8 +242,20 @@ def _resolve_skill_path(args: argparse.Namespace, config: atomizer_config.Atomiz
 def _build_default_hooks(
     config: atomizer_config.AtomizerConfig,
     skillopt_config: SkillOptConfig,
+    *,
+    memory_root: Path | None = None,
+    dry_run: bool = False,
 ) -> tuple[HookFactory, HookFactory, HookFactory]:
     known_projects = atomizer_cli._known_projects(config.known_projects_file)
+    # issue #157：與 dream 共用 profile 健康狀態。rollout 是 atomization task
+    # class、送同一份 atomize prompt，確定性必敗的 profile（例如 cg 的呼叫
+    # 格式錯誤）在這裡同樣會發生；judge／optimizer 記在 skillopt task class。
+    # dry-run 只讀不寫。
+    health = (
+        ProfileHealthStore(profile_health_path(memory_root), read_only=dry_run)
+        if memory_root is not None
+        else None
+    )
 
     def make_rollout():
         agent = ExternalAgentRouter(
@@ -251,6 +264,7 @@ def _build_default_hooks(
             deadline_seconds=config.router_deadline_seconds,
             max_attempts=config.router_max_attempts,
             max_agent_calls=config.router_max_agent_calls,
+            health=health,
         )
         return make_atomize_rollout(agent, known_projects, config=config)
 
@@ -262,6 +276,7 @@ def _build_default_hooks(
                 max(int(skillopt_config.judge_timeout), 1),
                 FIXED_TIMEOUT_SECONDS,
             ),
+            health=health,
         )
         return make_hybrid_score(judge, alpha=skillopt_config.alpha)
 
@@ -275,6 +290,7 @@ def _build_default_hooks(
             ),
             max_attempts=config.router_max_attempts,
             max_agent_calls=config.router_max_agent_calls,
+            health=health,
         )
         return make_router_optimizer(optimizer)
 
@@ -294,7 +310,9 @@ def run(args: argparse.Namespace) -> int:
         return 2
     memory_root = Path(args.memory_root).expanduser()
     now = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    make_rollout, make_score, make_optimizer = _build_default_hooks(config, skillopt_config)
+    make_rollout, make_score, make_optimizer = _build_default_hooks(
+        config, skillopt_config, memory_root=memory_root, dry_run=bool(args.dry_run)
+    )
     return run_optimize(
         inbox_root=memory_root / "inbox",
         reference_root=Path(args.reference_root).expanduser(),

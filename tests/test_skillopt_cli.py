@@ -337,7 +337,7 @@ class SkilloptCliTests(unittest.TestCase):
             ) as load_skillopt_config,
             mock.patch(
                 "paulsha_hippo.skillopt.cli._build_default_hooks",
-                side_effect=lambda atomizer_cfg, loaded_skillopt_config: seen.update(
+                side_effect=lambda atomizer_cfg, loaded_skillopt_config, **_hook_kwargs: seen.update(
                     hook_atomizer_config=atomizer_cfg,
                     hook_skillopt_config=loaded_skillopt_config,
                 )
