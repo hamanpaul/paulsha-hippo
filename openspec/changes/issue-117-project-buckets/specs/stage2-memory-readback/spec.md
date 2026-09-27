@@ -36,7 +36,7 @@
 
 ### Requirement: Registry remotes backfill and bucket merge impact report
 
-Importer discovery SHALL 在 slug 由「恰等於主 repo root 的 registered root」派生時，以現場 git 探測的 origin remote 補登該 slug 的 `remotes`；registered root 僅為祖先目錄、同一 root 由多個 slug 登記、或 remote 已由其他 slug 認領時 MUST NOT 補登，payload 夾帶的 remote MUST NOT 經此路徑落盤。Hippo SHALL 提供 `hippo registry backfill-remotes`：預設 dry-run 且不寫檔，`--apply` 才寫入 generated registry，寫入前 SHALL 在 registry lock 內備份原檔並輸出回復指令，重跑 SHALL 冪等且不產生重複 remotes；legacy `projects.yaml` MUST NOT 被改寫。Hippo SHALL 提供唯讀的 `hippo knowledge bucket-report`，列出各 knowledge bucket 的合併去向與筆數、可執行的 rekey 指令與 `_unknown` 成因分類；判定 note 是否留在原處時 SHALL 同時比對 frontmatter `project` 與檔案實際所在的 bucket 目錄，frontmatter 已正確但目錄錯置者 SHALL 列為 relocation；MUST NOT 搬移或寫入任何檔案。
+Importer discovery SHALL 在 slug 由「恰等於主 repo root 的 registered root」派生時，以現場 git 探測的 origin remote 補登該 slug 的 `remotes`；registered root 僅為祖先目錄、同一 root 由多個 slug 登記、或 remote 已由其他 slug 認領時 MUST NOT 補登，payload 夾帶的 remote MUST NOT 經此路徑落盤。Hippo SHALL 提供 `hippo registry backfill-remotes`：預設 dry-run 且不寫檔，`--apply` 才寫入 generated registry；是否備份與回復方式 SHALL 在 registry lock 內、依寫入當下重讀的檔案決定（原檔存在即備份實際被覆寫的版本），並輸出回復指令；寫入當下已是目標狀態時 SHALL 視為成功且不變更，只有 schema_version 拒寫才回報錯誤；重跑 SHALL 冪等且不產生重複 remotes；legacy `projects.yaml` MUST NOT 被改寫。Hippo SHALL 提供唯讀的 `hippo knowledge bucket-report`，列出各 knowledge bucket 的合併去向與筆數、可執行的 rekey 指令與 `_unknown` 成因分類；判定 note 是否留在原處時 SHALL 同時比對 frontmatter `project` 與檔案實際所在的 bucket 目錄，frontmatter 已正確但目錄錯置者 SHALL 列為 relocation；MUST NOT 搬移或寫入任何檔案。
 
 #### Scenario: Registration backfills remotes for a roots-only project
 - **WHEN** registry 只登記某 project 的主 repo root，且 auto-write 開啟時該 repo 或其 sibling worktree 有 session 被 ingest
@@ -61,3 +61,11 @@ Importer discovery SHALL 在 slug 由「恰等於主 repo root 的 registered ro
 #### Scenario: Ephemeral fallback is logged
 - **WHEN** 暫存根規則把無 remote、未登記的 checkout 解析為 `_unknown`
 - **THEN** resolver SHALL 記錄 debug log，內容含該路徑與調整方式
+
+#### Scenario: Backup decision is made under the registry lock
+- **WHEN** 規劃完成後、取得 registry lock 之前，另一個 writer 建立或更新了 registry
+- **THEN** `--apply` SHALL 備份實際被覆寫的版本，回復指令 SHALL 還原該版本而非刪檔
+
+#### Scenario: Already converged apply is a success
+- **WHEN** 取得 lock 時 registry 已含計畫中要補的 remote（例如其他行程先補上）
+- **THEN** `--apply` SHALL 以 exit 0 回報未變更，不備份，且 MUST NOT 回報 schema_version 錯誤

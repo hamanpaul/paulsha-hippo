@@ -22,6 +22,7 @@ work_item: issue-117-project-buckets
 
 - [x] 先寫測試：dry-run 不寫檔；`--apply` 寫入、寫前備份、回復指令可還原原 bytes、重跑冪等；legacy-only project 補進 generated registry 且 legacy 檔不改；conflict／root-missing／not-a-repo／not-repo-root／no-remote 只回報不寫入；補登後 sibling worktree 經 remote 收斂。
 - [x] 實作：`hippo registry backfill-remotes`；`registry.record_discoveries()` 於同一 lock 內批次合併並在 replace 前備份。
+- [x] 審查修正（#161 第二輪）：備份判斷移入 lock 內依當下檔案決定（先 RED：規劃後另一 writer 建立 registry 時無備份）；`--apply` 區分 written／unchanged／nothing-to-add／refused-schema，已收斂為成功（先 RED）。
 
 ## Task 4: bucket 合併 dry-run impact report
 

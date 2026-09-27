@@ -197,20 +197,31 @@ def apply_remote_backfill(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """寫入計畫中的補登（冪等）；有變更且原檔存在時先備份，回傳回復指令。"""
+    """寫入計畫中的補登（冪等），回傳 write_status／changed／backup／restore。
+
+    備份與否、回復方式都由 `record_discoveries` 在 registry lock 內依寫入當下的檔案
+    決定（lock 外的 `exists()` 預判會與其他 writer 競態，審查 #161）：
+    - `written`：原檔存在 → 已備份，restore 為 `cp -p <backup> <registry>`；原檔不存在
+      → restore 為 `rm <registry>`。
+    - `unchanged`：寫入當下已是目標狀態（例如其他行程先補上同一 remote），不寫檔、不備份。
+    - `refused-schema`：現檔 schema_version 高於本 producer，拒寫。
+    - `nothing-to-add`：計畫中沒有 add 項目。
+    """
     path = Path(registry_path)
     additions = planned_additions(items)
+    result: dict[str, Any] = {"changed": False, "backup": None, "restore": None}
     if not additions:
-        return {"changed": False, "backup": None, "restore": None}
-    existed = path.exists()
-    backup = backup_path_for(path, now) if existed else None
-    changed = record_discoveries(additions, registry_path=path, backup_path=backup)
-    if not changed:
-        return {"changed": False, "backup": None, "restore": None}
-    if backup is not None and backup.exists():
-        restore = f"cp -p {shlex.quote(str(backup))} {shlex.quote(str(path))}"
-        backup_value: str | None = str(backup)
-    else:
-        restore = f"rm {shlex.quote(str(path))}"
-        backup_value = None
-    return {"changed": True, "backup": backup_value, "restore": restore}
+        return {**result, "write_status": "nothing-to-add"}
+    outcome = record_discoveries(
+        additions, registry_path=path, backup_path=backup_path_for(path, now)
+    )
+    result["write_status"] = outcome.status
+    if not outcome.changed:
+        return result
+    result["changed"] = True
+    if outcome.backup is not None:
+        result["backup"] = str(outcome.backup)
+        result["restore"] = f"cp -p {shlex.quote(str(outcome.backup))} {shlex.quote(str(path))}"
+    elif outcome.created:
+        result["restore"] = f"rm {shlex.quote(str(path))}"
+    return result

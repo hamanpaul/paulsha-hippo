@@ -263,3 +263,124 @@ def test_memory_root_derives_default_paths(env, capsys):
     assert report["registry"] == str(env["registry"])
     assert report["projects"] == str(env["legacy"])
     assert _status_by_slug(report) == {"widget": "add"}
+
+
+def _race_on_lock(monkeypatch, write_other):
+    """模擬「規劃之後、取得 registry lock 之前」另一個 writer 先寫入 registry。
+
+    另一個 writer 必然在我們取得 LOCK_EX 之前完成寫入（它持有 lock 寫完才釋放），
+    故在第一次 LOCK_EX 呼叫時注入其寫入，即為兩者之間的最壞交錯。
+    """
+    import fcntl
+
+    from paulsha_hippo.importer import registry as registry_mod
+
+    real_flock = registry_mod.fcntl.flock
+    state = {"raced": False}
+
+    def racing_flock(fd, operation):
+        if operation == fcntl.LOCK_EX and not state["raced"]:
+            state["raced"] = True
+            write_other()
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(registry_mod.fcntl, "flock", racing_flock)
+    return state
+
+
+def test_apply_backs_up_registry_created_by_other_writer_before_lock(env, capsys, monkeypatch):
+    # 審查 #161 第二輪-1：規劃時 registry 還不存在（僅 legacy 有 root），取得 lock 前另一個
+    # writer 建立了 registry。備份判斷若在 lock 外，這次寫入會覆蓋真檔卻沒有備份，回復指令
+    # 還會是 `rm`（連同對方內容一起刪掉）。
+    repo = _repo(env["base"] / "legacy-proj", remote="git@github.com:acme/legacy-proj.git")
+    env["legacy"].write_text(f"projects:\n  legacy-proj:\n    roots:\n      - {repo}\n", encoding="utf-8")
+    assert not env["registry"].exists()
+    other = render_registry((ProjectConfig(slug="other", roots=("/data/other",)),))
+    state = _race_on_lock(monkeypatch, lambda: env["registry"].write_text(other, encoding="utf-8"))
+
+    code, report = _run(env, "--apply", capsys=capsys)
+
+    assert state["raced"] is True
+    assert code == 0
+    assert report["changed"] is True
+    backups = _backups(env["registry"])
+    assert [str(path) for path in backups] == [report["backup"]]
+    assert backups[0].read_text(encoding="utf-8") == other
+    assert report["restore"].startswith("cp -p ")
+    slugs = {p.slug: p.remotes for p in parse_registry(env["registry"].read_text(encoding="utf-8"))}
+    assert slugs == {"other": (), "legacy-proj": ("github.com/acme/legacy-proj",)}
+    subprocess.run(report["restore"], shell=True, check=True)
+    assert env["registry"].read_text(encoding="utf-8") == other
+
+
+def test_apply_backup_is_the_version_actually_overwritten(env, capsys, monkeypatch):
+    repo = _repo(env["base"] / "widget")
+    env["registry"].write_text(
+        render_registry((ProjectConfig(slug="widget", roots=(str(repo),)),)), encoding="utf-8"
+    )
+    updated = render_registry(
+        (
+            ProjectConfig(slug="widget", roots=(str(repo),)),
+            ProjectConfig(slug="other", roots=("/data/other",)),
+        )
+    )
+    _race_on_lock(monkeypatch, lambda: env["registry"].write_text(updated, encoding="utf-8"))
+
+    _code, report = _run(env, "--apply", capsys=capsys)
+
+    assert Path(report["backup"]).read_text(encoding="utf-8") == updated
+
+
+def test_apply_when_other_writer_already_converged_is_success_without_change(env, capsys, monkeypatch):
+    # 審查 #161 第二輪-2：另一個行程先補上同一個 remote，結果已收斂——應回報成功（exit 0）
+    # 並說明未變更，不得誤報成 schema_version 拒寫。
+    repo = _repo(env["base"] / "widget")
+    env["registry"].write_text(
+        render_registry((ProjectConfig(slug="widget", roots=(str(repo),)),)), encoding="utf-8"
+    )
+    converged = render_registry(
+        (ProjectConfig(slug="widget", roots=(str(repo),), remotes=("github.com/acme/widget",)),)
+    )
+    _race_on_lock(monkeypatch, lambda: env["registry"].write_text(converged, encoding="utf-8"))
+
+    code, report = _run(env, "--apply", capsys=capsys)
+
+    assert code == 0
+    assert "error" not in report
+    assert report["changed"] is False
+    assert report["write_status"] == "unchanged"
+    assert report["backup"] is None and report["restore"] is None
+    assert _backups(env["registry"]) == []
+    assert env["registry"].read_text(encoding="utf-8") == converged
+
+
+def test_apply_refused_by_newer_schema_is_an_error(env, capsys):
+    repo = _repo(env["base"] / "widget")
+    newer = (
+        "schema_version: 2\n"
+        "projects:\n"
+        f"  - slug: \"widget\"\n    roots:\n      - \"{repo}\"\n    remotes: []\n    aliases: []\n"
+    )
+    env["registry"].write_text(newer, encoding="utf-8")
+
+    code, report = _run(env, "--apply", capsys=capsys)
+
+    assert code == 1
+    assert report["write_status"] == "refused-schema"
+    assert "schema_version" in report["error"]
+    assert report["changed"] is False and report["backup"] is None
+    assert env["registry"].read_text(encoding="utf-8") == newer
+    assert _backups(env["registry"]) == []
+
+
+def test_apply_with_nothing_to_add_reports_status(env, capsys):
+    repo = _repo(env["base"] / "widget", remote=None)
+    env["registry"].write_text(
+        render_registry((ProjectConfig(slug="widget", roots=(str(repo),)),)), encoding="utf-8"
+    )
+
+    code, report = _run(env, "--apply", capsys=capsys)
+
+    assert code == 0
+    assert report["write_status"] == "nothing-to-add"
+    assert report["changed"] is False

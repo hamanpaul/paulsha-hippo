@@ -59,7 +59,8 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 `hippo registry backfill-remotes [--memory-root <root>] [--registry <path>] [--projects <path>] [--dry-run|--apply]`：
 
 - 對 union config（legacy manual 檔 ∪ generated registry，同 §6）每個 project 的每個 root 探測 origin remote，判準與 §5 root 登記補登相同；逐項輸出狀態：`add`（將補入）、`present`（已存在）、`conflict`（remote 已由其他 slug 認領，或本次有多個 slug 探測到同一 remote；附 `claimed_by`）、`root-missing`（路徑不存在，如 legacy 佔位符）、`not-a-repo`、`not-repo-root`（root 只在某 repo 之內、不是 toplevel）、`no-remote`。
-- 預設 dry-run，不寫任何檔案。`--apply` 才把 `add` 項目併入 generated registry（legacy manual 檔只讀、不改寫）；在 registry lock 內、`os.replace` 前把原檔 bytes 備份為同目錄 `project-hippo.yaml.bak-117-<UTC 時戳>`，輸出 `backup` 與回復指令 `restore`（原檔不存在時為 `rm <registry>`）。
+- 預設 dry-run，不寫任何檔案。`--apply` 才把 `add` 項目併入 generated registry（legacy manual 檔只讀、不改寫）。「要不要備份、備份哪個版本、回復方式」全部在 registry lock 內、`os.replace` 前依**當下重讀的檔案**決定——規劃與取得 lock 之間若有其他 writer 建立或更新 registry，備份的是實際被覆寫的版本：原檔存在則備份為同目錄 `project-hippo.yaml.bak-117-<UTC 時戳>`，`restore` 為 `cp -p <backup> <registry>`；原檔不存在則 `restore` 為 `rm <registry>`。回復會一併捨棄 apply 之後其他 writer 的寫入。
+- `--apply` 輸出 `write_status`：`written`（已寫入）、`unchanged`（寫入當下已是目標狀態，例如其他行程先補上同一 remote；exit 0、不備份）、`nothing-to-add`（計畫無 `add` 項目；exit 0）、`refused-schema`（現檔 `schema_version` 高於本 producer，拒寫防降級；exit 1 並附 `error`）。
 - 冪等：重跑時已補項目皆為 `present`，不寫檔、不產生新備份。手寫、缺 `schema_version` 的舊檔會在寫入時 canonical 化（§4），語義不變。
 
 ## 6. 讀取端 merge 語義

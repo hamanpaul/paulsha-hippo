@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -27,6 +28,29 @@ SCHEMA_VERSION = 1
 REGISTRY_FILENAME = "project-hippo.yaml"
 LOCK_FILENAME = ".project-hippo.yaml.lock"
 TMP_FILENAME = ".project-hippo.yaml.tmp"
+
+WRITE_WRITTEN = "written"
+WRITE_UNCHANGED = "unchanged"
+WRITE_REFUSED_SCHEMA = "refused-schema"
+
+
+@dataclass(frozen=True)
+class RegistryWriteOutcome:
+    """`record_discoveries` 的結果——全部欄位皆於 registry lock 內、依寫入當下狀態決定。
+
+    - status：`written`（已寫入）／`unchanged`（合併後與現檔相同，已是目標狀態）／
+      `refused-schema`（現檔 schema_version 高於本 producer，拒寫防降級）。
+    - backup：本次寫入前實際備份的檔案（呼叫端有給 backup_path、且寫入當下原檔存在）。
+    - created：寫入當下原檔不存在、由本次建立（回復方式為刪除）。
+    """
+
+    status: str
+    backup: Path | None = None
+    created: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.status == WRITE_WRITTEN
 
 GENERATED_HEADER_LINES = (
     "# GENERATED — 本檔由 paulsha-hippo 自動產生（project registry discovery record），請勿手改。",
@@ -297,7 +321,7 @@ def record_discovery(
         remotes=tuple(str(item) for item in remotes if item),
         aliases=tuple(str(item) for item in aliases if item),
     )
-    return record_discoveries((incoming,), registry_path=registry_path)
+    return record_discoveries((incoming,), registry_path=registry_path).changed
 
 
 def record_discoveries(
@@ -305,12 +329,14 @@ def record_discoveries(
     *,
     registry_path: str | Path,
     backup_path: str | Path | None = None,
-) -> bool:
-    """在同一把 registry lock 內依序併入多筆 discovery；回傳檔案是否變更。
+) -> RegistryWriteOutcome:
+    """在同一把 registry lock 內依序併入多筆 discovery；回傳 `RegistryWriteOutcome`。
 
-    `backup_path` 有給且內容將變更、原檔存在時，於同一 lock 內、`os.replace` 之前
-    先把原檔 bytes 原樣寫到 backup_path（#117 backfill 的回復點；lock 外備份會與
-    並行 auto-write 競態，回復點可能不是實際被覆寫的版本）。
+    `backup_path` 有給且內容將變更時，「要不要備份」與「備份哪個版本」都在 lock 內、
+    `os.replace` 之前依當下重讀的檔案決定：原檔存在就把其 bytes 原樣寫到 backup_path，
+    不存在則回報 created。呼叫端不得在 lock 外以 `exists()` 預判——規劃與取得 lock 之間
+    若有其他 writer 建立／更新 registry，預判會讓這次覆寫沒有備份、或把回復指令誤判成
+    刪檔（#117 backfill 的回復點，審查 #161）。
     """
     for entry in entries:
         if not entry.slug.strip():
@@ -350,23 +376,26 @@ def record_discoveries(
                         SCHEMA_VERSION,
                         path,
                     )
-                    return False
+                    return RegistryWriteOutcome(WRITE_REFUSED_SCHEMA)
             merged = parse_registry(existing_text) if existing_text is not None else ()
             for entry in entries:
                 merged = merge_discovery(merged, entry)
             rendered = render_registry(merged)
             if existing_text == rendered:
-                return False
+                return RegistryWriteOutcome(WRITE_UNCHANGED)
+            written_backup: Path | None = None
             if backup_path is not None and existing_bytes is not None:
-                backup = Path(backup_path)
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                backup_tmp = backup.with_name(f".{backup.name}.tmp")
+                written_backup = Path(backup_path)
+                written_backup.parent.mkdir(parents=True, exist_ok=True)
+                backup_tmp = written_backup.with_name(f".{written_backup.name}.tmp")
                 backup_tmp.write_bytes(existing_bytes)
-                os.replace(backup_tmp, backup)
+                os.replace(backup_tmp, written_backup)
             tmp_path = path.with_name(TMP_FILENAME)
             tmp_path.write_text(rendered, encoding="utf-8")
             os.replace(tmp_path, path)
-            return True
+            return RegistryWriteOutcome(
+                WRITE_WRITTEN, backup=written_backup, created=existing_bytes is None
+            )
         finally:
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
 

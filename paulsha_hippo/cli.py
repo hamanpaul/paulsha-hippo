@@ -861,15 +861,25 @@ def _registry_backfill_remotes(args: argparse.Namespace) -> int:
     }
     exit_code = 0
     if apply:
+        messages = {
+            "written": "已寫入 registry；回復請執行 restore 指令（會一併捨棄之後其他 writer 的寫入）。",
+            "unchanged": "寫入當下 registry 已是目標狀態（可能已由其他行程補上），未變更。",
+            "nothing-to-add": "計畫中沒有需要補登的 remote，未變更。",
+        }
         try:
             report.update(remote_backfill.apply_remote_backfill(items, registry_path))
         except (OSError, ValueError) as exc:
             report["error"] = str(exc)
             exit_code = 1
-        if not report["changed"] and remote_backfill.planned_additions(items) and "error" not in report:
-            # 有待補項目卻未寫入：registry schema_version 高於本 producer（拒寫防降級）
-            report["error"] = "registry 未變更（schema_version 高於本 producer 支援版本？）"
-            exit_code = 1
+        else:
+            status = report["write_status"]
+            if status == "refused-schema":
+                report["error"] = (
+                    "registry 的 schema_version 高於本 producer 支援版本，拒絕寫入（避免降級刪除新版欄位）。"
+                )
+                exit_code = 1
+            else:
+                report["message"] = messages.get(status, "")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return exit_code
 
