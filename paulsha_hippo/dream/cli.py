@@ -17,13 +17,16 @@ from ..ledger import processing
 from ..moc import runner as moc_runner
 from ..lib import idle
 from ..runtime_flags import load_flags
-from .. import followups
+from .. import followups, storage
 from . import lock as dream_lock
 from . import orchestrator
 
 
 def _run(args: argparse.Namespace) -> int:
     memory_root = Path(args.memory_root)
+    # #151 啟動檢查點：store 落在持續同步／被掃描樹內時對 stderr（journald）警示，
+    # 不改變 dream 行為與 exit code。
+    storage.warn_if_exposed(memory_root)
 
     # #19/#15：global dream singleton——整輪持有 nonblocking flock；
     # 取不到鎖代表另一個 dream run 進行中，記 log 後 skip（exit 0），不得競寫。
