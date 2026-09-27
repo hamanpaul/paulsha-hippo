@@ -31,6 +31,19 @@ def _isolate_runtime_config(monkeypatch, tmp_path):
     monkeypatch.setenv("HIPPO_CONFIG_ROOT", str(root))
 
 
+@pytest.fixture(autouse=True)
+def _pin_ephemeral_roots(monkeypatch):
+    """暫存 checkout 判定（#117）不得隨 repo 的 checkout 位置漂移。
+
+    `resolve_project` 會把系統暫存目錄下無 remote 的 checkout 歸 `_unknown`；repo 若被
+    checkout 在 `/tmp` 底下（sandbox／CI 暫存 workspace），測試 scratch 目錄就會整批被判為
+    暫存路徑，讓既有「目錄名 fallback」測試出現環境造成的假失敗。預設清空暫存根；
+    驗證 ephemeral 行為的測試自行以 `HIPPO_EPHEMERAL_ROOTS` 指向合成目錄。
+    """
+
+    monkeypatch.setenv("HIPPO_EPHEMERAL_ROOTS", "")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_real_hippo_config_untouched():
     """Regression guard for the 2026-08-25 live-config-overwrite incident

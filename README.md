@@ -28,7 +28,7 @@
 
 ## Usage
 
-日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo show --agent <slice_id>`（精簡 note 視圖，省 ~70% token）／`hippo followups list|verify|close|extract`（可行動語句 ledger）／`hippo knowledge backfill-provenance|link-supersedes|mark-episodic`（一次性 migration，先 dry-run）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
+日常命令：`hippo dream run|status`／`hippo wakeup`／`hippo recall`（跨 CLI 任務相關檢索）／`hippo show --agent <slice_id>`（精簡 note 視圖，省 ~70% token）／`hippo followups list|verify|close|extract`（可行動語句 ledger）／`hippo knowledge backfill-provenance|link-supersedes|mark-episodic`（一次性 migration，先 dry-run）／`hippo knowledge bucket-report`（knowledge bucket 合併的唯讀 impact report）／`hippo search`／`hippo usage`（漏斗報表；`mark-applied` 回報 applied）／`hippo index verify`／`hippo replay`／`hippo bundle`／`hippo requeue <session-key>|--all-parked`（parked session 修復後重排）／`hippo recovery plan|apply|resume|rollback`（hash-pinned、預設 5-session 的 importer recovery，不自動重播 LLM）。
 跨 CLI 消費能力（codex/copilot 的 prompt-time／read attribution 實測）見 `docs/cross-cli-capability-matrix.md`。
 唯讀 7／30 天記憶 KPI 稽核可使用 repo-local `custom-skills/hippo-memory-kpi/`；它分開呈現 session→atomic note、machine-valid/searchable 與嚴格 `offer → read → applied` 漏斗，另含 `followups` 區塊統計每個 window 的 open／resolved-in-source 筆數，且不呼叫 `hippo recall` 污染分母。
 蒸餾失敗顯性化：backend 不可用／重試超限的 session 進 `parked`（證據在 `runtime/queue/_failed/`），修復後 `hippo requeue` 恢復；`dream run` 以 global lock 保證單一 writer，並發第二實例記 log 後跳過。
@@ -36,7 +36,7 @@
 Store 佈局（#151）：`memory_root` 請放在持續同步／被掃描的目錄（如 Obsidian vault）**外**，只把 `knowledge/` 以 symlink 借回 vault；落在同步樹內時 `hippo doctor`、`hippo dream run`、`hippo init` 會警示（偵測可用 `HIPPO_SYNC_MARKERS`／`HIPPO_SYNC_ROOTS` 設定）。`hippo archive gc --memory-root <root> [--retention-days N] [--include-no-findings] [--list-out FILE] [--apply]` 以 processing ledger 為準回收已落成 knowledge 之 session 的 atomizer 衍生副本（`archive/sessions`、`archive/fragments`；預設 dry-run、冪等；`archive/queue` raw capture 是 recovery／backfill 來源，一律保留）。遷移與回滾步驟見 `docs/storage-layout.md`。
 
 設定：runtime distiller 唯一來源為 `~/.config/paulsha-hippo/config.yaml`；`HIPPO_*` 僅覆寫路徑。外部 CLI 自行負責登入與 launcher，Hippo 不讀取外部 agent 的認證狀態。
-Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。契約見 `docs/project-registry-contract.md`。
+Project registry：設 `project_registry.auto_write: true`（預設 off）後，importer 自動把已解析的 project mapping 寫入 generated 檔 `~/.agents/config/paulsha/project-hippo.yaml`（勿手改；讀取端自動 union-read legacy `projects.yaml`）。只登記 roots 的既有 project 可用 `hippo registry backfill-remotes`（預設 dry-run；`--apply` 寫前備份並輸出回復指令）補上 remotes，讓 worktree session 收斂回同一 slug。契約見 `docs/project-registry-contract.md`。
 Task memory provider：`hippo task-memory provide|fetch` 提供給外部 adapter 使用的 stdin/stdout JSON protocol；它只接受明確授權 Hippo 且能由 project registry 唯一映射的 repo，並以 manifest/hash 限制 note fetch。完整 envelope、錯誤碼與接線方式見 `docs/task-memory-provider.md`。
 蒸餾只使用宣告式 external headless profiles：Tier 1 `claude`/`codex`、Tier 2 `agy`/`cg`、Tier 3 `co-gem`/`claude-gem`/custom local。每個 profile 自訂 traits、task classes、model、effort 與 tokenized argv；prompt 一律走 stdin，fallback 順序與 bounded budget 見 `docs/backend-matrix.md`。
 

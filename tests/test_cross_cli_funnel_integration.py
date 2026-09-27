@@ -41,10 +41,12 @@ def _seed(mr: Path) -> Path:
 
 
 def _run_hook(hook: Path, mr: Path, payload: dict) -> dict:
+    # pytest tmp_path 位於系統暫存目錄：本測試驗注入鏈，不驗 #117 暫存 checkout 判定，故停用暫存根。
     env = {
         "PSC_MEMORY_ROOT": str(mr),
         "PATH": "/usr/bin:/bin",
         "PYTHONPATH": str(Path.cwd()),
+        "HIPPO_EPHEMERAL_ROOTS": "",
     }
     p = subprocess.run(
         [sys.executable, str(hook)],

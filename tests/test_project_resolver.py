@@ -12,7 +12,11 @@ from paulsha_hippo.importer.config import (
     default_projects_path,
     load_projects_config,
 )
-from paulsha_hippo.importer.project_resolver import resolve_project
+from paulsha_hippo.importer.project_resolver import (
+    ephemeral_roots,
+    is_ephemeral_path,
+    resolve_project,
+)
 from paulsha_hippo.importer.registry import load_union_projects_config, render_registry
 
 
@@ -30,6 +34,42 @@ def _init_repo(path: Path, remote: str | None = None) -> None:
 
 def _tempdir() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory(dir=_SCRATCH_ROOT)
+
+
+def _hermetic_git_env(**extra: str):
+    """隔離 checkout 位置造成的假訊號（#117；docs/release-readiness.md 記載的巢狀 worktree 假失敗）。
+
+    - GIT_CEILING_DIRECTORIES：git 向上搜尋不得越過 scratch root——repo 若 checkout 在另一個
+      repo 內（如 `.worktrees/<name>`、`.claude/worktrees/*`），scratch 下的非 repo 目錄才不會
+      誤中外層 repo 的 toplevel。
+    - HIPPO_EPHEMERAL_ROOTS 預設清空：repo 若 checkout 在系統暫存目錄下（sandbox），scratch
+      路徑不得因而被判為暫存 checkout；需要驗 ephemeral 行為的測試自行覆寫。
+    """
+    env = {"GIT_CEILING_DIRECTORIES": str(_SCRATCH_ROOT), "HIPPO_EPHEMERAL_ROOTS": ""}
+    env.update(extra)
+    return mock.patch.dict(os.environ, env, clear=False)
+
+
+def _git(*args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _make_repo_with_worktrees(base: Path, *, remote: str | None) -> tuple[Path, Path, Path]:
+    """主 repo `widget/` + 兩種既有 worktree 慣例：`widget-worktrees/<branch>` 與 `widget/.worktrees/<name>`。"""
+    main = base / "widget"
+    main.mkdir()
+    _init_repo(main, remote)
+    _git("-C", str(main), "commit", "--allow-empty", "-m", "init")
+    sibling = base / "widget-worktrees" / "feature-x"
+    sibling.parent.mkdir()
+    _git("-C", str(main), "worktree", "add", "-q", "-b", "feature-x", str(sibling))
+    nested = main / ".worktrees" / "fix-y"
+    _git("-C", str(main), "worktree", "add", "-q", "-b", "fix-y", str(nested))
+    return main.resolve(), sibling.resolve(), nested.resolve()
 
 
 class ProjectResolverTest(unittest.TestCase):
@@ -145,16 +185,19 @@ class ProjectResolverTest(unittest.TestCase):
         )
         with mock.patch(
             "paulsha_hippo.importer.project_resolver._git.git_toplevel",
-            remote_value="/srv/builder/PRJ-0611/vendor-mcu-cli",
-        ), mock.patch(
+            return_value="/srv/builder/example-build/widget-cli",
+        ) as toplevel_mock, mock.patch(
             "paulsha_hippo.importer.project_resolver._git.git_remote",
             return_value="git@internal-vcs.example:vendor-y/vendor-y_openwrt_feed.git",
-        ):
+        ) as remote_mock:
             project = resolve_project(
-                cwd="/srv/worker/PROJ-0605/vendor-y-mcu-cleanup", projects=config
+                cwd="/srv/worker/example-task/widget-cleanup", projects=config
             )
 
         self.assertEqual(project, "vendor-y")
+        # 確認走的是「探測到的 toplevel → 其 remote → projects.yaml 對應」這條路徑
+        toplevel_mock.assert_called_once_with("/srv/worker/example-task/widget-cleanup")
+        remote_mock.assert_called_once_with("/srv/builder/example-build/widget-cli")
 
     def test_resolve_project_fallback_unregistered_remote_returns_normalized_url(self):
         config = load_projects_config(
@@ -385,6 +428,13 @@ class ProjectResolverTest(unittest.TestCase):
 
 
 class ResolveAutoDetectTests(unittest.TestCase):
+    def setUp(self):
+        self.env = _hermetic_git_env()
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
     def test_repo_with_remote_resolves_owner_repo(self):
         with _tempdir() as tmp:
             repo = Path(tmp) / "paulshaclaw"
@@ -468,6 +518,176 @@ class ResolveAutoDetectTests(unittest.TestCase):
             _init_repo(repo)
 
             self.assertEqual(resolve_project(cwd=str(repo), remote_url="/tmp/ws/repo", projects=_EMPTY), "solo")
+
+
+class WorktreeConvergenceTests(unittest.TestCase):
+    """#117 驗收：主 root、`<repo>-worktrees/<branch>`、`.worktrees/<name>` 三種 cwd 解析出同一 slug。"""
+
+    REMOTE = "git@github.com:acme/widget.git"
+
+    def setUp(self):
+        self.env = _hermetic_git_env()
+        self.env.start()
+        self.tmp = _tempdir()
+        self.base = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.env.stop()
+
+    def assert_converges(self, cwds, projects, expected):
+        for cwd in cwds:
+            with self.subTest(cwd=str(cwd)):
+                self.assertEqual(resolve_project(cwd=str(cwd), projects=projects), expected)
+
+    def test_roots_only_registry_converges_worktrees_to_registered_slug(self):
+        # 根因重現：registry 只有 roots、沒有 remotes 時，sibling worktree 不在 root 前綴下，
+        # 舊解析落到 remote fallback 回傳 raw remote 字串，knowledge bucket 因而碎裂。
+        main, sibling, nested = _make_repo_with_worktrees(self.base, remote=self.REMOTE)
+        (main / "src").mkdir()
+        (sibling / "src").mkdir()
+        projects = ProjectsConfig(projects=(ProjectConfig(slug="widget", roots=(str(main),)),))
+
+        self.assert_converges((main, main / "src", sibling, sibling / "src", nested), projects, "widget")
+
+    def test_registry_with_remotes_converges_worktrees_to_registered_slug(self):
+        main, sibling, nested = _make_repo_with_worktrees(self.base, remote=self.REMOTE)
+        projects = ProjectsConfig(
+            projects=(
+                ProjectConfig(slug="widget", roots=(str(main),), remotes=("github.com/acme/widget",)),
+            )
+        )
+
+        self.assert_converges((main, sibling, nested), projects, "widget")
+
+    def test_unregistered_repo_with_remote_converges_to_raw_remote(self):
+        main, sibling, nested = _make_repo_with_worktrees(self.base, remote=self.REMOTE)
+
+        self.assert_converges((main, sibling, nested), _EMPTY, "github.com/acme/widget")
+
+    def test_unregistered_remoteless_repo_converges_to_main_repo_name(self):
+        # 無 remote、未登記：worktree 的目錄名 fallback 必須歸併到主 repo 目錄名，
+        # 不得各自以 `feature-x`／`fix-y` 產生新 bucket。
+        main, sibling, nested = _make_repo_with_worktrees(self.base, remote=None)
+
+        expected = resolve_project(cwd=str(main), projects=_EMPTY)
+        self.assertEqual(expected, "widget")
+        self.assert_converges((sibling, nested), _EMPTY, expected)
+
+    def test_registered_root_match_still_wins_over_remote_mapping(self):
+        # root 登記（較具體的本機事實）優先於 remote 對應，與既有步驟 1/2 的優先序一致。
+        main, sibling, _nested = _make_repo_with_worktrees(self.base, remote=self.REMOTE)
+        projects = ProjectsConfig(
+            projects=(
+                ProjectConfig(slug="widget", roots=(str(main),)),
+                ProjectConfig(slug="widget-mirror", remotes=("github.com/acme/widget",)),
+            )
+        )
+
+        self.assert_converges((main, sibling), projects, "widget")
+
+
+class EphemeralCheckoutTests(unittest.TestCase):
+    """#117：暫存目錄下無 remote 的 checkout 歸 `_unknown`，不得以目錄名產生假 project。"""
+
+    def setUp(self):
+        self.tmp = _tempdir()
+        self.base = Path(self.tmp.name)
+        self.fake_tmp = self.base / "fake-system-tmp"
+        self.fake_tmp.mkdir()
+        self.env = _hermetic_git_env(HIPPO_EPHEMERAL_ROOTS=str(self.fake_tmp))
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_planning_sandbox_copy_without_git_is_unknown(self):
+        checkout = self.fake_tmp / "cortex-planning-abc123" / "checkout"
+        checkout.mkdir(parents=True)
+
+        self.assertEqual(resolve_project(cwd=str(checkout), projects=_EMPTY), "_unknown")
+
+    def test_remoteless_repo_under_ephemeral_root_is_unknown(self):
+        checkout = self.fake_tmp / "sandbox-1" / "checkout"
+        checkout.mkdir(parents=True)
+        _init_repo(checkout)
+
+        self.assertEqual(resolve_project(cwd=str(checkout), projects=_EMPTY), "_unknown")
+
+    def test_ephemeral_root_itself_is_unknown(self):
+        self.assertEqual(resolve_project(cwd=str(self.fake_tmp), projects=_EMPTY), "_unknown")
+
+    def test_deleted_ephemeral_cwd_is_unknown(self):
+        gone = self.fake_tmp / "cortex-480-canary-XyZ"
+
+        self.assertEqual(resolve_project(cwd=str(gone), projects=_EMPTY), "_unknown")
+
+    def test_repo_with_remote_under_ephemeral_root_keeps_remote_identity(self):
+        checkout = self.fake_tmp / "clone" / "widget"
+        checkout.mkdir(parents=True)
+        _init_repo(checkout, "git@github.com:acme/widget.git")
+
+        self.assertEqual(resolve_project(cwd=str(checkout), projects=_EMPTY), "github.com/acme/widget")
+
+    def test_registered_root_under_ephemeral_root_keeps_registered_slug(self):
+        checkout = self.fake_tmp / "pinned" / "checkout"
+        checkout.mkdir(parents=True)
+        projects = ProjectsConfig(projects=(ProjectConfig(slug="pinned", roots=(str(checkout),)),))
+
+        self.assertEqual(resolve_project(cwd=str(checkout), projects=projects), "pinned")
+
+    def test_ephemeral_fallback_is_logged_not_silent(self):
+        # 審查 #161-2：暫存根規則把目錄名 fallback 改成 _unknown 時必須留下可查的 debug log，
+        # 讓「暫存目錄下的長期工作目錄」被誤判時有跡可循（對策：登記 roots 或覆寫暫存根）。
+        checkout = self.fake_tmp / "long-lived-work"
+        checkout.mkdir()
+        with self.assertLogs("paulsha_hippo.importer", level="DEBUG") as captured:
+            self.assertEqual(resolve_project(cwd=str(checkout), projects=_EMPTY), "_unknown")
+        output = "\n".join(captured.output)
+        self.assertIn("ephemeral", output)
+        self.assertIn(str(checkout), output)
+        self.assertIn("HIPPO_EPHEMERAL_ROOTS", output)
+
+    def test_non_ephemeral_folder_keeps_folder_name_fallback(self):
+        folder = self.base / "notes"
+        folder.mkdir()
+
+        self.assertEqual(resolve_project(cwd=str(folder), projects=_EMPTY), "notes")
+
+
+class EphemeralRootsConfigTests(unittest.TestCase):
+    def test_default_roots_include_system_tmp(self):
+        env = {key: value for key, value in os.environ.items() if key != "HIPPO_EPHEMERAL_ROOTS"}
+        # HOME 若恰在 /tmp 之下（部分 sandbox），/tmp 會依「HOME 祖先排除」規則剔除；固定合成 HOME
+        env["HOME"] = "/nonexistent-home/tester"
+        with mock.patch.dict(os.environ, env, clear=True):
+            roots = ephemeral_roots()
+        self.assertIn(os.path.realpath("/tmp"), roots)
+
+    def test_env_override_replaces_defaults_and_empty_disables(self):
+        with mock.patch.dict(os.environ, {"HIPPO_EPHEMERAL_ROOTS": "/srv/sandboxes"}, clear=False):
+            self.assertEqual(ephemeral_roots(), (os.path.realpath("/srv/sandboxes"),))
+        with mock.patch.dict(os.environ, {"HIPPO_EPHEMERAL_ROOTS": ""}, clear=False):
+            self.assertEqual(ephemeral_roots(), ())
+
+    def test_filesystem_root_and_relative_entries_are_ignored(self):
+        value = os.pathsep.join(["/", "relative/dir", "/srv/sandboxes"])
+        with mock.patch.dict(os.environ, {"HIPPO_EPHEMERAL_ROOTS": value}, clear=False):
+            self.assertEqual(ephemeral_roots(), (os.path.realpath("/srv/sandboxes"),))
+
+    def test_home_and_its_ancestors_are_never_ephemeral(self):
+        home = Path.home()
+        value = os.pathsep.join([str(home), str(home.parent)])
+        with mock.patch.dict(os.environ, {"HIPPO_EPHEMERAL_ROOTS": value}, clear=False):
+            self.assertEqual(ephemeral_roots(), ())
+
+    def test_is_ephemeral_path_matches_root_and_descendants_only(self):
+        with mock.patch.dict(os.environ, {"HIPPO_EPHEMERAL_ROOTS": "/srv/sandboxes"}, clear=False):
+            self.assertTrue(is_ephemeral_path("/srv/sandboxes"))
+            self.assertTrue(is_ephemeral_path("/srv/sandboxes/a/checkout"))
+            self.assertFalse(is_ephemeral_path("/srv/sandboxes-other/checkout"))
+            self.assertFalse(is_ephemeral_path(None))
 
 
 class UnionReadTests(unittest.TestCase):
