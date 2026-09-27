@@ -347,6 +347,25 @@ def _build_parser() -> argparse.ArgumentParser:
     h2_freeze_p.add_argument(
         "--snapshot", default=None, help="沿用既有索引快照重跑（驗證可重現性）；省略時複製現行索引")
     h2_freeze_p.set_defaults(func=_h2_freeze)
+    h2_run_p = h2_sub.add_parser(
+        "run", help="#167：在凍結候選集上跑 A／B／C（可續跑；C 送 TypeSafe 前再掃一次 payload）")
+    h2_run_p.add_argument("--frozen", required=True, help="frozen-candidates.json")
+    h2_run_p.add_argument("--split-file", required=True, help="JSON：{\"dev\": [...], \"hidden\": [...]}")
+    h2_run_p.add_argument("--split", choices=("dev", "hidden"), required=True)
+    h2_run_p.add_argument("--arms", default="A,B,C")
+    h2_run_p.add_argument("--out", required=True, help="records JSONL（私有位置）")
+    h2_run_p.add_argument("--deny-terms", default=None, help="私有字詞清單（C 組送出前掃描用）")
+    h2_run_p.add_argument("--stability", action="store_true",
+                          help="只對 hidden 依 seed 抽出的 8 題重跑 B、C 一次（repeat=1）")
+    h2_run_p.add_argument("--b-model", default="sonnet")
+    h2_run_p.set_defaults(func=_h2_run)
+    h2_score_p = h2_sub.add_parser("score", help="#167：計分並依 v4 門檻判定 go／no-go（確定性）")
+    h2_score_p.add_argument("--frozen", required=True)
+    h2_score_p.add_argument("--gold", required=True, help="gold-final.json（私有）")
+    h2_score_p.add_argument("--split-file", required=True)
+    h2_score_p.add_argument("--split", choices=("dev", "hidden"), required=True)
+    h2_score_p.add_argument("--records", required=True)
+    h2_score_p.set_defaults(func=_h2_score)
 
     task_memory_p = memory_subparsers.add_parser(
         "task-memory",
@@ -2019,6 +2038,63 @@ def _h2_freeze(args: argparse.Namespace) -> int:
         print(f"hippo h2 freeze: error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _h2_load_split(args: argparse.Namespace) -> list:
+    split = json.loads(Path(args.split_file).read_text(encoding="utf-8"))
+    task_ids = split.get(args.split)
+    if not isinstance(task_ids, list) or not task_ids:
+        raise ValueError(f"split file 缺 {args.split} 清單")
+    return task_ids
+
+
+def _h2_run(args: argparse.Namespace) -> int:
+    """#167：在凍結候選集上執行 A／B／C。"""
+    from . import h2_bench, h2_offline
+
+    try:
+        frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
+        task_ids = _h2_load_split(args)
+        arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
+        repeat = 0
+        if args.stability:
+            if args.split != "hidden":
+                raise ValueError("--stability 只用於 hidden")
+            task_ids = h2_bench.stability_tasks(task_ids)
+            arms = [a for a in arms if a in ("B", "C")]
+            repeat = 1
+        deny = h2_offline.load_deny_terms(Path(args.deny_terms) if args.deny_terms else None)
+        if "C" in arms and not deny:
+            raise ValueError("C 組需要 --deny-terms（送出前掃描）")
+        stats = h2_bench.run(
+            frozen, task_ids, arms, Path(args.out), deny_terms=deny, repeat=repeat,
+            jev=h2_bench.JevClient() if "C" in arms else None,
+            claude=h2_bench.ClaudeFilter(model=args.b_model) if "B" in arms else None,
+            progress=lambda r: print(f"{r['arm']} r{r['repeat']} {r['task_id']:28} {r['selected']} "
+                                     f"{r['wall_ms']} ms {'ERR ' + r['error']['kind'] if r['error'] else ''}",
+                                     flush=True))
+    except (OSError, ValueError, h2_bench.BenchError, h2_offline.H2TaskError) as exc:
+        print(f"hippo h2 run: error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(stats, ensure_ascii=False))
+    return 0
+
+
+def _h2_score(args: argparse.Namespace) -> int:
+    """#167：計分並判定。"""
+    from . import h2_bench
+
+    try:
+        frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
+        task_ids = _h2_load_split(args)
+        records = [json.loads(line) for line in Path(args.records).read_text(encoding="utf-8").splitlines()
+                   if line.strip()]
+        summary = h2_bench.score(frozen, h2_bench.load_gold(Path(args.gold)), task_ids, records)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"hippo h2 score: error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"summary": summary, "decision": h2_bench.decide(summary)}, ensure_ascii=False, indent=2))
     return 0
 
 
