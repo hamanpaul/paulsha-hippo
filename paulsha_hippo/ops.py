@@ -657,6 +657,27 @@ def _live_probe_env_enabled() -> bool:
     }
 
 
+def _profile_health_store():
+    """doctor 用的唯讀 profile health store（issue #157）；無法解析時回 None。"""
+    from . import agent_health
+
+    try:
+        return agent_health.ProfileHealthStore(
+            agent_health.profile_health_path(paths.memory_root()), read_only=True
+        )
+    except Exception:  # noqa: BLE001 - doctor must keep reporting without it
+        return None
+
+
+def _profile_health_note(health, profile) -> str | None:
+    if health is None:
+        return None
+    try:
+        return health.describe(profile)
+    except Exception:  # noqa: BLE001 - advisory state; never break doctor
+        return None
+
+
 def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
     """Report canonical tier/profile contract in the service-effective env."""
     from paulsha_hippo.atomizer import config as atomizer_config
@@ -670,6 +691,7 @@ def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
         return ["- canonical external profile 未設定"], False
     probe_env, service_effective = _probe_environment()
     service_path = probe_env.get("PATH", _FALLBACK_SERVICE_PATH)
+    health = _profile_health_store()
     lines: list[str] = []
     failed = False
     for profile in profiles:
@@ -678,6 +700,11 @@ def _probe_external_profiles(*, live: bool) -> tuple[list[str], bool]:
             f"enabled={str(profile.enabled).lower()} model={profile.model} "
             f"effort={profile.effort} command={profile.command_fingerprint()[:12]}"
         )
+        # issue #157：持久退避狀態只顯示、不改 doctor exit code——退避本身是
+        # router 已經在處理的已知狀況，不是部署缺陷。
+        health_note = _profile_health_note(health, profile)
+        if health_note:
+            label = f"{label} {health_note}"
         eligible, reason = profile.eligible(
             task_class="atomization", path=service_path
         )
