@@ -8,6 +8,11 @@
 ## [Unreleased]
 
 ### Added
+- #167（#148 H2 C 組）`hippo h2 run`／`hippo h2 score`：在凍結候選集上跑 A／B／C 離線 benchmark。
+  - A：BM25 top-3；B：Claude 篩 0–3 則；C：JEV 逐則 yes／no，依 BM25 名次取前 3。
+  - C 送出前以私有字詞清單再掃 payload；JEV key 只讀 environment。
+  - 依 2026-09-27 決策紀錄 v4 計分並判定 go／no-go。
+  - 第一輪 hidden 24 題判定 no-go（見 `docs/h2-offline-baseline.md` 第 8 節）。
 - #164（#148 H2 C 組前置）`hippo h2 freeze`：H2 離線 benchmark 的凍結 as-of BM25 基準線。
   - as-of 檢索：只取 issue 建立前的 slice；
   - 純 bm25 top-12，A 組＝前 3；

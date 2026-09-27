@@ -109,3 +109,73 @@ C 組會把候選送給外部 processor，所以每則候選與 task 文字本�
 - 從候選池依 seed 順序，先取所有「top-12 沒有任何 relevant」的題目（最多 8 題）；
 - 再依 seed 順序補滿 24 題；
 - 零 relevant 的題目不足 6 題時，照實回報為限制，不另外補題。
+
+## 7. A／B／C benchmark（#167）
+
+```bash
+hippo h2 run --frozen <frozen-candidates.json> --split-file <split.json> --split dev|hidden \
+  --arms A,B,C --out <records.jsonl> --deny-terms <私有字詞清單> [--stability]
+hippo h2 score --frozen <…> --gold <gold.json> --split-file <…> --split hidden --records <records.jsonl>
+```
+
+**三組：**
+
+| 組 | 看到的候選 | 選法 |
+|---|---|---|
+| A | 全部凍結候選 | BM25 前 3（線上現況，不經送出前過濾） |
+| B | 可送出的候選 | Claude（`sonnet`）一次看完，回 0–3 則 |
+| C | 可送出的候選 | JEV（`jev-1.13.0`）每則一題 yes／no，yes 者依 BM25 名次取前 3，全 no 回 0 則 |
+
+- **B、C 看同一份候選**，品質比較才公平；送出前過濾的損失由隱私門檻另外量。
+- **C 送出前會用私有字詞清單再掃一次實際 payload**，命中就不送，並記為 `blocked`。這是「TypeSafe 政策違規＝0」的驗證依據。
+
+**計分**（`hippo h2 score`，確定性）：
+- **Precision@3：** 所有題目選中的候選中，相關者的比例。
+- **每題不相關數：** 平均每題選中幾則不相關的候選。
+- **task 命中率：** top-12 有相關記憶的題目中，至少選中一則相關的比例。
+- **正確回 0 則的比例：** top-12 沒有相關記憶的題目中，選 0 則的比例。
+- **另報：** 注入字元量、median 延遲、每題成本（`Decimal`）、可送出涵蓋率、被過濾掉的相關候選比例。
+- **穩定性：** hidden 依 seed 抽 8 題，B、C 各重跑一次，只報告、不列入門檻。
+
+**go 條件**（`h2_bench.GO_THRESHOLDS`，以 hidden 24 為準，全部通過才算 go）：
+- **C 對 A：**
+  - task 命中率不低於 A 超過 5pp；
+  - Precision@3 高 ≥ 10pp，或每題不相關數少 ≥ 30%；
+  - 正確回 0 則 ≥ 90%。
+- **C 對 B：**
+  - Precision@3 差距 ≤ 5pp、task 命中率差距 ≤ 10pp；
+  - median 延遲快 ≥ 70%，或成本低 ≥ 90%。
+- **隱私：**
+  - 政策違規（`blocked`）＝0；
+  - 可送出涵蓋率 ≥ 80%；
+  - 被過濾掉的相關候選 ≤ 5%。
+
+**gold 標註**（私有；流程依 2026-09-27 決策紀錄 v4）：
+- Codex `gpt-6-sol` 與 Claude（`opus`）各自盲標。
+- 明確分歧交 Codex `gpt-5.6-terra` 仲裁；v4 原寫 `gpt-6-terra`，但在該帳號不存在。
+- 有人標「不確定」的項目：三方多數決，不確定視為棄權；平手以仲裁者為準。
+- Paul 抽查 5% 一致項。
+- gold 與 hidden 名單的 sha256 在 hidden 執行前登錄於 #167。
+
+## 8. 第一輪結果（2026-09-27）：no-go for now
+
+hidden 24 題、依第 7 節門檻判定，**no-go**。詳細數據與檔案 sha256 登錄於 #167。
+
+| 組 | Precision@3 | 每題不相關數 | task 命中率 | 正確回 0 則 | median 延遲 | 每題成本 |
+|---|---|---|---|---|---|---|
+| A BM25 | 0.333 | 2.00 | 12/17 | 0/7 | — | 0 |
+| B Claude | 0.938 | 0.08 | 14/17 | 7/7 | 11.4 s | US$0.031 |
+| C JEV rev1 | 0.818 | 0.25 | 13/17 | 6/7 | 0.33 s | US$0.00022 |
+
+- **通過：**
+  - C 對 A 的命中率與品質：Precision@3 高 48pp，不相關數少 88%；
+  - C 對 B 的命中率（差 5.9pp）與效率：延遲快約 97%，成本低約 99%；
+  - 隱私：違規 0、涵蓋率 92%、被過濾掉的相關候選 2.9%。
+- **未過：**
+  - 正確回 0 則：6/7（86%），門檻 90%；
+  - C 對 B 的 Precision@3 差距 11.9pp，門檻 5pp。
+- **兩項都來自同一題：** 一個沒有相關記憶的 closeout task，C 選了同一功能的 3 則先前執行紀錄。這只是描述，不改判定；hidden 執行後不修改標註、criteria 或門檻。
+- **門檻設計的限制：** hidden 只有 7 題沒有相關記憶，「正確回 0 則 ≥ 90%」實際上等於 7 題全對。
+- **穩定性：** 抽 8 題重跑，B、C 各 6/8 選擇完全一致。
+
+依決策紀錄 v4：離線 go 之前不開 live shadow 或 randomized H2，也不改 #857 的 production 路徑。
