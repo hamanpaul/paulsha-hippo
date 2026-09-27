@@ -551,8 +551,8 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_sub = archive_p.add_subparsers(dest="archive_command", required=True)
     archive_gc = archive_sub.add_parser(
         "gc",
-        help="回收對應 session 已落成 knowledge 的 archive 檔（以 processing/import ledger "
-             "為準；預設 dry-run，--apply 才刪）",
+        help="回收對應 session 已落成 knowledge 的 archive/sessions、archive/fragments 衍生副本"
+             "（以 processing ledger 為準；archive/queue raw capture 一律保留；預設 dry-run，--apply 才刪）",
     )
     archive_gc.add_argument("--memory-root", required=True)
     archive_gc.add_argument(

@@ -153,6 +153,13 @@ def store(tmp_path):
     files["h_doc"] = s.session_doc(m, "claude-code", "sh")
     _doc(s.root / "inbox" / "_slices" / "demo" / "claude-code__sh__000.md", "claude-code", "sh")
 
+    # P：promoted 且早已落成，但 archived session doc 被 knowledge provenance.path 引用
+    #    （防線：任何被 provenance 引用的 archive 檔一律保留，不論子樹）
+    s.events.append(_event("claude-code:sp", "promoted", OLD_TS))
+    files["p_doc"] = s.session_doc(m, "claude-code", "sp")
+    _doc(s.root / "knowledge" / "demo" / "slice-p.md", "claude-code", "sp",
+         prov_path=str(files["p_doc"]))
+
     # 無法歸因：不在 import ledger 的 queue 檔、檔名無對應 session 的 archive doc
     files["orphan_q"] = s.queue(m, "mystery--written--cccccccccccc.json", None)
     files["orphan_doc"] = _doc(s.archive / "sessions" / m / "garbage.md", "x", "y")
@@ -176,7 +183,7 @@ def _gc(store: Store, **kwargs):
 
 def _expected_a(store: Store) -> set[str]:
     f = store.files
-    return {store.rel(f[k]) for k in ("a_doc", "a_frag0", "a_frag1", "a_q_written")}
+    return {store.rel(f[k]) for k in ("a_doc", "a_frag0", "a_frag1")}
 
 
 def test_dry_run_lists_only_landed_unpinned_files_and_deletes_nothing(store):
@@ -186,7 +193,7 @@ def test_dry_run_lists_only_landed_unpinned_files_and_deletes_nothing(store):
 
     assert result["applied"] is False
     assert set(result["candidate_paths"]) == _expected_a(store)
-    assert result["candidates"]["files"] == 4
+    assert result["candidates"]["files"] == 3
     assert result["candidates"]["bytes"] == sum(
         (store.root / rel).stat().st_size for rel in _expected_a(store))
     assert {p for p in store.root.rglob("*")} == before
@@ -198,15 +205,15 @@ def test_kept_reasons_cover_every_protection(store):
     reasons = {k: v["files"] for k, v in result["kept"]["by_reason"].items()}
 
     assert reasons == {
-        "provenance-pinned": 1,          # A final capture
-        "retention-window": 2,           # A 晚到 capture（mtime）+ B（landed_at）
+        "raw-queue-retained": 5,         # A×3 capture、F skip capture、orphan queue
+        "provenance-pinned": 1,          # P 的 archived session doc
+        "retention-window": 1,           # B（landed_at）
         "attribution-mismatch": 1,
         "not-landed:parked": 1,
         "not-landed:split": 1,
         "not-landed:no-findings": 2,
-        "no-processing-record": 1,       # F skip capture
         "pending-inbox": 2,              # G, H
-        "unattributable": 2,             # orphan queue + garbage doc
+        "unattributable": 1,             # garbage doc
         "not-regular-file": 1,           # symlink
     }
     assert result["scanned"]["files"] == result["candidates"]["files"] + result["kept"]["files"]
@@ -216,8 +223,7 @@ def test_retention_zero_releases_recent_landed_files(store):
     result = _gc(store, retention_days=0)
     f = store.files
 
-    assert set(result["candidate_paths"]) == _expected_a(store) | {
-        store.rel(f["a_q_recent"]), store.rel(f["b_doc"])}
+    assert set(result["candidate_paths"]) == _expected_a(store) | {store.rel(f["b_doc"])}
 
 
 def test_include_no_findings_is_opt_in(store):
@@ -236,7 +242,7 @@ def test_apply_deletes_exactly_the_candidates_and_is_idempotent(store):
     result = _gc(store, apply=True)
 
     assert result["applied"] is True
-    assert result["deleted"]["files"] == 4
+    assert result["deleted"]["files"] == 3
     assert result["failed"] == []
     all_after = {store.rel(p) for p in store.root.rglob("*") if p.is_file() or p.is_symlink()}
     assert all_before - all_after == expected
@@ -307,8 +313,7 @@ def test_delete_skips_files_swapped_after_planning(store, tmp_path):
     assert sorted(outcome["failed"]) == sorted([store.rel(swapped_link), store.rel(swapped_file)])
     assert target.read_text(encoding="utf-8") == "must survive"
     assert swapped_link.is_symlink() and swapped_file.is_file()
-    assert {e.rel for e in outcome["deleted"]} == {
-        store.rel(store.files["a_doc"]), store.rel(store.files["a_q_written"])}
+    assert {e.rel for e in outcome["deleted"]} == {store.rel(store.files["a_doc"])}
 
 
 def test_list_out_receives_the_deletion_list(store, tmp_path):
@@ -334,7 +339,7 @@ def test_cli_dry_run_then_apply(store, capsys):
 
     assert cli.main(base + ["--apply"]) == 0
     applied = json.loads(capsys.readouterr().out)
-    assert applied["deleted"]["files"] == 4
+    assert applied["deleted"]["files"] == 3
     assert not any((store.root / rel).exists() for rel in _expected_a(store))
 
 
@@ -362,3 +367,121 @@ def test_missing_archive_is_a_clean_noop(tmp_path):
     assert result["scanned"]["files"] == 0
     assert result["deleted"]["files"] == 0
     assert "error" not in result and "blocked" not in result
+
+
+def test_queue_payloads_are_never_candidates_even_when_landed(store):
+    """archive/queue 是 importer 的 frozen raw 來源（recovery／backfill 直接讀它），一律保留。"""
+    result = _gc(store, retention_days=0, include_no_findings=True)
+
+    assert not any(p.startswith("archive/queue/") for p in result["candidate_paths"])
+    assert result["candidates"]["by_subtree"]["queue"] == {"files": 0, "bytes": 0}
+    assert result["kept"]["by_reason"]["raw-queue-retained"]["files"] == 5
+
+
+# ------------------------------------------------ recovery／backfill 回歸（#160 審查）
+
+
+def _raw_capture(path: Path, session_id: str, *, scope: str, summary: str) -> Path:
+    return _write(path, json.dumps({
+        "tool": "claude",
+        "session_id": session_id,
+        "capture_scope": scope,
+        "cwd": "/repo",
+        "assistant_summary": summary,
+        "user_prompts": ["repair this"],
+        "ended_at": "2026-07-16T00:00:00Z",
+    }))
+
+
+@pytest.fixture()
+def landed_raw_store(tmp_path, monkeypatch):
+    """一個已 promoted 的 session：兩份真實可解析的 raw capture（只有 final 被 knowledge 釘住）
+    ＋ 已 archive 的 session doc 與 fragment；import ledger 也記錄了兩份 capture 的歸屬。"""
+    monkeypatch.setattr(
+        "paulsha_hippo.importer.title._default_runner", lambda text, command, timeout: "Recovered")
+    s = Store(tmp_path / "memory")
+    m = "2026-07"
+    s.events.append(_event("claude:sr", "promoted", OLD_TS))
+    first = _raw_capture(s.archive / "queue" / m / "claude__sr--written--aaaaaaaaaaaa.json", "sr",
+                         scope="pre_compact", summary="earlier capture")
+    final = _raw_capture(s.archive / "queue" / m / "claude__sr--updated--bbbbbbbbbbbb.json", "sr",
+                         scope="session_end", summary="final capture")
+    for path, status in ((first, "written"), (final, "updated")):
+        s.imports.append({"status": status, "logical_session_key": "claude:sr",
+                          "idempotency_key": "claude:sr", "archive_path": str(path)})
+    _doc(s.root / "knowledge" / "demo" / "slice-r.md", "claude", "sr", prov_path=str(final))
+    s.files = {
+        "doc": s.session_doc(m, "claude", "sr"),
+        "frag": s.fragment(m, "claude", "sr", 0),
+        "first": first,
+        "final": final,
+    }
+    s.flush()
+    return s
+
+
+def test_existing_recovery_transaction_still_applies_and_rolls_back_after_gc(landed_raw_store):
+    from paulsha_hippo import recovery
+
+    s = landed_raw_store
+    manifest = recovery.create_plan(s.root, batch_size=5)   # GC 前就存在的 recovery 交易
+    planned = json.loads(manifest.read_text(encoding="utf-8"))
+    assert planned["source_count"] == 2
+
+    result = _gc(s, apply=True)
+    assert result["applied"] is True
+    assert result["deleted"]["files"] == 2                  # 只刪 session doc 與 fragment
+    assert s.files["first"].is_file() and s.files["final"].is_file()
+
+    applied = recovery.apply_plan(manifest)                 # _verify_pins 不得出現 source pin drift
+    assert applied
+    rolled = recovery.rollback_plan(manifest)
+    assert rolled["rolled_back"] == 1
+    replanned = recovery.create_plan(s.root, batch_size=5)  # 新規劃仍涵蓋全部 raw capture
+    assert json.loads(replanned.read_text(encoding="utf-8"))["source_count"] == 2
+    repinned = recovery.create_plan(s.root, batch_size=5, source_manifest_path=manifest)
+    assert json.loads(repinned.read_text(encoding="utf-8"))["source_count"] == 2
+
+
+def test_backfill_still_reextracts_every_raw_capture_after_gc(landed_raw_store):
+    from paulsha_hippo.importer import backfill
+
+    s = landed_raw_store
+    before = backfill.run(s.root, dry_run=True)
+    assert before["count"] == 2 and not any("error" in item for item in before["items"])
+
+    _gc(s, apply=True)
+
+    after = backfill.run(s.root, dry_run=True)
+    assert after["count"] == 2
+    assert not any("error" in item for item in after["items"])
+
+
+# ------------------------------------------------------ --list-out 錯誤契約（#160 審查）
+
+
+def test_unwritable_list_out_is_reported_and_blocks_apply(store, tmp_path):
+    blocker = _write(tmp_path / "not-a-dir", "file")
+    bad = blocker / "gc-list.tsv"                       # 父層是檔案 → NotADirectoryError
+
+    dry = _gc(store, list_out=bad)
+    assert "list-out" in dry["error"]
+    assert dry["applied"] is False
+
+    result = _gc(store, apply=True, list_out=bad)
+    assert "list-out" in result["error"]
+    assert result["applied"] is False
+    assert result["deleted"]["files"] == 0
+    assert all((store.root / rel).exists() for rel in _expected_a(store))
+
+
+def test_cli_list_out_failure_keeps_json_and_exit_code_contract(store, tmp_path, capsys):
+    blocker = _write(tmp_path / "not-a-dir", "file")
+
+    rc = cli.main(["archive", "gc", "--memory-root", str(store.root), "--now", NOW,
+                   "--apply", "--list-out", str(blocker / "gc-list.tsv")])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert "list-out" in payload["error"]
+    assert all((store.root / rel).exists() for rel in _expected_a(store))

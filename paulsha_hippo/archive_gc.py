@@ -1,20 +1,28 @@
 """#151：archive GC——回收「對應 session 已落成 knowledge」的 archive 檔。
 
+回收範圍只有 atomizer 的衍生副本：
+  - `archive/sessions`（split 後搬離 inbox 的 session 文件）與 `archive/fragments`
+    （promote 後搬離 `_slices` 的 fragment）。程式內沒有任何讀取端，且可由 raw
+    capture 經 `importer.backfill.prepare_reextract`＋splitter 重建。
+  - `archive/queue` 一律保留（raw-queue-retained）：它是 importer 的 frozen raw 來源，
+    `recovery` plan／apply／resume／rollback（`_verify_pins` 缺任何 source 即
+    `source pin drift`；`--source-manifest` 缺檔即失敗）、`importer.backfill` 與
+    `knowledge backfill-provenance` 都直接讀它，且無法重建。
+
 權威來源是 hippo 既有的處理紀錄，不猜測：
   - `runtime/ledger/processing.jsonl`（fold 後最新狀態）決定 session 是否已落成；
     預設只有 `promoted` 算落成，`--include-no-findings` 才把 `no-findings` 納入。
-  - `archive/sessions`、`archive/fragments` 依 atomizer 的固定命名
-    （`{agent}__{session}[--hash12].md`、`{agent}__{session}__NNN[--hash12].md`）
-    對回 session，刪除前再以檔內 frontmatter 的 source_agent／source_session 複驗。
-  - `archive/queue` 依 importer 的 `runtime/ledger/import.jsonl`（archive_path →
-    logical_session_key）對回 session。
+  - 依 atomizer 的固定命名（`{agent}__{session}[--hash12].md`、
+    `{agent}__{session}__NNN[--hash12].md`）對回 session，刪除前再以檔內
+    frontmatter 的 source_agent／source_session 複驗。
 
 一律保留（原因記入報告 `kept.by_reason`）：
-  - unattributable：無法歸因（命名不符、不在 import ledger、同名歧義）
-  - no-processing-record／not-landed:<state>：未落成（split／parked／pending…）
+  - raw-queue-retained：`archive/queue` 下的所有檔
+  - unattributable：無法歸因（命名不符、processing ledger 無此 session、同名歧義）
+  - not-landed:<state>：未落成（split／parked／quarantined…）
   - pending-inbox：inbox 仍有該 session 的新 capture 或 `_slices` fragment
-  - provenance-pinned：被 knowledge／inbox 的 `provenance.path` 引用——刪了會讓
-    knowledge 的 provenance 懸空（janitor `check_provenance_path` 會誤判 source_invalid）
+  - provenance-pinned：被 knowledge／inbox 的 `provenance.path` 引用（防線：不論子樹，
+    刪了會讓 provenance 懸空，janitor `check_provenance_path` 會誤判 source_invalid）
   - retention-window：落成時間或檔案 mtime 仍在保留窗內
   - attribution-mismatch：檔名歸屬與 frontmatter 不一致
   - not-regular-file／unexpected-layout：symlink、目錄或非預期層級
@@ -38,6 +46,8 @@ from typing import Any, Iterable
 from .ledger import processing
 
 SUBTREES: tuple[str, ...] = ("sessions", "fragments", "queue")
+# importer 的 frozen raw 來源：只列入統計，永不列為回收候選（見模組說明）。
+RAW_QUEUE_SUBTREE = "queue"
 DEFAULT_RETENTION_DAYS = 7.0
 _FRONTMATTER_HEAD_BYTES = 64 * 1024
 _HASH_SUFFIX = re.compile(r"--[0-9a-f]{12}$")
@@ -153,37 +163,6 @@ def _prefix_map(events: dict[str, dict[str, Any]]) -> dict[str, object]:
     return mapping
 
 
-def _import_map(memory_root: Path) -> dict[str, object]:
-    """import ledger：`archive/queue/...` 相對路徑 → logical session key。"""
-    from .importer.pipeline import _logical_key_from_entry
-
-    ledger = memory_root / "runtime" / "ledger" / "import.jsonl"
-    mapping: dict[str, object] = {}
-    if not ledger.is_file():
-        return mapping
-    with ledger.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # 壞行：對應檔案將歸 unattributable（保留）
-            if not isinstance(entry, dict):
-                continue
-            rel = _archive_rel(entry.get("archive_path"))
-            logical = _logical_key_from_entry(entry)
-            if not rel or not logical:
-                continue
-            existing = mapping.get(rel)
-            if existing is None:
-                mapping[rel] = logical
-            elif existing != logical:
-                mapping[rel] = _AMBIGUOUS
-    return mapping
-
-
 def _inbox_state(memory_root: Path) -> tuple[set[str], set[str], set[str]]:
     """回傳 (pending session keys, pending `_slices` 前綴, inbox provenance pins)。"""
     inbox = memory_root / "inbox"
@@ -281,12 +260,8 @@ def _stat_entry(path: str, rel: str, subtree: str, month: str, name: str) -> _En
 # ----------------------------------------------------------------- planning
 
 
-def _attribute(entry: _Entry, prefixes: dict[str, object],
-               imports: dict[str, object]) -> str | None:
-    """回傳檔案所屬 session_key；無法（或無法唯一）歸因回 None。"""
-    if entry.subtree == "queue":
-        key = imports.get(entry.rel)
-        return key if isinstance(key, str) else None
+def _attribute(entry: _Entry, prefixes: dict[str, object]) -> str | None:
+    """回傳 sessions／fragments 檔所屬 session_key；無法（或無法唯一）歸因回 None。"""
     if not entry.name.endswith(".md"):
         return None
     stem = _HASH_SUFFIX.sub("", entry.name[: -len(".md")])
@@ -300,8 +275,6 @@ def _attribute(entry: _Entry, prefixes: dict[str, object],
 
 
 def _frontmatter_matches(memory_root: Path, entry: _Entry, session_key: str) -> bool:
-    if entry.subtree == "queue":
-        return True  # import ledger 已是逐檔權威紀錄
     data = _read_frontmatter(memory_root / entry.rel)
     if data is None:
         return False
@@ -316,7 +289,6 @@ def _plan(memory_root: Path, *, now: datetime, retention_days: float,
     except (processing.ProcessingLedgerError, OSError, UnicodeDecodeError) as exc:
         raise ArchiveGCError(f"processing ledger 無法讀取：{processing.sanitize_error_text(str(exc))}") from exc
     prefixes = _prefix_map(events)
-    imports = _import_map(memory_root)
     pending_keys, pending_prefixes, pins = _inbox_state(memory_root)
     pins |= _knowledge_pins(memory_root)
 
@@ -330,13 +302,13 @@ def _plan(memory_root: Path, *, now: datetime, retention_days: float,
         kept.setdefault(reason, []).append(entry)
 
     for entry in entries:
-        key = _attribute(entry, prefixes, imports)
-        if key is None:
-            keep("unattributable", entry)
+        if entry.subtree == RAW_QUEUE_SUBTREE:
+            keep("raw-queue-retained", entry)
             continue
-        event = events.get(key)
+        key = _attribute(entry, prefixes)
+        event = events.get(key) if key is not None else None
         if event is None:
-            keep("no-processing-record", entry)
+            keep("unattributable", entry)
             continue
         state = str(event.get("state", "")) or "unknown"
         if state not in landed_states:
@@ -445,13 +417,20 @@ def _delete(memory_root: Path, candidates: list[_Candidate]) -> dict[str, Any]:
 
 
 def _write_list(path: Path, candidates: list[_Candidate]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        for candidate in candidates:
-            entry = candidate.entry
-            handle.write(f"{entry.rel}\t{entry.size}\t{candidate.session_key}\n")
-    tmp.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as handle:
+            for candidate in candidates:
+                entry = candidate.entry
+                handle.write(f"{entry.rel}\t{entry.size}\t{candidate.session_key}\n")
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # --------------------------------------------------------------------- entry
@@ -525,15 +504,22 @@ def run_archive_gc(
             "by_reason": {reason: _tally(entries) for reason, entries in sorted(kept.items()) if entries},
         }
         report["unsafe_dirs"] = plan["unsafe_dirs"]
+        if apply:
+            report["deleted"] = {"files": 0, "bytes": 0}
+            report["missing"] = 0
+            report["failed"] = []
         if list_out is not None:
-            _write_list(Path(list_out), candidates)
+            # 清單是刪除前的稽核紀錄：寫不出來就回報錯誤、一檔不刪（維持 JSON／exit code 契約）
+            try:
+                _write_list(Path(list_out), candidates)
+            except OSError as exc:
+                report["error"] = (f"list-out 無法寫入（{type(exc).__name__}："
+                                   f"{processing.sanitize_error_text(str(exc))}）；未刪除任何檔案")
+                return report
         else:
             report["candidate_paths"] = [c.entry.rel for c in candidates]
         if not apply:
             return report
-        report["deleted"] = {"files": 0, "bytes": 0}
-        report["missing"] = 0
-        report["failed"] = []
         if plan["unsafe_dirs"]:
             report["blocked"] = ("archive 或其子樹為 symlink／非目錄（" + ", ".join(plan["unsafe_dirs"])
                                  + "）：拒絕經 symlink 刪檔")

@@ -121,7 +121,21 @@ readlink -f ~/.agents/memory                            # 回到 $STORE
 
 ## archive GC
 
-`archive/` 是已被 atomize 消費的原始資料：`archive/queue/`（importer 截取的原始 payload）、`archive/sessions/`（split 後搬離 inbox 的 session 文件）、`archive/fragments/`（promote 後搬離 `_slices` 的 fragment）。它會無界成長；`hippo archive gc` 以 hippo 既有的處理紀錄為準回收「對應 session 已落成 knowledge」的檔案：
+`archive/` 底下有三個子樹，會無界成長：
+
+| 子樹 | 內容 | GC |
+|---|---|---|
+| `archive/sessions/` | split 後搬離 inbox 的 session 文件（atomizer 衍生副本） | 對應 session 已落成即可回收 |
+| `archive/fragments/` | promote 後搬離 `_slices` 的 fragment（atomizer 衍生副本） | 對應 session 已落成即可回收 |
+| `archive/queue/` | importer 截取的 raw capture payload | **一律保留** |
+
+`archive/sessions` 與 `archive/fragments` 在程式內沒有任何讀取端，且可由 raw capture 重建；`archive/queue` 則是 importer 的 frozen raw 來源，無法重建，並被下列既有流程直接讀取，刪除任何一份都會打斷它們：
+
+- `hippo recovery plan|apply|resume|rollback`：plan 以 `archive/queue/*.json` 為來源並把每份 source 的 hash 釘進 manifest；apply／resume／rollback 驗 pin 時缺任何一份即 `source pin drift`，`--source-manifest` 重新規劃時缺檔即 `source authority file is missing`。
+- `python -m paulsha_hippo.importer.backfill`：從 `archive/queue` 重新 extract inbox 內容。
+- `hippo knowledge backfill-provenance` 與 janitor 的 `check_provenance_path`：透過 knowledge 的 `provenance.path` 讀／驗 queue payload。
+
+`hippo archive gc` 以 hippo 既有的處理紀錄為準，回收「對應 session 已落成 knowledge」的衍生副本：
 
 ```bash
 hippo archive gc --memory-root ~/.agents/memory --list-out /tmp/archive-gc.tsv      # 預設 dry-run
@@ -141,23 +155,22 @@ hippo archive gc --memory-root ~/.agents/memory --apply --list-out /tmp/archive-
 
 - session 是否落成：`runtime/ledger/processing.jsonl` fold 後的最新狀態。
 - `archive/sessions`、`archive/fragments`：依 atomizer 固定命名對回 session，刪除前再以檔內 frontmatter 的 `source_agent`／`source_session` 複驗。
-- `archive/queue`：依 `runtime/ledger/import.jsonl` 的 `archive_path` → `logical_session_key`。
 
 一律保留（報告 `kept.by_reason` 會列出各原因的檔數與 bytes）：
 
 | 原因 | 意義 |
 |---|---|
-| `unattributable` | 無法歸因：命名不符、不在 import ledger、或多個 session 撞同一前綴 |
-| `no-processing-record` | 從未進 atomize（例如 importer 的 skip capture） |
+| `raw-queue-retained` | `archive/queue` 下的 raw capture（見上：recovery／backfill 的來源） |
+| `unattributable` | 無法歸因：命名不符、processing ledger 查無此 session、或多個 session 撞同一前綴 |
 | `not-landed:<state>` | 尚未落成：`split`、`parked`、`quarantined`、`no-findings`（未加旗標時）等 |
 | `pending-inbox` | inbox 仍有該 session 的文件或 `_slices` fragment（可能待重新蒸餾） |
-| `provenance-pinned` | 被 knowledge／inbox 的 `provenance.path` 引用；刪除會讓 knowledge 的 provenance 懸空（janitor `check_provenance_path` 會把該 knowledge 誤判 `source_invalid`） |
+| `provenance-pinned` | 被 knowledge／inbox 的 `provenance.path` 引用（不論子樹的防線）；刪除會讓 provenance 懸空，janitor `check_provenance_path` 會把該 knowledge 誤判 `source_invalid` |
 | `retention-window` | 仍在保留窗內 |
 | `unknown-landed-at` | 落成事件時間戳無法解析 |
 | `attribution-mismatch` | 檔名歸屬與 frontmatter 不一致 |
 | `not-regular-file`／`unexpected-layout` | symlink、目錄或非 `archive/<子樹>/<月份>/<檔>` 層級的項目 |
 
-安全性：`archive` 或其子樹是 symlink 時拒絕 `--apply`；刪除以 dir fd 逐層 `O_NOFOLLOW` 開啟，逐檔核對 inode／大小與規劃時一致才 unlink；只刪檔、不刪目錄。重跑是冪等的（已刪的檔不會再出現在清單）。`--apply` 回報含 `error`、`blocked` 或 `failed` 時 exit 1。
+安全性：`--list-out` 寫不出來時回報 JSON `error`、exit 1，且一檔不刪；`archive` 或其子樹是 symlink 時拒絕 `--apply`；刪除以 dir fd 逐層 `O_NOFOLLOW` 開啟，逐檔核對 inode／大小與規劃時一致才 unlink；只刪檔、不刪目錄。重跑是冪等的（已刪的檔不會再出現在清單）。`--apply` 回報含 `error`、`blocked` 或 `failed` 時 exit 1。
 
 回滾：刪除不可逆。需要保底時，在 `--apply` 前用 dry-run 產出的清單先打包：
 
@@ -172,6 +185,6 @@ hippo archive gc --memory-root ~/.agents/memory --apply --list-out /tmp/archive-
 
 已知限制：
 
-- 被 knowledge `provenance.path` 釘住的 `archive/queue` payload 不會回收；要回收需另行設計 provenance 改寫。
+- `archive/queue` 不回收。若要回收已落成 session 的 raw capture，需先設計 recovery 交易的生命週期（哪些 manifest 已結案、可放棄重跑）與 provenance 改寫，另開議題處理。
 - `runtime/`（例如 recovery 交易快照）不在本指令範圍。
 - 本指令尚未掛進 dream timer；定期執行前請先以 dry-run 核對幾輪結果。
