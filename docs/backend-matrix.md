@@ -35,8 +35,10 @@ circuit cooldown。只允許明確的失敗類別 fallback；安全設定錯誤�
   `atomization`，title importer（hook）與 `hippo retitle` 記在 `title`，skillopt 的
   judge／optimizer 記在 `skillopt`。同一個 profile 的確定性失敗可能只在某類 prompt
   出現（cg 的呼叫格式錯誤只在 prompt 以 `-` 開頭時發生），分開記錄才不會互相清掉。
-  各路徑可能同時寫入，讀改寫以同目錄的 `profile-health.json.lock` 檔案鎖序列化，
-  暫存檔名每次唯一。dry-run 只讀不寫。
+  各路徑可能同時寫入：可能改變狀態的判斷一律在同目錄 `profile-health.json.lock`
+  的檔案鎖內重讀後才決定，暫存檔名每次唯一。取鎖最多等 2 秒，等不到就放棄這次
+  更新並記一行 warning（fail-open），同一行程之後 60 秒內不再等鎖；讀取端不取鎖、
+  不會被卡住。dry-run 只讀不寫。
 - `hippo doctor` 的 external agent profiles 段落在該 profile 後面逐 task class 顯示
   `health[<task_class>]=backoff(<kind>) until <UTC>`（或 `degraded`／`probe-pending`／
   `stale`）與最後一次 stderr 摘要；只顯示、不改 exit code。刪除狀態檔即可立即重置。

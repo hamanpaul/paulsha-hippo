@@ -314,3 +314,141 @@ def test_save_does_not_depend_on_a_fixed_temp_name(tmp_path):
         profile, _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
     )
     assert _entry(store, "cg")["consecutive_failures"] == 1
+
+
+# --- review round 2：success 與 failure 並行、鎖被佔住時 fail-open ---------------
+
+
+def _slow_failure_writer(path_str, holding, release):
+    """持有寫入鎖、把確定性失敗寫進去之前先停住，直到測試放行。"""
+    store = agent_health.ProfileHealthStore(path_str, clock=lambda: 1_790_000_000.0)
+    real_save = store._save
+
+    def slow_save(state):
+        holding.set()
+        release.wait(10)
+        real_save(state)
+
+    store._save = slow_save
+    profile = _profile("cg")
+    store.record_outcome(
+        profile, _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
+    )
+
+
+def test_success_racing_a_failure_writer_still_clears_backoff(tmp_path):
+    """success 與確定性失敗同時記錄：success 必須在鎖內重讀，不能憑鎖外的舊讀數就放棄清除。"""
+    import multiprocessing
+    import threading
+    import time as _time
+
+    path = agent_health.profile_health_path(tmp_path / "memory")
+    ctx = multiprocessing.get_context("fork")
+    holding, release = ctx.Event(), ctx.Event()
+    writer = ctx.Process(target=_slow_failure_writer, args=(str(path), holding, release))
+    writer.start()
+    try:
+        assert holding.wait(10), "failure writer never reached its locked save"
+        store = agent_health.ProfileHealthStore(path, clock=lambda: 1_790_000_000.0)
+        profile = _profile("cg")
+        success = threading.Thread(
+            target=store.record_outcome,
+            args=(profile, _result(profile, category=None, exit_code=0)),
+            daemon=True,
+        )
+        success.start()
+        _time.sleep(0.2)  # success 此時要嘛已經（錯誤地）放棄，要嘛正在等鎖
+        release.set()
+        writer.join(10)
+        success.join(10)
+        assert writer.exitcode == 0
+        assert not success.is_alive()
+    finally:
+        release.set()
+        if writer.is_alive():
+            writer.kill()
+    assert "cg" not in store.entries().get("atomization", {})
+    assert store.blocked_reason(profile) is None
+
+
+def _hold_lock_in_other_process(lock_path):
+    import subprocess
+    import sys
+
+    holder = subprocess.Popen(
+        [
+            sys.executable, "-c",
+            "import fcntl, sys, time\n"
+            "handle = open(sys.argv[1], 'a+')\n"
+            "fcntl.flock(handle.fileno(), fcntl.LOCK_EX)\n"
+            "print('locked', flush=True)\n"
+            "time.sleep(120)\n",
+            str(lock_path),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout.readline().strip() == "locked"
+    return holder
+
+
+def _call_with_deadline(func, *args, deadline=6.0):
+    import threading
+    import time as _time
+
+    outcome = {}
+
+    def target():
+        outcome["value"] = func(*args)
+
+    thread = threading.Thread(target=target, daemon=True)
+    started = _time.monotonic()
+    thread.start()
+    thread.join(deadline)
+    return (not thread.is_alive()), _time.monotonic() - started, outcome.get("value")
+
+
+def test_record_outcome_fails_open_when_another_process_holds_the_lock(tmp_path, caplog):
+    """另一個行程持鎖不放：record_outcome 必須在期限內放棄這次更新、寫 log，讀取端不卡住。"""
+    path = agent_health.profile_health_path(tmp_path / "memory")
+    path.parent.mkdir(parents=True)
+    store = agent_health.ProfileHealthStore(path, clock=_Clock())
+    holder = _hold_lock_in_other_process(store.lock_path)
+    try:
+        profile = _profile("cg")
+        failure = _result(profile, category="process", stderr=_INVOCATION_STDERR, exit_code=1)
+        with caplog.at_level("WARNING", logger="paulsha_hippo.agent_health"):
+            returned, elapsed, _ = _call_with_deadline(store.record_outcome, profile, failure)
+        assert returned, "record_outcome blocked on a held lock"
+        assert elapsed < 5.0
+        assert any("fail-open" in record.getMessage() for record in caplog.records)
+        assert store.entries() == {}  # 這次更新被放棄
+        # 同一行程接下來不再每次都等滿期限。
+        returned, elapsed, _ = _call_with_deadline(store.record_outcome, profile, failure)
+        assert returned and elapsed < 0.5
+        # 讀取端不取鎖，不會卡住。
+        returned, elapsed, value = _call_with_deadline(store.blocked_reason, profile)
+        assert returned and elapsed < 0.5 and value is None
+    finally:
+        holder.kill()
+        holder.wait(10)
+
+
+def test_routing_is_unaffected_when_the_health_lock_is_held(tmp_path):
+    path = agent_health.profile_health_path(tmp_path / "memory")
+    path.parent.mkdir(parents=True)
+    store = agent_health.ProfileHealthStore(path, clock=_Clock())
+    holder = _hold_lock_in_other_process(store.lock_path)
+    try:
+        calls: list[str] = []
+        router = ExternalAgentRouter(
+            _chain(), executor=_cg_invocation_error(calls), health=store
+        )
+        returned, elapsed, value = _call_with_deadline(router.run, "prompt")
+        assert returned, "routing blocked on the health lock"
+        assert value == "answer"
+        assert calls == ["cg", "codex"]
+        assert elapsed < 5.0
+    finally:
+        holder.kill()
+        holder.wait(10)

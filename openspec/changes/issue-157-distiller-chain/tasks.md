@@ -35,7 +35,13 @@ work_item: issue-157-distiller-chain
 - [x] 先寫測試：title importer、`hippo retitle`、skillopt 三個 router 讀寫同一個 store；task class 互不影響（RED：title 沒有狀態、skillopt router 沒有 `health`）。
 - [x] 實作：狀態依 task class 分開；title 以 ContextVar 傳 memory root；skillopt 依 `--dry-run` 決定唯讀；doctor 逐 task class 顯示。
 
-## Task 6：文件與收尾
+## Task 6：PR #162 第二輪審查修正
+
+- [x] 先寫測試：失敗寫入者持鎖寫入途中，另一行程記錄成功——成功必須清除退避（RED：鎖外讀到舊狀態就放棄，退避殘留）。
+- [x] 先寫測試：另一行程持鎖不放時 `record_outcome()` 與 router 在期限內返回、寫 log、讀取不卡住（RED：無期限阻塞）。
+- [x] 實作：移除「成功且鎖外看起來沒有狀態」的快速路徑，一律鎖內重讀；取鎖改 `LOCK_NB` 輪詢加 2 秒期限，逾時 fail-open 並暫停更新 60 秒。
+
+## Task 7：文件與收尾
 
 - [x] `docs/backend-matrix.md`、`contrib/local-harness/README.md` 同步；`changelog.d/157-distiller-chain.md` 並鏡像 `CHANGELOG.md [Unreleased]`。
 - [x] 全套測試、`openspec validate --all --strict`、`policy_check` 通過。

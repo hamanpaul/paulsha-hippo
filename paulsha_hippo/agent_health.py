@@ -29,10 +29,12 @@ import os
 import re
 import secrets
 import time
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+# 綁定模組載入時的 monotonic／sleep：router 測試會把 ``time.monotonic`` 換成
+# 假時鐘，取鎖的期限不能跟著被凍結。
+from time import monotonic as _monotonic, sleep as _sleep
+from typing import Any, Callable, Mapping
 
 from .agent_profiles import AgentProfile, AgentRunResult, sanitize_stderr
 
@@ -76,6 +78,13 @@ _CREDENTIAL_RE = re.compile(
     r"|[\w]*api[_ ]key\b[\w ]*? not set)",
     re.IGNORECASE,
 )
+# 寫入鎖的取得期限（比照 ``deployment._writer_lock``：LOCK_NB 輪詢到期限）。
+# 臨界區只是讀寫一個小 JSON，正常情況下毫秒級；等不到就放棄這次更新
+# （fail-open），不能讓建議性狀態拖住 routing。
+LOCK_TIMEOUT_SECONDS = 2.0
+_LOCK_POLL_SECONDS = 0.02
+# 取鎖逾時一次之後，同一個 store 在這段時間內直接放棄更新，不再每次等滿期限。
+LOCK_FAILURE_COOLDOWN_SECONDS = 60.0
 # 這兩類是 router 自己的判斷（沒有執行 CLI），不提供任何健康訊號。
 _NO_SIGNAL_CATEGORIES = frozenset({"budget", "ineligible"})
 
@@ -112,13 +121,18 @@ class ProfileHealthStore:
     ``Invalid command format`` 只在 prompt 以 ``-`` 開頭時發生），共用一筆狀態
     會讓 title 的成功清掉 atomization 的退避、兩邊來回翻轉。
 
-    寫入是「讀檔→修改→原子替換」：整段以 ``profile-health.json.lock`` 的
-    阻塞式 ``flock`` 序列化（dream、直呼 ``hippo atomize``、hook 裡的 title
-    importer、skillopt 可能同時更新；比照 ``moc.search._index_write_lock``，
-    鎖檔是 flock rendezvous inode，永不 unlink），暫存檔名每次唯一（比照
-    ``moc.search._unique_tmp``），交錯的 writer 不會互刪對方的暫存檔。讀取不
-    取鎖：檔案只以 ``os.replace`` 整檔替換，讀到的永遠是某一版完整內容。
-    ``read_only=True``（dry-run、doctor）時只讀不寫、也不取鎖。
+    寫入是「取鎖→重讀→修改→原子替換」：dream、直呼 ``hippo atomize``、hook
+    裡的 title importer、skillopt 可能同時更新，所以凡是可能改變狀態的判斷
+    都在 ``profile-health.json.lock`` 的 ``flock`` 內重讀後才決定（鎖檔是
+    flock rendezvous inode，永不 unlink）；暫存檔名每次唯一（比照
+    ``moc.search._unique_tmp``），交錯的 writer 不會互刪對方的暫存檔。
+
+    取鎖有期限（``LOCK_EX|LOCK_NB`` 輪詢，比照 ``deployment._writer_lock``）：
+    等不到就放棄這次更新並記一行 warning，routing 照常進行；逾時後
+    ``LOCK_FAILURE_COOLDOWN_SECONDS`` 內同一個 store 直接放棄更新，不會每個
+    attempt 都等滿期限。讀取不取鎖、不會被卡住：檔案只以 ``os.replace`` 整檔
+    替換，讀到的永遠是某一版完整內容。``read_only=True``（dry-run、doctor）
+    時只讀不寫、也不取鎖。
     """
 
     def __init__(
@@ -127,10 +141,13 @@ class ProfileHealthStore:
         *,
         clock: Callable[[], float] | None = None,
         read_only: bool = False,
+        lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self._path = Path(path)
         self._clock = clock or time.time
         self._read_only = read_only
+        self._lock_timeout = float(lock_timeout)
+        self._writes_suspended_until = 0.0
 
     @property
     def path(self) -> Path:
@@ -167,15 +184,17 @@ class ProfileHealthStore:
                 loaded[str(task_class)] = entries
         return loaded
 
-    @contextmanager
-    def _write_lock(self) -> Iterator[None]:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    def _acquire(self, handle: Any) -> bool:
+        """有期限地取得寫入鎖；逾時回 False（其他 OSError 上拋給呼叫端記錄）。"""
+        deadline = _monotonic() + self._lock_timeout
+        while True:
             try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if _monotonic() >= deadline:
+                    return False
+                _sleep(_LOCK_POLL_SECONDS)
 
     def _unique_tmp(self) -> Path:
         return self._path.with_name(
@@ -208,14 +227,34 @@ class ProfileHealthStore:
     def _update(
         self, mutate: Callable[[dict[str, dict[str, dict[str, Any]]]], bool]
     ) -> None:
-        """在寫入鎖內重新讀檔、套用 ``mutate``，有變更才寫回。"""
+        """在寫入鎖內重新讀檔、套用 ``mutate``，有變更才寫回。
+
+        取不到鎖（逾時）或任何 I/O 錯誤都只放棄這次更新（fail-open）。
+        """
         if self._read_only:
             return
+        if _monotonic() < self._writes_suspended_until:
+            _LOG.debug("agent health: updates suspended after a lock timeout; skipped")
+            return
         try:
-            with self._write_lock():
-                state = self._load()
-                if mutate(state):
-                    self._save(state)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self.lock_path.open("a+", encoding="utf-8") as handle:
+                if not self._acquire(handle):
+                    self._writes_suspended_until = (
+                        _monotonic() + LOCK_FAILURE_COOLDOWN_SECONDS
+                    )
+                    _LOG.warning(
+                        "agent health: %s still locked after %.1fs; skipping this "
+                        "update (fail-open), further updates suspended for %.0fs",
+                        self.lock_path, self._lock_timeout, LOCK_FAILURE_COOLDOWN_SECONDS,
+                    )
+                    return
+                try:
+                    state = self._load()
+                    if mutate(state):
+                        self._save(state)
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         except OSError as exc:
             _LOG.warning("agent health: cannot update %s: %s", self._path, exc)
 
@@ -249,12 +288,13 @@ class ProfileHealthStore:
         result: AgentRunResult,
         task_class: str = "atomization",
     ) -> None:
+        # 唯一不取鎖的快速路徑：唯讀 store，或 router 自己的判斷（budget／
+        # ineligible）。兩者都與檔案內容無關、一定不寫入，因此沒有競態。
+        # 其餘結果（包括「成功且看起來沒有狀態」）都必須在鎖內重讀再決定：
+        # 鎖外讀到的「沒有狀態」可能在返回前就被並行的失敗寫入推翻。
         if self._read_only or result.failure_category in _NO_SIGNAL_CATEGORIES:
             return
         kind = persistent_failure_kind(result)
-        if kind is None and profile.id not in self._load().get(task_class, {}):
-            # 最常見的情況（成功且原本就沒有狀態）不取鎖、不寫檔。
-            return
 
         def mutate(state: dict[str, dict[str, dict[str, Any]]]) -> bool:
             profiles = state.setdefault(task_class, {})

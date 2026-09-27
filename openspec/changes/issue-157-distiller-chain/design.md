@@ -27,7 +27,7 @@ work_item: issue-157-distiller-chain
 
 ### D3：狀態檔與可見性
 
-狀態寫在 `<memory_root>/runtime/agents/profile-health.json`，依 task class 分開（`task_classes.<task_class>.<profile_id>`）。router 透過 `ProfileHealth` 協定讀寫並帶上自己的 task class，任何例外都吞掉，不讓建議性狀態影響蒸餾。dream、直呼 `hippo atomize`（不取 dream lock）、hook 裡的 title importer、skillopt 可能同時寫入：讀改寫以同目錄 `profile-health.json.lock` 的阻塞式 flock 序列化（比照 `moc.search._index_write_lock`，鎖檔永不 unlink；不放在 `runtime/locks/`，以免被 `hippo locks cleanup-legacy` 歸為未知鎖檔而擋下 `--apply`），暫存檔名每次唯一（比照 `moc.search._unique_tmp`）。讀取不取鎖：檔案只以 `os.replace` 整檔替換。成功且原本無狀態時不取鎖也不寫檔。讀檔失敗或毀損視為無狀態，寫檔或取鎖失敗只記 warning。dry-run 使用唯讀 store。
+狀態寫在 `<memory_root>/runtime/agents/profile-health.json`，依 task class 分開（`task_classes.<task_class>.<profile_id>`）。router 透過 `ProfileHealth` 協定讀寫並帶上自己的 task class，任何例外都吞掉，不讓建議性狀態影響蒸餾。dream、直呼 `hippo atomize`（不取 dream lock）、hook 裡的 title importer、skillopt 可能同時寫入：凡是可能改變狀態的判斷都在同目錄 `profile-health.json.lock` 的 flock 內重讀後才決定（鎖檔永不 unlink；不放在 `runtime/locks/`，以免被 `hippo locks cleanup-legacy` 歸為未知鎖檔而擋下 `--apply`），包括成功時是否需要清除——鎖外讀到的「沒有狀態」可能在返回前被並行的失敗寫入推翻（PR #162 第二輪審查）。唯一不取鎖的快速路徑是唯讀 store 與 `budget`／`ineligible` 結果，兩者與檔案內容無關、一定不寫入。取鎖比照 `deployment._writer_lock` 以 `LOCK_EX|LOCK_NB` 輪詢到 2 秒期限，逾時放棄該次更新並記 warning（fail-open），同一 store 之後 60 秒內直接放棄更新、不再每個 attempt 等滿期限；期限計時綁定模組載入時的 `time.monotonic`，不受測試替換的假時鐘影響。暫存檔名每次唯一（比照 `moc.search._unique_tmp`）。讀取不取鎖：檔案只以 `os.replace` 整檔替換。讀檔失敗或毀損視為無狀態，寫檔或取鎖失敗只記 warning。dry-run 使用唯讀 store。
 
 ### D6：title 與 skillopt 路徑共用 store，但依 task class 分開
 
@@ -48,4 +48,5 @@ launcher 屬 `contrib/`，不進 wheel；修正後仍需部署到 `~/.local/bin/
 - `tests/test_external_agent_profiles.py`：claude argv 的 `--system-prompt` 契約；既有 circuit-open 測試改為驗證新的略過原因。
 - `tests/test_copilot_launcher_prompt_binding.py`：假 copilot 記錄 argv，驗證 `--prompt=` 單一 token。
 - `tests/test_profile_health_backoff.py`（PR #162 審查）：4 個行程各 30 次並發更新不遺失；佔住舊的固定暫存檔名仍寫得進去。
+- `tests/test_profile_health_backoff.py`（PR #162 第二輪審查）：成功與鎖內寫入中的失敗並行時仍清除退避；另一行程持鎖不放時記錄在期限內返回、寫 log、之後不再等鎖、讀取不卡住；routing 照常完成。
 - `tests/test_profile_health_wiring.py`（PR #162 審查）：title importer 記錄並遵守退避；沒有 memory root 時不寫狀態；skillopt 三個 router 共用 store（dry-run 唯讀）；skillopt rollout 遵守 dream 記下的 atomization 退避；task class 互不影響。

@@ -36,7 +36,7 @@ router 在主迴圈遇到 circuit breaker 開啟、且 enabled 與 task class �
 
 ### Requirement: Persistent backoff for deterministically failing profiles
 
-dream／`hippo atomize`、title importer 與 `hippo retitle`、skillopt（rollout、judge、optimizer）的 router SHALL 共用同一個持久 profile 健康狀態，存放在 memory root 的 `runtime/agents/profile-health.json`，並 SHALL 依 router 的 task class 分開記錄，某一 task class 的結果 MUST NOT 清除或建立另一 task class 的狀態。各路徑可能同時更新：讀改寫 SHALL 以檔案鎖序列化，暫存檔名 SHALL 每次唯一，並發更新 MUST NOT 遺失或倒退退避計數。只有確定性失敗 SHALL 進入退避：nonzero exit、在 30 秒內失敗，且 sanitized stderr 開頭的有限視窗內以 CLI 參數解析錯誤（`invocation`）或憑證錯誤（`credential`）開頭；比對 MUST NOT 使用視窗之外的 stderr，以免 CLI 回顯的 prompt 內容觸發退避。timeout、invalid_output、quota、一般 process 失敗 MUST NOT 進入退避。`invocation` SHALL 一次即退避，`credential` SHALL 連續兩個 session 才退避；退避時間 SHALL 從 1 小時起跳、每次加倍、上限 24 小時，到期後允許一次探測。退避中的 profile SHALL 被略過並留下 `backoff <kind> until <UTC>` 的 ineligible 紀錄，不消耗 agent call、不計入 `max_attempts`。成功或非確定性結果 SHALL 清除狀態；狀態 SHALL 綁定 rendered command fingerprint，command 變更即不再套用。狀態讀寫失敗 MUST NOT 讓蒸餾失敗；dry-run MUST NOT 寫入狀態。`hippo doctor` SHALL 在對應 profile 顯示退避類別、到期時間與最後 stderr 摘要，且不因退避改變 exit code。
+dream／`hippo atomize`、title importer 與 `hippo retitle`、skillopt（rollout、judge、optimizer）的 router SHALL 共用同一個持久 profile 健康狀態，存放在 memory root 的 `runtime/agents/profile-health.json`，並 SHALL 依 router 的 task class 分開記錄，某一 task class 的結果 MUST NOT 清除或建立另一 task class 的狀態。各路徑可能同時更新：凡是可能改變狀態的判斷（包括成功時是否清除狀態）SHALL 在檔案鎖內重讀後才決定，暫存檔名 SHALL 每次唯一，並發更新 MUST NOT 遺失或倒退退避計數。取鎖 SHALL 有期限；逾時 SHALL 放棄該次更新並記錄 log，routing MUST NOT 因此阻塞或失敗，讀取端 MUST NOT 取鎖。只有確定性失敗 SHALL 進入退避：nonzero exit、在 30 秒內失敗，且 sanitized stderr 開頭的有限視窗內以 CLI 參數解析錯誤（`invocation`）或憑證錯誤（`credential`）開頭；比對 MUST NOT 使用視窗之外的 stderr，以免 CLI 回顯的 prompt 內容觸發退避。timeout、invalid_output、quota、一般 process 失敗 MUST NOT 進入退避。`invocation` SHALL 一次即退避，`credential` SHALL 連續兩個 session 才退避；退避時間 SHALL 從 1 小時起跳、每次加倍、上限 24 小時，到期後允許一次探測。退避中的 profile SHALL 被略過並留下 `backoff <kind> until <UTC>` 的 ineligible 紀錄，不消耗 agent call、不計入 `max_attempts`。成功或非確定性結果 SHALL 清除狀態；狀態 SHALL 綁定 rendered command fingerprint，command 變更即不再套用。狀態讀寫失敗 MUST NOT 讓蒸餾失敗；dry-run MUST NOT 寫入狀態。`hippo doctor` SHALL 在對應 profile 顯示退避類別、到期時間與最後 stderr 摘要，且不因退避改變 exit code。
 
 #### Scenario: Invocation failure is not retried by the next session
 - **WHEN** 一個 profile 在 2 秒內以 `error: Invalid command format` exit 1，之後新的 dream run 建立新的 router
@@ -53,6 +53,14 @@ dream／`hippo atomize`、title importer 與 `hippo retitle`、skillopt（rollou
 #### Scenario: Concurrent writers keep every update
 - **WHEN** 多個 atomize／dream／importer／skillopt 行程同時記錄同一 profile 的確定性失敗
 - **THEN** 最終的連續失敗次數 SHALL 等於所有行程記錄次數的總和，且不留下暫存檔
+
+#### Scenario: A success racing a failure writer still clears the backoff
+- **WHEN** 一個行程正在鎖內寫入某 profile 的確定性失敗，另一個行程同時記錄該 profile 的成功
+- **THEN** 成功 SHALL 等鎖後重讀並清除該狀態，MUST NOT 因鎖外讀到的舊狀態而放棄清除
+
+#### Scenario: A held lock never stalls routing
+- **WHEN** 另一個行程持有寫入鎖不放
+- **THEN** 記錄結果 SHALL 在取鎖期限內返回並放棄該次更新、記錄 log，router 照常完成 routing，讀取退避狀態不被阻塞
 
 #### Scenario: Title and skillopt paths honor the same backoff
 - **WHEN** title importer 或 skillopt rollout 的 router 遇到同一 task class 中處於退避的 profile
