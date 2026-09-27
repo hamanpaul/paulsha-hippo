@@ -39,54 +39,96 @@ store 放在同步樹**外**的真實目錄；只有需要在 Obsidian 呈現的
 
 ## 遷移：把 memory_root 移出 vault（P1）
 
-以下以 `<vault>` 代表 vault 根目錄、`<store>` 代表目前 store 在 vault 內的真實位置（`readlink -f ~/.agents/memory` 的結果）。每一步都可回滾；**請逐步執行並核對輸出**。
+先判斷佈局，**只有佈局 A 適用本流程**：
 
-### 0. 前置檢查與基線
+| 佈局 | 樣貌 | 處置 |
+|---|---|---|
+| A | memory_root（預設 `~/.agents/memory`）是 symlink，指向 vault 內的真實 store；它的上層目錄不在 vault 內 | 照下面步驟翻轉 symlink；hippo 的存取路徑不變 |
+| B | store 實體就在 vault 內：memory_root 本身是 vault 內的真實目錄（例如 config 的 `memory_root` 直接設成 vault 路徑），或 memory_root 的上層目錄經 symlink 進 vault | **不要套用本流程**，見文末「佈局 B」 |
+| — | store 已不在任何同步樹內 | 不需遷移 |
+
+以下每個程式區塊都是自足的 `bash -eu <<'SH' … SH`：整段貼進終端機執行，變數在區塊內重新設定，前置判斷不成立時只會結束該子 shell，不影響目前的 shell。開頭的 `MEMROOT`／`VAULT` 請改成實際值：`MEMROOT` 是 hippo 實際使用的 memory_root（`hippo doctor` 開頭列出的 `memory_root`，也是 dream unit 的 `--memory-root`），`VAULT` 是 vault 根目錄。
+
+### 0. 判斷佈局與基線（唯讀）
 
 ```bash
-VAULT=<vault>
-STORE="$(readlink -f ~/.agents/memory)"        # 應落在 $VAULT 底下
-case "$STORE" in "$VAULT"/*) echo "store 在 vault 內：需要遷移";; *) echo "store 已不在 vault：不需搬移";; esac
-
-# 同一個 filesystem 時 mv 只是 rename（瞬間完成、不複製資料）；device id 不同則改用複製流程
-stat -c '%d %n' "$STORE" ~/.agents
-
-# 基線（遷移前後比對）
-for d in "$STORE"/*/; do printf '%s %s\n' "$(find "$d" -type f | wc -l)" "$d"; done
-find "$VAULT" -type f | wc -l
-systemctl --user show obsidian-sync.service -p MemoryCurrent -p MemoryPeak
-hippo doctor
+bash -eu <<'SH'
+MEMROOT=~/.agents/memory; VAULT=~/notes
+VAULT_REAL="$(readlink -f "$VAULT")"; STORE="$(readlink -f "$MEMROOT")"
+case "$STORE/" in
+  "$VAULT_REAL"/*) ;;
+  *) echo "store 不在 vault（$STORE）：不需遷移"; exit 0 ;;
+esac
+if [ ! -L "$MEMROOT" ]; then
+  echo "佈局 B：store 實體就在 vault 內（$STORE），$MEMROOT 不是 symlink——不要套用本流程"; exit 1
+fi
+case "$(readlink -f "$(dirname "$MEMROOT")")/" in
+  "$VAULT_REAL"/*) echo "佈局 B：$MEMROOT 的上層目錄在 vault 內——不要套用本流程"; exit 1 ;;
+esac
+echo "佈局 A：$MEMROOT 是指向 vault 內 $STORE 的 symlink，可照本流程遷移"
+stat -c '%d %n' "$STORE" "$(dirname "$MEMROOT")"      # device id 相同，mv 才只是 rename
+for d in "$STORE"/*/; do printf '%s %s\n' "$(find "$d" -type f | wc -l)" "$d"; done   # 基線
+find "$VAULT_REAL" -type f | wc -l
+SH
 ```
 
-### 1. 停止所有寫入者
+步驟 0 顯示「佈局 A」才繼續；顯示「佈局 B」請跳到文末，顯示「不需遷移」即可結束。
+
+### 1. 記錄基線並停止所有寫入者
 
 ```bash
+systemctl --user show obsidian-sync.service -p MemoryCurrent -p MemoryPeak   # 遷移前基線
+hippo doctor
 systemctl --user stop paulsha-hippo-dream.timer paulsha-hippo-dream.service
 systemctl --user stop obsidian-sync-healthcheck.timer obsidian-sync.service   # healthcheck 會自動拉起 sync，一併停
 # 結束正在跑的 agent CLI session（hooks 會寫 inbox／runtime），必要時一併停 cortex 等外部寫入者
 pgrep -af 'paulsha_hippo|hippo ' || echo "無 hippo 進程"
-flock -n ~/.agents/memory/runtime/locks/dream.lock true && echo "dream lock 空閒"
+flock -n ~/.agents/memory/runtime/locks/dream.lock true && echo "dream lock 空閒"   # 路徑依 MEMROOT 調整
 ```
 
-### 2. 搬移並翻轉 symlink
+### 2. 搬移並翻轉 symlink（只在佈局 A 動手）
 
 ```bash
-mv ~/.agents/memory ~/.agents/memory.vault-link      # 保留舊 symlink 供回滾（只改 symlink 名稱）
-mkdir ~/.agents/memory
-for entry in "$STORE"/* "$STORE"/.[!.]*; do
-  [ -e "$entry" ] || continue
+bash -eu <<'SH'
+shopt -s dotglob nullglob
+MEMROOT=~/.agents/memory; VAULT=~/notes
+VAULT_REAL="$(readlink -f "$VAULT")"; STORE="$(readlink -f "$MEMROOT")"
+[ -L "$MEMROOT" ] || { echo "中止：$MEMROOT 不是 symlink（佈局 B，或已遷移過）"; exit 1; }
+case "$STORE/" in "$VAULT_REAL"/*) ;; *) echo "中止：store 不在 vault"; exit 1 ;; esac
+case "$(readlink -f "$(dirname "$MEMROOT")")/" in
+  "$VAULT_REAL"/*) echo "中止：$MEMROOT 的上層目錄在 vault 內（佈局 B）"; exit 1 ;;
+esac
+if [ -e "$MEMROOT.vault-link" ] || [ -L "$MEMROOT.vault-link" ]; then
+  echo "中止：$MEMROOT.vault-link 已存在"; exit 1
+fi
+[ -d "$STORE/knowledge" ] || { echo "中止：$STORE/knowledge 不存在"; exit 1; }
+[ "$(stat -c %d "$STORE")" = "$(stat -c %d "$(dirname "$MEMROOT")")" ] \
+  || { echo "中止：跨 filesystem，mv 會變成複製，請另行規劃"; exit 1; }
+
+mv "$MEMROOT" "$MEMROOT.vault-link"        # 只改 symlink 本身的名稱，保留供回滾
+mkdir "$MEMROOT"
+for entry in "$STORE"/*; do
   [ "$(basename "$entry")" = knowledge ] && continue
-  mv "$entry" ~/.agents/memory/
+  mv "$entry" "$MEMROOT"/
 done
-ln -s "$STORE/knowledge" ~/.agents/memory/knowledge
+ln -s "$STORE/knowledge" "$MEMROOT/knowledge"
+echo "完成：$MEMROOT 為 vault 外的真實目錄，knowledge → $STORE/knowledge"
+SH
 ```
 
 ### 3. 驗證
 
 ```bash
-readlink -f ~/.agents/memory/archive                  # 不得落在 $VAULT 底下
-ls -A "$STORE"                                          # 只剩 knowledge
-for d in ~/.agents/memory/*/; do printf '%s %s\n' "$(find -L "$d" -type f | wc -l)" "$d"; done   # 與基線一致
+bash -eu <<'SH'
+shopt -s dotglob nullglob
+MEMROOT=~/.agents/memory; VAULT=~/notes
+VAULT_REAL="$(readlink -f "$VAULT")"; STORE="$(readlink -f "$MEMROOT.vault-link")"
+if [ -d "$MEMROOT" ] && [ ! -L "$MEMROOT" ]; then echo "✓ $MEMROOT 是真實目錄"; else echo "✗ $MEMROOT 不是真實目錄"; fi
+case "$(readlink -f "$MEMROOT/archive")/" in "$VAULT_REAL"/*) echo "✗ archive 仍在 vault 內";; *) echo "✓ archive 在 vault 外";; esac
+if [ "$(readlink -f "$MEMROOT/knowledge")" = "$STORE/knowledge" ]; then echo "✓ knowledge 借回 vault"; else echo "✗ knowledge 未指向 $STORE/knowledge"; fi
+echo "vault 內 store 剩下：$(ls -A "$STORE" | tr '\n' ' ')"   # 應只剩 knowledge
+for d in "$MEMROOT"/*/; do printf '%s %s\n' "$(find -L "$d" -type f | wc -l)" "$d"; done   # 與基線一致
+SH
 hippo doctor                                            # storage 位置：✓，knowledge 借回 vault
 hippo dream status --memory-root ~/.agents/memory
 hippo dream run --dry-run --memory-root ~/.agents/memory
@@ -97,7 +139,7 @@ hippo dream run --dry-run --memory-root ~/.agents/memory
 ```bash
 systemctl --user start obsidian-sync.service obsidian-sync-healthcheck.timer
 systemctl --user start paulsha-hippo-dream.timer
-find "$VAULT" -type f | wc -l                            # 掃描面積應大幅下降
+find ~/notes -type f | wc -l                            # 掃描面積應大幅下降
 systemctl --user show obsidian-sync.service -p MemoryCurrent -p MemoryPeak   # 觀察數個整點
 ```
 
@@ -105,19 +147,44 @@ systemctl --user show obsidian-sync.service -p MemoryCurrent -p MemoryPeak   # �
 
 ### 回滾
 
+先照步驟 1 停止所有寫入者，再執行（只接受本流程留下的狀態，其他情況一律中止、不動檔）：
+
 ```bash
-# 先照步驟 1 停止所有寫入者
-STORE="$(readlink -f ~/.agents/memory.vault-link)"     # 由保留的舊 symlink 取回原位置
-rm ~/.agents/memory/knowledge                          # 只移除 symlink
-for entry in ~/.agents/memory/* ~/.agents/memory/.[!.]*; do
-  [ -e "$entry" ] || continue
-  mv "$entry" "$STORE"/
+bash -eu <<'SH'
+shopt -s dotglob nullglob
+MEMROOT=~/.agents/memory
+[ -L "$MEMROOT.vault-link" ] || { echo "中止：找不到 $MEMROOT.vault-link（不是本流程遷移的狀態）"; exit 1; }
+STORE="$(readlink -f "$MEMROOT.vault-link")"
+[ -d "$STORE" ] || { echo "中止：原 store $STORE 不存在"; exit 1; }
+if [ ! -e "$MEMROOT" ] && [ ! -L "$MEMROOT" ]; then     # 步驟 2 在 mkdir 前中斷
+  mv "$MEMROOT.vault-link" "$MEMROOT"; echo "已回滾：$MEMROOT → $STORE"; exit 0
+fi
+[ -d "$MEMROOT" ] && [ ! -L "$MEMROOT" ] || { echo "中止：$MEMROOT 不是遷移後的真實目錄"; exit 1; }
+if [ -L "$MEMROOT/knowledge" ] && [ "$(readlink -f "$MEMROOT/knowledge")" != "$STORE/knowledge" ]; then
+  echo "中止：$MEMROOT/knowledge 指向非預期位置"; exit 1
+fi
+for entry in "$MEMROOT"/*; do
+  name="$(basename "$entry")"
+  if [ "$name" = knowledge ] && [ -L "$entry" ]; then continue; fi
+  if [ -e "$STORE/$name" ] || [ -L "$STORE/$name" ]; then
+    echo "中止：$STORE/$name 已存在（避免覆蓋或巢狀搬移）"; exit 1
+  fi
 done
-rmdir ~/.agents/memory
-mv ~/.agents/memory.vault-link ~/.agents/memory
-readlink -f ~/.agents/memory                            # 回到 $STORE
-# 再照步驟 3、4 驗證並恢復服務
+if [ -L "$MEMROOT/knowledge" ]; then rm "$MEMROOT/knowledge"; fi
+for entry in "$MEMROOT"/*; do mv "$entry" "$STORE"/; done
+rmdir "$MEMROOT"
+mv "$MEMROOT.vault-link" "$MEMROOT"
+echo "已回滾：$MEMROOT → $(readlink -f "$MEMROOT")"
+SH
 ```
+
+回滾後照步驟 3 的 `hippo doctor`／`hippo dream status` 與步驟 4 驗證並恢復服務。
+
+### 佈局 B：store 實體就在 vault 內
+
+不要套用上面的流程，也不要自行 `mv` 整個 store：佈局 B 下搬移會改變 hippo 存取 store 的路徑，而 import／processing ledger、knowledge 的 `provenance.path`、recovery manifest 記錄的都是 store 內檔案的**絕對路徑**。路徑一變，janitor（`check_provenance_path`）會把 knowledge 判成 `source_invalid`，`hippo recovery` 會 `source pin drift`，看起來就像資料遺失。
+
+請先停在這裡另行規劃，確保舊存取路徑在遷移後仍能解析到同一批檔案，並先確認同步工具不會跟隨 vault 內的 symlink。可行方向例如：若是上層目錄經 symlink 進 vault，把該 symlink 改指到 vault 外；若 memory_root 直接設在 vault 內，需要一併處理歷史紀錄的路徑改寫。必要時開 issue 討論。
 
 ## archive GC
 
