@@ -224,20 +224,31 @@ def test_cli_eval_rejects_bad_params(extra, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CLI：hippo shortlist freeze（由真實索引產生待標註骨架；此處用合成 memory root）
+# CLI：hippo shortlist freeze（由既有索引產生待標註骨架；此處用合成 memory root）
+#
+# freeze 會讀 runtime config（read_hint、collapse_same_topic）以重現 hook 的實際路徑。
+# 這裡一律用 repo 既有的 isolated_atomizer_config 顯式隔離 HIPPO_CONFIG_ROOT（不只依賴
+# conftest 的 autouse fixture；見 paulsha-hippo#141 事故），並依測試需要改寫隔離後的 config。
 # ---------------------------------------------------------------------------
 
-def _seed(mr: Path) -> None:
+try:
+    from atomizer_config_testutil import isolated_atomizer_config
+except ImportError:  # pragma: no cover - only hit under `-m unittest tests.x` from repo root
+    from tests.atomizer_config_testutil import isolated_atomizer_config
+
+_BASE_NOTES = (
+    ("a.md", "sl-aaaaaaaaaaaaaaaa", "SerialWrap", "SerialWrap 抽象 UART 執行層", "2026-06-29T00:00:00Z"),
+    ("b.md", "sl-bbbbbbbbbbbbbbbb", "Console 重試", "SerialWrap console 重試策略", "2026-06-29T00:00:00Z"),
+)
+
+
+def _seed(mr: Path, notes=_BASE_NOTES) -> None:
     k = mr / "knowledge" / "proj"
     k.mkdir(parents=True)
-    notes = (
-        ("a.md", "sl-aaaaaaaaaaaaaaaa", "SerialWrap", "SerialWrap 抽象 UART 執行層\n"),
-        ("b.md", "sl-bbbbbbbbbbbbbbbb", "Console 重試", "SerialWrap console 重試策略\n"),
-    )
-    for fname, sid, title, body in notes:
+    for fname, sid, title, body, captured in notes:
         (k / fname).write_text(
             f"---\nmemory_layer: knowledge\nslice_id: {sid}\nproject: proj\n"
-            f"title: {title}\ncaptured_at: '2026-06-29T00:00:00Z'\n---\n{body}",
+            f"title: {json.dumps(title, ensure_ascii=False)}\ncaptured_at: '{captured}'\n---\n{body}\n",
             encoding="utf-8")
     S.build_index(mr, link_weights={})
 
@@ -246,67 +257,188 @@ def _tree(root: Path) -> list[tuple[str, int]]:
     return sorted((str(p.relative_to(root)), p.stat().st_size) for p in root.rglob("*") if p.is_file())
 
 
+def _freeze(mr: Path, tmp_path: Path, queries: str, name: str = "f.json") -> dict:
+    qfile = tmp_path / f"{name}.txt"
+    qfile.write_text(queries, encoding="utf-8")
+    out = tmp_path / name
+    assert cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
+                     "--queries-file", str(qfile), "--annotator", "t", "--method", "m",
+                     "--out", str(out)]) == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _hook_injection(mr: Path, monkeypatch, prompt: str) -> tuple[str, list[str]]:
+    """以全新 session 跑一次真實 prompt-time 管線，回傳（注入字串, 注入的 sl_id 依序）。"""
+    from paulsha_hippo.hooks import _shortlist_common as SC
+    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+    injected = SC.build_shortlist_and_record(mr, "claude-code", E.FREEZE_PLACEHOLDER_SESSION,
+                                             cwd="/x", prompt=prompt)
+    ev = json.loads((mr / "runtime" / "ledger" / "offered.jsonl").read_text(
+        encoding="utf-8").splitlines()[-1])
+    return injected, [o["sl_id"] for o in ev["offered"]]
+
+
+def _assert_freeze_matches_hook(data: dict, injected: str, offered_ids: list[str]) -> None:
+    cands = data["queries"][0]["candidates"]
+    assert [c["note_id"] for c in cands[:E.BASELINE_K]] == offered_ids
+    assert len(injected) == data["block_overhead_chars"] + sum(c["chars"] for c in cands[:E.BASELINE_K])
+
+
 def test_cli_freeze_emits_unlabeled_skeleton_readonly(tmp_path, capsys):
-    mr = tmp_path / "mr"
-    _seed(mr)
-    before = _tree(mr)
-    qfile = tmp_path / "queries.txt"
-    qfile.write_text("# 註解行略過\nSerialWrap UART\n\nzzzznomatch\n", encoding="utf-8")
-    out = tmp_path / "frozen.json"
-    rc = cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
-                   "--queries-file", str(qfile), "--annotator", "tester", "--method", "合成測試",
-                   "--name", "tmp-set", "--out", str(out)])
-    assert rc == 0
-    assert _tree(mr) == before  # 唯讀：不記 offered、不寫任何 runtime 檔
-    data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["format"] == E.FROZEN_FORMAT and data["version"] == E.FROZEN_VERSION
-    assert data["name"] == "tmp-set" and data["project"] == "proj"
-    assert data["annotator"] == "tester" and data["method"] == "合成測試"
-    assert data["block_overhead_chars"] > 0
-    assert [q["query"] for q in data["queries"]] == ["SerialWrap UART", "zzzznomatch"]
-    first = data["queries"][0]
-    ids = [c["note_id"] for c in first["candidates"]]
-    assert ids and set(ids) <= {"sl-aaaaaaaaaaaaaaaa", "sl-bbbbbbbbbbbbbbbb"}
-    for c in first["candidates"]:
-        assert c["relevant"] is None and c["chars"] > 0 and c["bm25"] < 0 and c["title"]
-    assert data["queries"][1]["candidates"] == []
-    # 未標註 → eval 拒絕
-    assert cli.main(["shortlist", "eval", "--queries", str(out)]) == 2
-    capsys.readouterr()
-    # 標註後 → 可評估
-    for q in data["queries"]:
-        for c in q["candidates"]:
-            c["relevant"] = c["note_id"] == "sl-aaaaaaaaaaaaaaaa"
-    labelled = _write(tmp_path, data, "labelled.json")
-    assert cli.main(["shortlist", "eval", "--queries", str(labelled), "--json"]) == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["baseline"]["queries"] == 2
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        before = _tree(mr)
+        qfile = tmp_path / "queries.txt"
+        qfile.write_text("# 註解行略過\nSerialWrap UART\n\nzzzznomatch\n", encoding="utf-8")
+        out = tmp_path / "frozen.json"
+        rc = cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
+                       "--queries-file", str(qfile), "--annotator", "tester", "--method", "合成測試",
+                       "--name", "tmp-set", "--out", str(out)])
+        assert rc == 0
+        assert _tree(mr) == before  # 唯讀：不記 offered、不寫任何 runtime 檔
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["format"] == E.FROZEN_FORMAT and data["version"] == E.FROZEN_VERSION
+        assert data["name"] == "tmp-set" and data["project"] == "proj"
+        assert data["annotator"] == "tester" and data["method"] == "合成測試"
+        assert data["block_overhead_chars"] > 0
+        assert [q["query"] for q in data["queries"]] == ["SerialWrap UART", "zzzznomatch"]
+        first = data["queries"][0]
+        ids = [c["note_id"] for c in first["candidates"]]
+        assert ids and set(ids) <= {"sl-aaaaaaaaaaaaaaaa", "sl-bbbbbbbbbbbbbbbb"}
+        for c in first["candidates"]:
+            assert c["relevant"] is None and c["chars"] > 0 and c["bm25"] < 0 and c["title"]
+        assert data["queries"][1]["candidates"] == []
+        # 未標註 → eval 拒絕
+        assert cli.main(["shortlist", "eval", "--queries", str(out)]) == 2
+        capsys.readouterr()
+        # 標註後 → 可評估
+        for q in data["queries"]:
+            for c in q["candidates"]:
+                c["relevant"] = c["note_id"] == "sl-aaaaaaaaaaaaaaaa"
+        labelled = _write(tmp_path, data, "labelled.json")
+        assert cli.main(["shortlist", "eval", "--queries", str(labelled), "--json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["baseline"]["queries"] == 2
 
 
 def test_cli_freeze_candidate_chars_match_hook_row_lengths(tmp_path, monkeypatch):
     """freeze 算出的單列字元數＋overhead 必須等於 hook 實際注入同一批 note 的字元數。"""
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr)
+        data = _freeze(mr, tmp_path, "SerialWrap UART\n")
+        injected, offered_ids = _hook_injection(mr, monkeypatch, "SerialWrap UART")
+        _assert_freeze_matches_hook(data, injected, offered_ids)
+
+
+# 審查 finding 1：baseline 必須走 hook 的同一條路徑（含同主題折疊與 claim），不是 raw search()。
+_COLLAPSE_NOTES = (
+    ("old.md", "sl-0101010101010101", "SerialWrap UART 設定", "SerialWrap UART 舊版設定 SerialWrap UART",
+     "2026-06-01T00:00:00Z"),
+    ("new.md", "sl-0202020202020202", "SerialWrap UART 設定", "SerialWrap UART 新版設定",
+     "2026-07-01T00:00:00Z"),
+    ("c.md", "sl-0303030303030303", "Console 重試", "SerialWrap console 重試", "2026-06-15T00:00:00Z"),
+    ("d.md", "sl-0404040404040404", "Log 格式", "UART log 格式", "2026-06-15T00:00:00Z"),
+)
+
+
+def test_cli_freeze_baseline_follows_hook_collapse_and_claim(tmp_path, monkeypatch):
+    with isolated_atomizer_config():  # 模板預設 collapse_same_topic: true
+        mr = tmp_path / "mr"
+        _seed(mr, _COLLAPSE_NOTES)
+        raw = S.search(mr, "SerialWrap UART", project="proj", limit=E.FETCH_K, include_decayed=False)
+        raw_ids = [h["slice_id"] for h in raw]
+        assert {"sl-0101010101010101", "sl-0202020202020202"} <= set(raw_ids[:3])  # raw top-3 含同主題兩則
+        data = _freeze(mr, tmp_path, "SerialWrap UART\n")
+        q = data["queries"][0]
+        ids = [c["note_id"] for c in q["candidates"]]
+        assert "sl-0101010101010101" not in ids  # 舊的同主題 note 已被折疊，不再是候選
+        assert q["collapsed"] == {"sl-0202020202020202": ["sl-0101010101010101"]}
+        injected, offered_ids = _hook_injection(mr, monkeypatch, "SerialWrap UART")
+        _assert_freeze_matches_hook(data, injected, offered_ids)
+
+
+def test_cli_freeze_respects_collapse_flag_off(tmp_path, monkeypatch):
+    with isolated_atomizer_config() as cfg:
+        text = cfg.read_text(encoding="utf-8")
+        text = text.replace("collapse_same_topic: true", "collapse_same_topic: false")
+        text = text.replace("read_hint: show", "read_hint: read")
+        cfg.write_text(text, encoding="utf-8")
+        mr = tmp_path / "mr"
+        _seed(mr, _COLLAPSE_NOTES)
+        data = _freeze(mr, tmp_path, "SerialWrap UART\n")
+        q = data["queries"][0]
+        assert {"sl-0101010101010101", "sl-0202020202020202"} <= {c["note_id"] for c in q["candidates"]}
+        assert q["collapsed"] == {}
+        injected, offered_ids = _hook_injection(mr, monkeypatch, "SerialWrap UART")
+        assert "Read" in injected and "show --memory-root" not in injected  # 同一份隔離 config 的 read_hint
+        _assert_freeze_matches_hook(data, injected, offered_ids)
+
+
+# 審查 finding 2：title／summary 含換行（或被 redaction 整行替換）時，每列字元數必須結構化對齊。
+def _secret_like() -> str:
+    return "sk-" + "Q" * 24  # 執行期組字串：只為觸發 redaction，檔案內不留憑證樣式字面值
+
+
+def test_cli_freeze_chars_structurally_aligned_with_multiline_title(tmp_path, monkeypatch):
+    notes = (
+        ("m.md", "sl-0505050505050505", "SerialWrap\nUART 多行標題", "SerialWrap UART 多行 SerialWrap UART",
+         "2026-06-29T00:00:00Z"),
+        ("r.md", "sl-0606060606060606", f"SerialWrap UART {_secret_like()}", "SerialWrap UART 會被遮蔽",
+         "2026-06-29T00:00:00Z"),
+        ("p.md", "sl-0707070707070707", "Plain", "SerialWrap 普通", "2026-06-29T00:00:00Z"),
+    )
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr, notes)
+        data = _freeze(mr, tmp_path, "SerialWrap UART\n")
+        injected, offered_ids = _hook_injection(mr, monkeypatch, "SerialWrap UART")
+        assert "\nUART 多行標題" in injected and "[REDACTED LINE:" in injected
+        cands = {c["note_id"]: c for c in data["queries"][0]["candidates"]}
+        assert set(cands) == {"sl-0505050505050505", "sl-0606060606060606", "sl-0707070707070707"}
+        rows = injected.split("\n")
+        multi = next(i for i, line in enumerate(rows) if line.startswith("- [SerialWrap"))
+        # 多行標題那則佔兩行：字元數＝兩段內容＋兩個換行
+        assert cands["sl-0505050505050505"]["chars"] == len(rows[multi]) + len(rows[multi + 1]) + 2
+        redacted = next(line for line in rows if line.startswith("[REDACTED LINE:"))
+        assert cands["sl-0606060606060606"]["chars"] == len(redacted) + 1
+        _assert_freeze_matches_hook(data, injected, offered_ids)
+
+
+def test_push_shadow_chars_after_exact_with_multiline_title(tmp_path, monkeypatch):
+    """線上 shadow 同樣結構化對齊：多行標題時 chars_after 仍精確（chars_exact 為 true）。"""
+    from paulsha_hippo import push_shadow as PS
+    from paulsha_hippo import runtime_flags as rf
     from paulsha_hippo.hooks import _shortlist_common as SC
-    mr = tmp_path / "mr"
-    _seed(mr)
-    qfile = tmp_path / "q.txt"
-    qfile.write_text("SerialWrap UART\n", encoding="utf-8")
-    out = tmp_path / "f.json"
-    assert cli.main(["shortlist", "freeze", "--memory-root", str(mr), "--project", "proj",
-                     "--queries-file", str(qfile), "--annotator", "t", "--method", "m",
-                     "--out", str(out)]) == 0
-    data = json.loads(out.read_text(encoding="utf-8"))
-    cands = data["queries"][0]["candidates"]
-    monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
-    injected = SC.build_shortlist_and_record(mr, "claude-code", E.FREEZE_PLACEHOLDER_SESSION,
-                                             cwd="/x", prompt="SerialWrap UART")
-    expected = data["block_overhead_chars"] + sum(c["chars"] for c in cands[:3])
-    assert len(injected) == expected
+    notes = (
+        ("m.md", "sl-0505050505050505", "SerialWrap\nUART 多行標題", "SerialWrap UART 多行 SerialWrap UART",
+         "2026-06-29T00:00:00Z"),
+        ("p.md", "sl-0707070707070707", "Plain", "SerialWrap 普通", "2026-06-29T00:00:00Z"),
+    )
+    with isolated_atomizer_config():
+        mr = tmp_path / "mr"
+        _seed(mr, notes)
+        monkeypatch.setattr(SC, "resolve_project", lambda cwd, memory_root: "proj")
+        monkeypatch.setattr(SC, "load_flags", lambda: rf.HygieneFlags(
+            push_shadow=PS.PushShadowConfig(enabled=True, max_k=1)))
+        full = SC.build_shortlist_and_record(mr, "claude-code", "sidM", cwd="/x", prompt="SerialWrap UART")
+        ev = json.loads(PS.ledger_path(mr).read_text(encoding="utf-8").splitlines()[0])
+        assert ev["chars_exact"] is True and ev["chars_before"] == len(full)
+        for sub in ("ledger", "wakeup"):
+            import shutil
+            shutil.rmtree(mr / "runtime" / sub, ignore_errors=True)
+        monkeypatch.setattr(SC, "SHORTLIST_K", 1)
+        monkeypatch.setattr(SC, "load_flags", lambda: rf.HygieneFlags())
+        top1 = SC.build_shortlist_and_record(mr, "claude-code", "sidM", cwd="/x", prompt="SerialWrap UART")
+        assert ev["chars_after"] == len(top1)
 
 
 def test_cli_freeze_missing_index_exits_1(tmp_path, capsys):
-    qfile = tmp_path / "q.txt"
-    qfile.write_text("anything\n", encoding="utf-8")
-    rc = cli.main(["shortlist", "freeze", "--memory-root", str(tmp_path / "empty"), "--project", "p",
-                   "--queries-file", str(qfile), "--annotator", "t", "--method", "m"])
-    assert rc == 1
-    assert "index" in capsys.readouterr().err
+    with isolated_atomizer_config():
+        qfile = tmp_path / "q.txt"
+        qfile.write_text("anything\n", encoding="utf-8")
+        rc = cli.main(["shortlist", "freeze", "--memory-root", str(tmp_path / "empty"), "--project", "p",
+                       "--queries-file", str(qfile), "--annotator", "t", "--method", "m"])
+        assert rc == 1
+        assert "index" in capsys.readouterr().err
