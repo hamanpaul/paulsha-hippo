@@ -27,6 +27,7 @@ work_item: issue-117-project-buckets
 
 - [x] 先寫測試：零寫入；raw remote bucket 併入補登後 slug 並附 `hippo knowledge rekey --dry-run` 指令；registered／未登記 raw remote bucket 不動；暫存 sandbox bucket 列為 unresolved；`_unknown` 成因分類與可回收比例；`--no-backfill-overlay`。
 - [x] 實作：`paulsha_hippo/bucket_report.py`＋`hippo knowledge bucket-report`。
+- [x] 審查修正（#161）：stay 判定同時比對實際目錄，frontmatter 已正確但目錄錯置者列 relocation（先 RED）；暫存根 fallback 記 debug log（先 RED）；修正 `mock.patch` 的 `remote_value` 筆誤並斷言 mock 路徑。
 
 ## Task 5: 文件與收尾
 

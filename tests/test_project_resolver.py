@@ -185,16 +185,19 @@ class ProjectResolverTest(unittest.TestCase):
         )
         with mock.patch(
             "paulsha_hippo.importer.project_resolver._git.git_toplevel",
-            remote_value="/srv/builder/PRJ-0611/vendor-mcu-cli",
-        ), mock.patch(
+            return_value="/srv/builder/example-build/widget-cli",
+        ) as toplevel_mock, mock.patch(
             "paulsha_hippo.importer.project_resolver._git.git_remote",
             return_value="git@internal-vcs.example:vendor-y/vendor-y_openwrt_feed.git",
-        ):
+        ) as remote_mock:
             project = resolve_project(
-                cwd="/srv/worker/PROJ-0605/vendor-y-mcu-cleanup", projects=config
+                cwd="/srv/worker/example-task/widget-cleanup", projects=config
             )
 
         self.assertEqual(project, "vendor-y")
+        # 確認走的是「探測到的 toplevel → 其 remote → projects.yaml 對應」這條路徑
+        toplevel_mock.assert_called_once_with("/srv/worker/example-task/widget-cleanup")
+        remote_mock.assert_called_once_with("/srv/builder/example-build/widget-cli")
 
     def test_resolve_project_fallback_unregistered_remote_returns_normalized_url(self):
         config = load_projects_config(
@@ -633,6 +636,18 @@ class EphemeralCheckoutTests(unittest.TestCase):
         projects = ProjectsConfig(projects=(ProjectConfig(slug="pinned", roots=(str(checkout),)),))
 
         self.assertEqual(resolve_project(cwd=str(checkout), projects=projects), "pinned")
+
+    def test_ephemeral_fallback_is_logged_not_silent(self):
+        # 審查 #161-2：暫存根規則把目錄名 fallback 改成 _unknown 時必須留下可查的 debug log，
+        # 讓「暫存目錄下的長期工作目錄」被誤判時有跡可循（對策：登記 roots 或覆寫暫存根）。
+        checkout = self.fake_tmp / "long-lived-work"
+        checkout.mkdir()
+        with self.assertLogs("paulsha_hippo.importer", level="DEBUG") as captured:
+            self.assertEqual(resolve_project(cwd=str(checkout), projects=_EMPTY), "_unknown")
+        output = "\n".join(captured.output)
+        self.assertIn("ephemeral", output)
+        self.assertIn(str(checkout), output)
+        self.assertIn("HIPPO_EPHEMERAL_ROOTS", output)
 
     def test_non_ephemeral_folder_keeps_folder_name_fallback(self):
         folder = self.base / "notes"

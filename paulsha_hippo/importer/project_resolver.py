@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -75,6 +76,8 @@ def normalize_remote(value: str | None) -> str:
     return "/".join(parts)
 
 
+LOGGER = logging.getLogger("paulsha_hippo.importer")
+
 UNKNOWN_PROJECT = "_unknown"
 
 EPHEMERAL_ROOTS_ENV = "HIPPO_EPHEMERAL_ROOTS"
@@ -129,6 +132,17 @@ def is_ephemeral_path(path: str | os.PathLike[str] | None) -> bool:
     return any(
         _is_same_or_ancestor(root, form) for root in ephemeral_roots() for form in forms
     )
+
+
+def _ephemeral_unknown(path: str) -> str:
+    LOGGER.debug(
+        "project unresolved（ephemeral root 下無 remote、未登記的 checkout 歸 %s）: %s；"
+        "長期工作目錄請於 projects.yaml 登記 roots，或以 %s 調整暫存根",
+        UNKNOWN_PROJECT,
+        path,
+        EPHEMERAL_ROOTS_ENV,
+    )
+    return UNKNOWN_PROJECT
 
 
 def _main_toplevel(toplevel: str) -> str:
@@ -199,7 +213,7 @@ def resolve_project(
         # `_unknown`（下游 wakeup／shortlist／registry discovery 皆已視為不注入、不落盤），
         # 不以目錄名產生假 project（#117：`checkout` bucket）。
         if is_ephemeral_path(identity_root):
-            return UNKNOWN_PROJECT
+            return _ephemeral_unknown(identity_root)
         name = Path(identity_root).name
         if name:
             try:
@@ -212,6 +226,6 @@ def resolve_project(
 
     if cwd:
         if is_ephemeral_path(cwd):
-            return UNKNOWN_PROJECT
+            return _ephemeral_unknown(cwd)
         return Path(cwd).name or UNKNOWN_PROJECT
     return UNKNOWN_PROJECT

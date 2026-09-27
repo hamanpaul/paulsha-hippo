@@ -227,3 +227,52 @@ def test_without_backfill_overlay_raw_remote_bucket_stays(world, capsys):
     raw = _bucket(report, project_directory_key("github.com/acme/widget"))
     assert raw["move"] == {}
     assert raw["stay"] == 3
+
+
+def test_misplaced_note_with_correct_frontmatter_is_reported_as_relocation(world, capsys):
+    # 審查 #161-1：frontmatter project 已正確、檔案卻仍在舊 bucket（例如搬移中斷）時，
+    # 只比 frontmatter 會把它算成 stay 而漏報；必須同時比對實際所在目錄。
+    raw_bucket = project_directory_key("github.com/acme/widget")
+    _note(world["memory_root"], project="widget", slice_id="sl-mis1", repo="github.com/acme/widget", bucket=raw_bucket)
+    _note(world["memory_root"], project="widget", slice_id="sl-mis2", bucket="checkout")
+
+    report = _report(world, capsys=capsys)
+
+    raw = _bucket(report, raw_bucket)
+    assert (raw["notes"], raw["stay"], raw["move"], raw["relocate"]) == (4, 0, {"widget": 3}, {"widget": 1})
+    checkout = _bucket(report, "checkout")
+    assert (checkout["stay"], checkout["relocate"], checkout["unresolved"]) == (0, {"widget": 1}, {"ephemeral-cwd": 2})
+    assert report["totals"]["relocate"] == 2
+    assert sorted((r["from_bucket"], r["project"], r["to_bucket"], r["notes"]) for r in report["relocations"]) == [
+        ("checkout", "widget", "widget", 1),
+        (raw_bucket, "widget", "widget", 1),
+    ]
+    for relocation in report["relocations"]:
+        # rekey 以 frontmatter project 選取且拒絕 --from == --to，無法處理純目錄錯置
+        assert relocation["rekey_executable"] is False
+        assert relocation["command"] is None
+    assert not [p for p in report["merge_proposals"] if p["from_project"] == "widget"]
+
+
+def test_bucket_counts_partition_every_knowledge_note(world, capsys):
+    _note(world["memory_root"], project="widget", slice_id="sl-mis3", bucket=project_directory_key("github.com/acme/widget"))
+
+    report = _report(world, capsys=capsys)
+
+    for bucket in report["buckets"]:
+        counted = bucket["stay"] + sum(bucket["move"].values()) + sum(bucket["relocate"].values()) + sum(
+            bucket["unresolved"].values()
+        )
+        assert counted == bucket["notes"], bucket["bucket"]
+    totals = report["totals"]
+    assert totals["stay"] + totals["move"] + totals["relocate"] + totals["unresolved"] == totals["notes"]
+
+
+def test_legacy_sanitized_directory_is_accepted_as_correct_location(world, capsys):
+    # atomizer 讀取端同時接受 project_directory_key 與 legacy sanitize_project_component 目錄
+    _note(world["memory_root"], project="github.com/acme/other", slice_id="sl-leg1", bucket="github.com__acme__other")
+
+    report = _report(world, capsys=capsys)
+
+    legacy = _bucket(report, "github.com__acme__other")
+    assert (legacy["stay"], legacy["relocate"]) == (1, {})

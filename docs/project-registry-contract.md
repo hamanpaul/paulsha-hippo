@@ -68,6 +68,7 @@ YAML 子集。producer 只輸出下列結構；consumer 建議寬鬆解析（忽
 - **cortex 讀取端**：`project-cortex.yaml`（curated intent）∪ `project-hippo.yaml`（discovered activity），union 去重＝真正監控集——cortex 側行為不在本 repo 範圍，本文件僅保證檔案契約。
 - Consumer 解析建議：忽略未知欄位；`schema_version` 大於已知版本時 best-effort 讀 v1 欄位。
 - **hippo 解析優先序（#117 補充）**：cwd／顯式 toplevel 的 roots 前綴匹配 → 顯式 payload remote → **linked worktree 歸併為主 repo root 後再比對 roots**（`<repo>-worktrees/<branch>` 與 `.worktrees/<name>` 皆收斂到主 repo 的 slug）→ 現場 git remote 經 `remotes` 對應（未登記回 raw remote）→ 無 remote 時的目錄名 fallback 以**主 repo root** 命名。位於暫存根（預設 `/tmp`、`/var/tmp`、`/dev/shm` 與系統暫存目錄；`HIPPO_EPHEMERAL_ROOTS` 以 `os.pathsep` 分隔覆寫、空字串停用；`/`、HOME 與其祖先一律排除）下、無 remote 且未登記的 checkout 歸 `_unknown`，不以目錄名產生假 project。
+  - **暫存根規則的適用範圍與取捨**：只在「無 remote、且 cwd／主 repo root 未命中任何登記 root」時生效——有 remote 的 clone、已登記 root 的目錄都照常解析；觸發時記 debug log（含路徑與覆寫方式）。採「整個系統暫存目錄」而非沙箱樣式清單：部署環境唯讀盤點 3414 筆封存 session，384 筆 cwd 位於暫存根（全在 `/tmp`），其中 150 筆經 remote 解析（不受影響）、50 筆 empty-skip、184 筆以目錄名成為 project——共 6 個假 project（planning sandbox 的 `checkout` 156、`/tmp` 本身 `tmp` 16、pytest 暫存目錄的 32 位 hex 名 6、smoke 腳本的 `linked` 3、agent scratchpad 的 `scratchpad` 1 組 2、canary 暫存目錄 1），沒有任何長期工作目錄。樣式清單得追著 Cortex／測試工具的內部命名走，每出現一種新沙箱就再生一個假 bucket。暫存目錄下若真有長期工作目錄：於 `projects.yaml` 登記 roots（優先於本規則）、設定 origin remote，或以 `HIPPO_EPHEMERAL_ROOTS` 調整暫存根。
 
 ## 7. 版本演進
 

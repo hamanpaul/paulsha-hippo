@@ -9,6 +9,9 @@ impact report：
   knowledge note 的目標 slug，彙總「哪個 bucket 會併到哪個 slug、各幾筆」。
 - 目標 slug 為 path-safe 短 slug、且該 project 的 note 全數去向一致時，附上既有
   `hippo knowledge rekey`（先 `--dry-run`）的可執行指令；其餘標明不可直接執行的理由。
+- frontmatter `project` 已是目標 slug、檔案卻不在該 slug 的 bucket 目錄（現行
+  `project_directory_key` 或 legacy sanitize 形）者列為 relocation——rekey 以 frontmatter
+  選取，處理不了純目錄錯置。
 - `_unknown` note 依證據分類成因，並估算可回收比例。
 
 本模組不寫任何檔案、不動 ledger／index；只讀 knowledge frontmatter、import ledger 與
@@ -24,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .atomizer.config import is_safe_path_component, project_directory_key
+from .atomizer.config import is_safe_path_component, project_directory_key, sanitize_project_component
 from .importer.config import ProjectsConfig
 from .importer.project_resolver import UNKNOWN_PROJECT, is_ephemeral_path, normalize_remote
 from .moc import frontmatter_io as _fio
@@ -219,6 +222,12 @@ def _evaluate(
     return by_provenance() if prov_remote else unresolved()
 
 
+def _expected_dirs(project: str) -> set[str]:
+    """project 的合法 bucket 目錄名：現行 project_directory_key 與 legacy sanitize 形
+    （atomizer／rekey 讀取端兩者皆接受）。"""
+    return {project_directory_key(project), sanitize_project_component(project)}
+
+
 def _iter_bucket_notes(bucket: Path):
     for path in sorted(bucket.rglob("*.md")):
         if path.name.endswith("-moc.md"):
@@ -261,6 +270,7 @@ def build_bucket_report(
     buckets: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     moves: dict[tuple[str, str], int] = Counter()
+    relocations: dict[tuple[str, str], int] = Counter()
     totals_by_project: Counter[str] = Counter()
     unknown_causes: Counter[str] = Counter()
     unknown_total = 0
@@ -269,6 +279,7 @@ def build_bucket_report(
     for bucket in sorted(path for path in knowledge.iterdir() if path.is_dir()) if knowledge.is_dir() else []:
         projects_seen: Counter[str] = Counter()
         move: Counter[str] = Counter()
+        relocate: Counter[str] = Counter()
         unresolved: Counter[str] = Counter()
         mismatch: Counter[str] = Counter()
         stay = 0
@@ -296,7 +307,13 @@ def build_bucket_report(
             if target is None:
                 unresolved[result["cause"] or CAUSE_NO_REMOTE] += 1
             elif target == project:
-                stay += 1
+                # frontmatter 已是目標 slug，仍須比對實際所在目錄：搬移中斷等情況下檔案
+                # 可能留在舊 bucket，只看 frontmatter 會誤算成 stay（審查 #161-1）。
+                if bucket.name in _expected_dirs(project):
+                    stay += 1
+                else:
+                    relocate[target] += 1
+                    relocations[(bucket.name, target)] += 1
             else:
                 move[target] += 1
                 moves[(project, target)] += 1
@@ -312,6 +329,7 @@ def build_bucket_report(
             "notes": knowledge_notes,
             "stay": stay,
             "move": dict(move.most_common()),
+            "relocate": dict(relocate.most_common()),
             "unresolved": dict(unresolved.most_common()),
             "provenance_mismatch": dict(mismatch.most_common()),
             "non_knowledge": non_knowledge,
@@ -347,6 +365,22 @@ def build_bucket_report(
             }
         )
 
+    relocation_rows = [
+        {
+            "from_bucket": from_bucket,
+            "project": project,
+            "to_bucket": project_directory_key(project),
+            "notes": count,
+            "rekey_executable": False,
+            "command": None,
+            "reason": "frontmatter project 已正確、檔案位於其他 bucket：rekey 以 frontmatter "
+            "project 選取且拒絕 --from 等於 --to，需逐檔搬移（P2）",
+        }
+        for (from_bucket, project), count in sorted(
+            relocations.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
     return {
         "dry_run": True,
         "generated_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
@@ -357,9 +391,11 @@ def build_bucket_report(
             "notes": sum(bucket["notes"] for bucket in buckets),
             "stay": sum(bucket["stay"] for bucket in buckets),
             "move": sum(moves.values()),
+            "relocate": sum(relocations.values()),
             "unresolved": sum(sum(bucket["unresolved"].values()) for bucket in buckets),
         },
         "merge_proposals": proposals,
+        "relocations": relocation_rows,
         "unknown_causes": dict(unknown_causes.most_common()),
         "unknown_cause_notes": {key: UNKNOWN_CAUSE_NOTES[key] for key in unknown_causes},
         "unknown_recoverable": {"notes": unknown_recoverable, "total": unknown_total},
