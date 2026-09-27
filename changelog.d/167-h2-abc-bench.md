@@ -12,3 +12,4 @@ type: feat
   - **runner：** 可續跑，逐次記錄選擇、延遲、`Decimal` 成本與 request／response hash。
   - **計分：** 依 2026-09-27 決策紀錄 v4 算 Precision@3、每題不相關數、task 命中率、正確回 0 則比例、延遲、成本、隱私指標與穩定性，並判定 go／no-go。
 - `docs/h2-offline-baseline.md` 補上第 7 節 benchmark 規則。
+- `docs/h2-offline-baseline.md` 補上第 8 節第一輪結果：hidden 24 題判定 no-go（正確回 0 則 6/7、C 對 B 的 Precision@3 差 11.9pp）。
