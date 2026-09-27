@@ -179,3 +179,61 @@ hidden 24 題、依第 7 節門檻判定，**no-go**。詳細數據與檔案 sha
 - **穩定性：** 抽 8 題重跑，B、C 各 6/8 選擇完全一致。
 
 依決策紀錄 v4：離線 go 之前不開 live shadow 或 randomized H2，也不改 #857 的 production 路徑。
+
+## 9. 第二輪（v4.1，#169）規則
+
+> 依 2026-09-27 決策紀錄 v4.1。v4 的判定維持 no-go；v4.1 是新的假設：C 值不值得取代 A，成為 public-memory pull 的選用相關性篩選。只有這一輪；v4.1 任何門檻未過，Hippo × JEV 相關性篩選就結案。
+
+### 題目與 gold
+
+```bash
+python3 scripts/h2_sample_tasks.py --memory-root <…> --deny-terms <…> --seed <登錄的 seed> \
+  --total 60 --dev 0 --exclude-tasks <第一輪 tasks.json> --quota github.com/hamanpaul/paulsha-hippo=100 --out <batch1.json>
+hippo h2 split --frozen <frozen-candidates.json> --gold <gold.json> --seed <登錄的 seed> --out <split.json>
+```
+
+- **題目：** 全部使用第一輪沒用過的題目（`--exclude-tasks`）。同一個 seed 的排序是確定的；追加一批時，把前面各批也列入 `--exclude-tasks`，再取下一段。
+- **gold 規則**（事先固定）：
+  - 兩位主標註者一致且不是 uncertain → gold；
+  - 其餘交仲裁，三方做 non-U 多數決，uncertain 視為棄權；
+  - 仍然沒有明確多數 → `unresolved`，不納入 gold；
+  - Paul 只做 5% 抽查。
+- **分層：**
+  - empty：top-12 全部不相關；
+  - non-empty：至少一則相關；
+  - indeterminate：其餘，例如含 `unresolved`，不抽進 dev／hidden；
+  - C 送不出去的題目（task 不可送出，或沒有可送出的候選）也不抽：C 在這種題目一定回 0 則，放進 empty 層等於白拿一題。
+- **`hippo h2 split`：**
+  - 依 `sha256(seed|task_id)` 排序，先抽 hidden：empty 20、non-empty 20，同層內非 cortex 的題目優先；
+  - 再從剩下的題目抽 dev 12 題，其中 empty 3 題；
+  - 題數不足就報錯，依決策紀錄判 no-go for now；
+  - hidden 非 cortex 少於 6 題時，輸出 `generalization_scope: cortex-dominant-public-engineering`。
+
+### 執行與計分
+
+```bash
+hippo h2 run --protocol v4.1 --frozen <…> --split-file <split.json> --split dev|hidden --arms A,B,C --out <…> --deny-terms <…> [--stability] [--c-revision rev3]
+hippo h2 score --protocol v4.1 --frozen <…> --gold <…> --split-file <split.json> --split hidden --records <…>
+```
+
+- **C 問法：**
+  - 起始版是 `rev2`：「同 repo／同元件／同功能」本身不足以判 yes，單純的歷史執行紀錄也不算；
+  - 在 dev 上最多修一次，改成 `rev3`，之後凍結。
+- **穩定性：** hidden 依 `h2-v41-20260927` 抽 10 題重跑。
+- **P@3 的分母**只算有 gold 的選擇；選到 `unresolved` 另外計數。v4 的 gold 沒有 `unresolved`，第一輪的分數不變。
+
+**go 條件**（`h2_bench.GO_THRESHOLDS_V41`；產品效用要求，不是依 v4 觀察值推估；全部通過才算 go）：
+
+| 類別 | 門檻 |
+|---|---|
+| 隱私 | 政策違規＝0；可送出涵蓋率 ≥ 80%；被過濾掉的相關候選 ≤ 5% |
+| empty 層 | C 正確回 0 則 ≥ 90%（18/20） |
+| non-empty 層 | C 命中率 ≥ A − 5pp；Precision@3 ≥ 0.80，且 ≥ A ＋ 20pp；每題不相關數 ≤ A 的 50% |
+| 運作（hidden 全體） | C 的 median 延遲 ≤ 1 s；每題成本 ≤ US$0.001 |
+| 穩定性 | C 品質穩定 ≥ 9 題 |
+
+- **品質穩定的定義：**
+  - non-empty 題：重跑的不相關數不增加；原本有命中的，重跑後不得掉成 0 則相關；
+  - empty 題：「回 0 則／有選」的判定不翻轉。
+- **只報告，不列入門檻：** B 的全部指標，以及選擇完全一致的比例。
+- **hidden 若含 indeterminate 題目**，直接判 no-go。
