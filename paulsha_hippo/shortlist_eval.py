@@ -36,7 +36,7 @@ __all__ = [
     "BASELINE_K", "DEFAULT_MAX_K", "DEFAULT_MIN_SCORE", "FETCH_K", "FREEZE_PLACEHOLDER_SESSION",
     "FROZEN_FORMAT", "FROZEN_VERSION", "MAX_K_LIMIT", "REPORT_FORMAT", "REPORT_VERSION",
     "Candidate", "FreezeError", "FrozenQuery", "FrozenSet", "FrozenSetError", "auto_thresholds", "evaluate",
-    "freeze_queries", "load_frozen_set", "render_text", "report", "sweep",
+    "freeze_queries", "load_frozen_set", "render_injection", "render_text", "report", "sweep",
 ]
 
 
@@ -379,6 +379,10 @@ def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, a
     from .retrieval import shortlist_header, shortlist_row, to_fts_query
     from .runtime_flags import load_flags
 
+    if not _nonempty_str(annotator):
+        raise ValueError("annotator must be a non-empty string")
+    if not _nonempty_str(method):
+        raise ValueError("method must be a non-empty string")
     root = Path(memory_root)
     flags = load_flags()
     show_cmd = format_show_command(root, tool, FREEZE_PLACEHOLDER_SESSION)
@@ -396,8 +400,9 @@ def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, a
             raise FreezeError("redaction boundary suppressed the shortlist")
         return redacted
 
-    # 非空注入時提示行後面必接 "\n"（逐行 redaction），故以 header + "\n" 計算再扣回換行。
-    overhead = len(_redact(header + "\n")) - 1 + 1 + len(hint_line)
+    # 非空注入時提示行後面必接 "\n"（逐行 redaction），故以 header + "\n" 計算再去掉換行。
+    block_header = _redact(header + "\n")[:-1]
+    overhead = len(block_header) + 1 + len(hint_line)
 
     out_queries = []
     for index, text in enumerate(queries, start=1):
@@ -419,6 +424,7 @@ def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, a
                     "bm25": round(float(hit.get("score")), 6),
                     "relevant": None,
                     "chars": 1 + len(row),
+                    "row": row,
                     "title": str(hit.get("title") or ""),
                     "path": str(hit.get("path") or ""),
                 })
@@ -430,11 +436,33 @@ def freeze_queries(memory_root: Path, project: str, queries: Sequence[str], *, a
         "name": name,
         "project": project,
         "frozen_at": (now or datetime.now(timezone.utc)).isoformat(),
-        "annotator": annotator,
-        "method": method,
+        "annotator": annotator.strip(),
+        "method": method.strip(),
         "fetch_k": FETCH_K,
         "baseline_k": BASELINE_K,
         "collapse_same_topic": flags.collapse_same_topic,
         "block_overhead_chars": overhead,
+        "block_header": block_header,
+        "applied_hint": hint_line,
         "queries": out_queries,
     }
+
+
+def render_injection(frozen: Mapping[str, Any], query_index: int,
+                     note_ids: Sequence[str] | None = None) -> str:
+    """由 freeze 骨架重建「hook 只注入這幾則」時的注入字串（逐字元與 hook 相同）。
+
+    ``note_ids`` 省略時取前 ``BASELINE_K`` 則（現況 push）；給定時依候選原順序挑出這些
+    note。沒有任何一則時回 ``""``（hook 不注入）。需要 ``freeze`` 產生的 ``block_header``、
+    ``applied_hint`` 與候選的 ``row`` 欄位（已經過與 hook 相同的 redaction）。
+    """
+    candidates = frozen["queries"][query_index]["candidates"]
+    if note_ids is None:
+        chosen = list(candidates[:BASELINE_K])
+    else:
+        wanted = set(note_ids)
+        chosen = [c for c in candidates if c["note_id"] in wanted]
+    if not chosen:
+        return ""
+    return (frozen["block_header"] + "".join("\n" + c["row"] for c in chosen)
+            + "\n" + frozen["applied_hint"])

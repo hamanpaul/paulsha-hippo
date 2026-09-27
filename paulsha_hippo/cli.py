@@ -598,12 +598,17 @@ def _build_parser() -> argparse.ArgumentParser:
     shortlist_freeze_p.add_argument("--project", required=True)
     shortlist_freeze_p.add_argument(
         "--queries-file", required=True, help="純文字，一行一個 query；空行與 # 開頭略過")
-    shortlist_freeze_p.add_argument("--annotator", required=True, help="標註者（寫入凍結集）")
-    shortlist_freeze_p.add_argument("--method", required=True, help="標註方法說明（寫入凍結集）")
+    shortlist_freeze_p.add_argument(
+        "--annotator", required=True, type=_nonblank_arg("--annotator"), help="標註者（寫入凍結集；不可空白）")
+    shortlist_freeze_p.add_argument(
+        "--method", required=True, type=_nonblank_arg("--method"), help="標註方法說明（寫入凍結集；不可空白）")
     shortlist_freeze_p.add_argument("--name", default="frozen-queries")
     shortlist_freeze_p.add_argument(
         "--tool", default="claude-code", type=_tool_arg, help="計算注入字元量時採用的 hook tool")
-    shortlist_freeze_p.add_argument("--out", default=None, help="輸出檔路徑；省略時印到 stdout")
+    shortlist_freeze_p.add_argument(
+        "--out", default=None,
+        help="輸出檔路徑；父目錄不存在時自動建立（比照 replay／upgrade plan），既有檔案會被覆寫；"
+             "寫入失敗時 stderr 回報並 exit 1。省略時印到 stdout")
     shortlist_freeze_p.set_defaults(func=_shortlist_freeze)
 
     show_p = memory_subparsers.add_parser(
@@ -1764,6 +1769,16 @@ def _recall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _nonblank_arg(flag: str):
+    """argparse type：拒絕空字串或全空白（exit 2），回傳去除前後空白的值。"""
+    def _parse(s: str) -> str:
+        value = s.strip()
+        if not value:
+            raise argparse.ArgumentTypeError(f"{flag} must not be blank")
+        return value
+    return _parse
+
+
 def _shortlist_min_score_arg(s: str) -> float:
     try:
         value = float(s)
@@ -1843,7 +1858,14 @@ def _shortlist_freeze(args: argparse.Namespace) -> int:
         return 1
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+        out = Path(args.out)
+        try:
+            # 比照 replay／upgrade plan：父目錄不存在時自動建立。
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"hippo shortlist freeze: error: cannot write --out {out}: {exc}", file=sys.stderr)
+            return 1
     else:
         sys.stdout.write(text)
     return 0

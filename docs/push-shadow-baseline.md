@@ -116,6 +116,7 @@ jq -c 'select(.source == "read" or .kind == "applied")
 | `method` | 條件 | 預設標註方法（標準、流程、是否盲標等）；每個 query 可覆寫，規則同上。 |
 | `block_overhead_chars` | | 非負整數，預設 `0`。注入非空時額外計入的固定字元（提示行＋applied 指引）。 |
 | `queries` | ✔ | 非空陣列。 |
+| `block_header`／`applied_hint` | | `freeze` 產生：注入的提示行（已 redact）與 applied 指引原文；`block_overhead_chars` 即兩者長度加一個換行。 |
 | 其他 | | `description`、`project`、`frozen_at`、`fetch_k`、`baseline_k`、`collapse_same_topic` 等為說明用途，評估時忽略。 |
 
 `queries[]` 欄位：
@@ -137,6 +138,7 @@ jq -c 'select(.source == "read" or .kind == "applied")
 | `bm25` | ✔ | 原始 FTS5 `bm25()`（負值，越負越相關），有限數值。 |
 | `relevant` | ✔ | `true`／`false`。`null`（未標註）會被 `eval` 拒絕。 |
 | `chars` | ✔ | 非負整數：這一則在注入中佔的字元數（該列＋換行）。 |
+| `row` | | `freeze` 產生：這一則注入時的列文字（已 redact，不含前導換行）；`chars` = 1 + 它的長度。標註時可直接看到 agent 實際看到的內容。 |
 | `title`／`path` | | 標註時參考用，評估時忽略。 |
 
 ## 3. `hippo shortlist eval`
@@ -186,6 +188,9 @@ hippo shortlist freeze --memory-root <memory_root> --project <slug> \
 - 輸出 `relevant: null` 的待標註骨架；`chars` 與 `block_overhead_chars` 依 hook 的實際排版與同一個 redaction boundary 計算，並以結構化方式對齊各列（標題含換行、整列被 redaction 替換時仍精確；以固定佔位 session id 計，實際 session id 長度不同時只差常數）。
 - 不模擬 session 狀態：session 內去重（已 offer 過的不再 offer）與早停不在凍結樣本內，樣本代表的是「該 prompt 是 session 第一次注入」的情況。
 - 會讀 runtime config（`read_hint`、`collapse_same_topic`），請在與 hook 相同的 config 下執行；`eval` 則完全不讀 config。
+- 輸出可逐位元重建 hook 的注入字串：`paulsha_hippo.shortlist_eval.render_injection(骨架, query 序號[, note_ids])` 以 `block_header`＋各則 `row`＋`applied_hint` 組回注入內容；測試以它與 hook 實際注入逐位元比對。
+- `--annotator`／`--method` 不可空白（exit 2，不產檔），寫入前會去除前後空白。
+- `--out` 的父目錄不存在時自動建立（比照 `hippo replay`／`hippo upgrade plan`），既有檔案會被覆寫——已標註的凍結集請另存，不要拿來當 `--out`；寫入失敗時 stderr 回報、exit 1。
 - 骨架含真實 query 與 note 標題／路徑：請輸出到私有位置，不要放進任何 repo。
 
 ### 5.1 第一版真實樣本的建議做法
