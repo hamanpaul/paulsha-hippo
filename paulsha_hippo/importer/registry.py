@@ -324,6 +324,23 @@ def record_discovery(
     return record_discoveries((incoming,), registry_path=registry_path).changed
 
 
+def _unique_backup_path(base: Path) -> Path:
+    """回傳不會覆寫既有備份的路徑；必須在 registry lock 內呼叫。
+
+    呼叫端的 backup_path 以秒級 timestamp 命名，同一秒內兩次成功寫入會拿到同一個名字；
+    若直接覆寫，第一次回報的 restore 會指向錯誤版本（審查 #161 第三輪）。同一 registry 的
+    writer 由同一把 lock 序列化，因此在 lock 內檢查存在與否不會競態。
+    """
+    if not base.exists() and not base.is_symlink():
+        return base
+    index = 1
+    while True:
+        candidate = base.with_name(f"{base.name}.{index}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        index += 1
+
+
 def record_discoveries(
     entries: Sequence[ProjectConfig],
     *,
@@ -385,7 +402,7 @@ def record_discoveries(
                 return RegistryWriteOutcome(WRITE_UNCHANGED)
             written_backup: Path | None = None
             if backup_path is not None and existing_bytes is not None:
-                written_backup = Path(backup_path)
+                written_backup = _unique_backup_path(Path(backup_path))
                 written_backup.parent.mkdir(parents=True, exist_ok=True)
                 backup_tmp = written_backup.with_name(f".{written_backup.name}.tmp")
                 backup_tmp.write_bytes(existing_bytes)

@@ -384,3 +384,34 @@ def test_apply_with_nothing_to_add_reports_status(env, capsys):
     assert code == 0
     assert report["write_status"] == "nothing-to-add"
     assert report["changed"] is False
+
+
+def test_same_second_backups_never_overwrite_each_other(tmp_path):
+    """同一秒（同一 backup_path）兩次成功寫入：第二次不得覆寫第一次的備份（審查 #161 第三輪）。"""
+    from paulsha_hippo.importer.registry import record_discoveries
+
+    registry = tmp_path / "project-hippo.yaml"
+    registry.write_text(
+        render_registry((ProjectConfig(slug="widget", roots=("/r/widget",)),)),
+        encoding="utf-8",
+    )
+    v0 = registry.read_bytes()
+    backup = tmp_path / "project-hippo.yaml.bak-117-20260101T000000Z"
+
+    first = record_discoveries(
+        [ProjectConfig(slug="widget", roots=("/r/widget",), remotes=("github.com/acme/widget",))],
+        registry_path=registry,
+        backup_path=backup,
+    )
+    v1 = registry.read_bytes()
+    second = record_discoveries(
+        [ProjectConfig(slug="gadget", roots=("/r/gadget",), remotes=("github.com/acme/gadget",))],
+        registry_path=registry,
+        backup_path=backup,
+    )
+
+    assert first.status == second.status == "written"
+    assert first.backup is not None and second.backup is not None
+    assert first.backup != second.backup
+    assert first.backup.read_bytes() == v0
+    assert second.backup.read_bytes() == v1
