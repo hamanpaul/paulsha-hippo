@@ -1,0 +1,12 @@
+---
+type: feat
+---
+- #176（決策紀錄 v5 Q1）task-memory R75 重排序 shadow，feature flag `HIPPO_TASK_MEMORY_RERANK`，預設 off。
+  - **off：** 行為完全不變，零 TypeSafe 呼叫。
+  - **shadow：** 只對 public paulsha-cortex 生效。
+    - 正式輸出仍是 `moc.search(limit=3)`，manifest 與 hash 不變；
+    - 另外做一次 `moc.search(limit=12)`，經送出前過濾後以 R75-slot-v1 重排，寫 `runtime/experiments/task-memory-rerank-shadow.jsonl` receipt，不存內容與原始 intent；
+    - 缺私有字詞清單或 key 時回退，不送出；
+    - 任何失敗都不影響正式輸出；
+    - CLI 先寫出正式 JSON，再以脫離的背景行程跑 shadow，不吃掉 Cortex 的 subprocess timeout。
+- `docs/task-memory-provider.md` 補上 shadow 設定與 receipt 欄位。
