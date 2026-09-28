@@ -927,7 +927,7 @@ def _task_memory_protocol(args: argparse.Namespace) -> int:
         # Legacy path resolution can emit a deprecation notice directly to
         # stderr. Protocol callers must receive only the bounded error code.
         with redirect_stderr(io.StringIO()):
-            provider = TaskMemoryProvider(memory_root=args.memory_root or paths.memory_root())
+            provider = TaskMemoryProvider(memory_root=args.memory_root or paths.memory_root(), defer_shadow=True)
             with deadline(args.timeout_seconds):
                 request = parse_protocol_json(read_stdin_bounded(sys.stdin))
                 if args.task_memory_command == "provide":
@@ -938,6 +938,15 @@ def _task_memory_protocol(args: argparse.Namespace) -> int:
                     raise TaskMemoryProviderError("invalid-request")
                 encoded = serialize_protocol_json(response)
         _write_task_memory_stdout(sys.stdout, encoded)
+        if provider.pending_shadow is not None:
+            # #176：正式輸出寫出之後才起背景 shadow；任何失敗都不影響 exit code
+            try:
+                sys.stdout.flush()
+                from .task_memory_rerank import spawn_detached
+
+                spawn_detached(provider.memory_root, provider.pending_shadow)
+            except Exception:  # noqa: BLE001
+                pass
         return 0
     except TaskMemoryProviderError as exc:
         sys.stderr.write(f"hippo-task-memory: {exc.code}\n")

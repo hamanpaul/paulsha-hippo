@@ -66,3 +66,33 @@ fetch 重新核對來源授權、registry project、task/project、manifest cano
 2. 將 exit `10` 映射成 `PermissionError`、exit `11` 映射成 `TimeoutError`；其餘非零退出維持 provider error，並保留 bounded code 供 diagnostic 對應 `scope-mismatch`、`unsupported-schema` 等 contract failure。
 3. 建立 per-task `fetch_note(task_id, note_id)` closure，捕捉原 request 與已驗證 provider payload 的 manifest；核對 task ID 後將 `{envelope, manifest, note_id}` 傳給 `hippo task-memory fetch`。成功時解析 stdout 的 `content`，回傳字串給 Cortex callback；Hippo 與 Cortex 都驗 content hash。
 4. Cortex 負責自己的 receipt/sidecar。Hippo provider 不回寫 task KPI，也不改 legacy usage ledger。
+
+## R75 重排序 shadow（#176，決策紀錄 v5 Q1；預設關閉）
+
+> 只是量測用的 shadow：**正式輸出永遠是現行 A（`moc.search(limit=3)`）**，manifest 與 hash 和關閉時完全一致。真正打開 shadow（會把 live 的 public cortex 記憶送 TypeSafe）需要 Paul 明確核准。
+
+| 環境變數 | 說明 |
+|---|---|
+| `HIPPO_TASK_MEMORY_RERANK` | `off`（預設）或 `shadow`。off 時不做任何事、零外部呼叫 |
+| `HIPPO_TASK_MEMORY_RERANK_DENY_TERMS` | 私有字詞清單檔路徑（一行一個）。缺少或空白時回退，不送出 |
+| `TYPESAFE_API_KEY` | TypeSafe key，只從 environment 讀取。缺少時回退，不送出 |
+
+**shadow 流程：** 只對 `github.com/hamanpaul/paulsha-cortex` 生效。
+1. 正式 payload 產生並驗證之後，另外做一次 `moc.search(limit=12)`。
+2. 每則候選取標題＋內文前 800 字元，用內建規則＋私有字詞清單過濾；task intent 也要過濾。
+3. 以 R75-slot-v1（`h2_bench.rerank_r75`）重排：可送出的候選各送一個單題 Noul，12 路並行、逾時 5 s、不重試；不可送出的候選位置不動；任何錯誤都整題回退。
+4. 寫一筆 receipt 到 `<memory_root>/runtime/experiments/task-memory-rerank-shadow.jsonl`。
+
+**receipt**（schema `hippo/task-memory-rerank-shadow/v1`；不存記憶內容與原始 intent）：
+- `moc_search_revision`：Hippo 版本與索引檔的 size／mtime；
+- `query_sha256`、`production_manifest_sha256`；
+- `production_a_top3` 與 `shadow_r75_top3`（note ID）；
+- `candidates`：top-12 的 note ID、content digest、egress 與原因、noul；
+- `fallback`、`wall_ms`、`cost_usd`、`jev_model`，以及私有字詞清單的筆數與 sha256。
+
+shadow 的任何失敗都只記在 receipt，不影響正式輸出，也不改變錯誤碼。
+
+**CLI 不同步跑 shadow：** `hippo task-memory provide` 會先寫出並 flush 正式 JSON，再把最小 job（只含 task ID、project、intent、正式 top-3 的 note ID 與 manifest hash，不含記憶內容）寫進 `<memory_root>/runtime/experiments/task-memory-rerank-pending/` 的私有暫存檔（0600），以 `start_new_session` 起一個脫離的背景行程（`python -m paulsha_hippo.task_memory_rerank --job <檔>`）計算並寫 receipt；背景行程讀完即刪除 job 檔。Hippo 主行程照常結束，不經 pipe 傳資料。
+- 這樣 shadow 不會吃掉 provider 的 deadline 或 Cortex 的 subprocess timeout（兩者預設都是 10 s），正式 pull 的延遲幾乎不變；shadow 本身花的時間記在 receipt 的 `wall_ms`。
+- 背景行程啟動失敗也不影響 exit code。
+- 直接以函式庫呼叫 `TaskMemoryProvider.provide()`（`defer_shadow=False`）時，shadow 會在回傳前同步執行。

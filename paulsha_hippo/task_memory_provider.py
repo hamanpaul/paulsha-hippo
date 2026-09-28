@@ -76,14 +76,24 @@ class TaskMemoryProvider:
         memory_root: str | Path | None = None,
         projects: ProjectsConfig | None = None,
         search_fn: Callable[..., list[dict[str, Any]]] | None = None,
+        environ: Mapping[str, str] | None = None,
+        rerank_jev_factory: Callable[..., Any] | None = None,
+        defer_shadow: bool = False,
     ) -> None:
         self.memory_root = Path(memory_root).expanduser() if memory_root is not None else paths.memory_root()
         self.projects = projects
         self.search_fn = search_fn or moc_search
+        # #176：R75 重排序 shadow 的 feature flag 與注入點（預設 off，不影響正式輸出）
+        self.environ = environ
+        self.rerank_jev_factory = rerank_jev_factory
+        # CLI 設 defer_shadow=True：正式輸出寫出後才由脫離的背景行程跑 shadow，不增加 pull 延遲
+        self.defer_shadow = defer_shadow
+        self.pending_shadow: dict[str, Any] | None = None
 
     def provide(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
         """接收 Cortex request envelope，輸出有 hash manifest 的 provider payload。"""
 
+        self.pending_shadow = None
         request = _validate_envelope(envelope)
         project_slug = self._resolve_project(request["project"])
         try:
@@ -188,9 +198,33 @@ class TaskMemoryProvider:
         payload["project"] = request["project"]
         payload["delivery"]["manifest"] = manifest
         try:
-            return validate_task_memory_payload(payload)
+            validated = validate_task_memory_payload(payload)
         except (TypeError, ValueError):
             raise TaskMemoryProviderError("provider-error") from None
+        self._rerank_shadow(request, project_slug, validated)
+        return validated
+
+    def _rerank_shadow(self, request: Mapping[str, Any], project_slug: str, payload: Mapping[str, Any]) -> None:
+        """#176：flag 為 shadow 時計算 R75 並寫 receipt；任何失敗都不影響已產生的正式輸出。"""
+        env = os.environ if self.environ is None else self.environ
+        if env.get("HIPPO_TASK_MEMORY_RERANK", "").strip().lower() != "shadow":
+            return  # 預設 off：不 import、不做任何事
+        from . import task_memory_rerank
+
+        if self.defer_shadow:
+            self.pending_shadow = task_memory_rerank.deferred_job(request, project_slug, payload)
+            return
+        try:
+            receipt = task_memory_rerank.shadow(
+                memory_root=self.memory_root, request=request, project_slug=project_slug,
+                production_payload=payload, search_fn=self.search_fn, read_note=_read_note,
+                environ=self.environ, jev_factory=self.rerank_jev_factory)
+            if receipt is not None:
+                task_memory_rerank.append_receipt(self.memory_root, receipt)
+        except _DeadlineExpired:
+            raise
+        except Exception:  # noqa: BLE001 - shadow 不得影響正式輸出
+            return
 
     def fetch(self, wrapper: Mapping[str, Any]) -> dict[str, str]:
         """依原 request、provider manifest 與 note id 回傳 redacted content。"""
