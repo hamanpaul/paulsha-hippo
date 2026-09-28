@@ -268,3 +268,44 @@ hidden 40 題依第 9 節門檻判定，**no-go**。依決策紀錄 v4.1，**Hip
   - C 穩定地比 BM25 精準、便宜，也夠快；
   - 但精準度沒有達到產品門檻，「沒有相關記憶時回 0 則」也不夠可靠；
   - B（Claude 篩選）在這一輪同樣沒有達到 0.80 的精準度，表示題目本身難度偏高，但這不改變 C 的判定。
+
+## 11. v5：連續分數重排序（#173）
+
+> 依 2026-09-28 決策紀錄 v5（Paul 採納）。v4／v4.1 的 Choice 篩選與「JEV 決定回 0 則」維持 no-go。v5 是另外立案的新假設：JEV 的連續分數能不能把 BM25 top-12 排得更好，並固定回 top-3。
+
+### 正式候選：R75-slot-v1（`h2_bench.rerank_r75`）
+
+1. **打分數：** BM25 top-12 中，只對可送出的候選各送一個單題 Noul request（`jev-1.13.0`），保存 P(true)。
+2. **排出 pseudo-rank：** 可送出的候選依 P(true) 由高到低排序，排第 j 的取得 pseudo-rank＝第 j 個可送出候選原本的 BM25 名次。
+3. **融合：** `fused = 0.75·score(pseudo-rank) + 0.25·score(BM25 名次)`，其中 `score(r)=(12−r)/11`。
+4. **重排：** 只在可送出候選原本佔的位置之間依 fused 重排。**不可送出的候選位置完全不動**；同分時 BM25 名次優先。
+5. **固定回 top-3，不做回 0 則。**
+6. **執行：** 12 路並行；每題只呼叫一次、不重試，逾時 5 s。
+7. **整題回退 A（BM25 top-3）：** task 不可送出、可送出的候選 ≤ 1 則、送出前掃描命中，或任何一題錯誤／逾時。
+
+### L 對照組（`h2_bench.CodexRanker`）
+
+- **怎麼跑：** Codex `gpt-6-luna`（reasoning effort max）看全部 12 則候選，依與 R75 相同的判準由最相關排到最不相關，取前 3。
+- **執行環境：** `codex exec`，read-only sandbox、ephemeral，關閉 plugins／memories／goals／hooks／shell_tool，stdin 導 /dev/null。
+- **角色：** 只作對照報告，不影響判定。
+
+### Q0 流程
+
+```bash
+python3 scripts/h2_sample_tasks.py … --seed h2-v5-20260928 --total 90 --dev 0 --exclude-tasks <先前各輪 tasks.json …> \
+  --quota github.com/hamanpaul/paulsha-hippo=0 --quota github.com/hamanpaul/paulsha-patchmud=0 \
+  --quota github.com/hamanpaul/paulsha-conventions=0 --quota github.com/hamanpaul/serialwrap=0 --out <batch.json>
+hippo h2 split --protocol v5 --n 60 --frozen <…> --gold <…> --out <split.json>
+hippo h2 run --protocol v5 --split qualification --arms A,R,L --frozen <…> --split-file <split.json> --out <…> --deny-terms <…>
+hippo h2 score --protocol v5 --split qualification --frozen <…> --gold <…> --split-file <split.json> --records <…>
+```
+
+- **題目：** 依凍結集的題目順序，取前 60 題 non-empty。non-empty 以完整 top-12 gold 判定，包含不可送出的候選。最多掃 130 題，不足 60 題就判 underpowered。
+- **gold：** 主標註者為 Codex `gpt-6-sol`、`gpt-6-astra`，仲裁 `gpt-5.6-terra`，不使用 Claude；其餘規則同第 9 節。
+- **門檻**（`GO_THRESHOLDS_V5`；配對 task bootstrap，10,000 次，seed `h2-v5-q0-bootstrap`）：
+  - ΔNDCG@3（R75−A）點估計 ≥ ＋0.10，且 95% CI 下界 > 0；
+  - Recall@3：CI 下界 ≥ −0.05；
+  - P@3：點估計 ≥ 0，且 CI 下界 ≥ −0.05。
+- **延遲：** R75 送出的題目，pull 新增 wall 的 p90 ≤ 4 s 才能進 Q1；品質通過但延遲未過時，判定為 `quality-qualified/runtime-not-qualified`。
+- **必報：** 掃描題目的 empty 比例、每次 pull 的相關 slot 數、L 對 A 與 R75 對 L 的差值、L 的延遲。
+- **範圍：** Q0 只證明排序更符合凍結的相關性標準（offline public paulsha-cortex、以 BM25 top-12 為前提），不代表產品有價值。產品價值要到 Q2 的 live 隨機對照才能判定。

@@ -336,3 +336,139 @@ def test_cli_split_and_score_v41(tmp_path, capsys):
     assert out["decision"]["protocol"] == "v4.1" and out["summary"]["strata"]["empty"] == 20
     # A 與 C 選得一樣：P@3 沒有比 A 高 20pp；兩者都沒有不相關，「≤ A 的 50%」依字面成立；沒有重跑紀錄。
     assert out["decision"]["reasons"] == ["未過：nonempty_precision_vs_a", "未過：quality_stable"]
+
+
+# ---------------------------------------------------------------- v5
+
+class NoulTransport:
+    """依候選標題回固定 noul；可指定某些標題失敗。"""
+
+    def __init__(self, scores, fail=(), status=200):
+        self.scores, self.fail, self.status, self.calls = scores, set(fail), status, []
+
+    def __call__(self, url, headers, payload, timeout=None):
+        title = payload["state"]["candidate_passage"]["title"]
+        self.calls.append((title, timeout))
+        if title in self.fail:
+            return 500, {"error": "boom"}, {}
+        return self.status, {"answers": {"relevant": {"type": "noul", "noul": self.scores[title]}},
+                             "usage": {"input_tokens": 1000}}, {}
+
+
+def _noul_jev(transport):
+    return B.JevClient(transport=transport, environ={"TYPESAFE_API_KEY": "k"}, max_attempts=1, timeout=5.0)
+
+
+def test_slot_order_keeps_private_slots_fixed():
+    task = _task("t1", n=6, excluded=(2, 5))
+    noul = {"c1": 0.1, "c3": 0.2, "c4": 0.9, "c6": 0.8}
+    order = B.slot_order(task, noul)
+    assert order[1] == "c2" and order[4] == "c5"          # 不可送出的候選不動
+    assert set(order) == {f"c{i}" for i in range(1, 7)}
+    assert order[0] == "c4"                                # noul 最高者移到可送出的第一個 slot
+
+
+def test_rerank_r75_reorders_and_passes_timeout(tmp_path):
+    task = _task("t1", n=5)
+    scores = {"note 1": 0.05, "note 2": 0.1, "note 3": 0.2, "note 4": 0.95, "note 5": 0.9}
+    transport = NoulTransport(scores)
+    top, details, wall, cost = B.rerank_r75(task, _noul_jev(transport), ("acme",))
+    assert details["fallback"] is None and top[0] == "c4" and len(top) == 3
+    assert all(timeout == 5.0 for _t, timeout in transport.calls) and len(transport.calls) == 5
+    assert cost == Decimal(5000) * Decimal("0.042") / Decimal(1_000_000)
+    B.run(_frozen(task), ["t1"], ["R"], tmp_path / "r.jsonl", jev=_noul_jev(NoulTransport(scores)), deny_terms=("acme",))
+    rec = B._load_records(tmp_path / "r.jsonl")[0]
+    assert rec["egress"] == "sent" and rec["selected"] == top and rec["model"] == "jev-1.13.0/noul"
+
+
+@pytest.mark.parametrize("case,expect", [("task", "task-not-eligible"), ("few", "too-few-eligible"),
+                                         ("deny", "blocked"), ("error", "error:transport")])
+def test_rerank_r75_falls_back_to_bm25(case, expect):
+    task = _task("t1", n=5, egress_task="excluded" if case == "task" else "eligible",
+                 excluded=(1, 2, 3, 4) if case == "few" else ())
+    if case == "deny":
+        task["candidates"][2]["body_view"] = "see ACME notes"
+    scores = {f"note {i}": 0.9 for i in range(1, 6)}
+    transport = NoulTransport(scores, fail={"note 3"} if case == "error" else ())
+    top, details, _wall, _cost = B.rerank_r75(task, _noul_jev(transport), ("acme",))
+    assert details["fallback"] == expect and top == ["c1", "c2", "c3"]
+    if case in ("task", "few", "deny"):
+        assert transport.calls == []
+
+
+def _codex_stdout(text):
+    return "\n".join([json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}),
+                      json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10}})])
+
+
+def test_codex_ranker_parses_ranking_and_uses_safe_flags(tmp_path):
+    task = _task("t1", n=4)
+    seen = {}
+
+    def runner(argv, cwd, timeout):
+        seen["argv"] = argv
+        return _codex_stdout('{"ranking": ["c3", "c1", "c4", "c2"]}')
+
+    ranker = B.CodexRanker(runner=runner)
+    top, ranking, _wall, usage, req, resp = ranker.rank(task)
+    assert top == ["c3", "c1", "c4"] and ranking[-1] == "c2" and usage == {"input_tokens": 10}
+    argv = seen["argv"]
+    assert argv[argv.index("-m") + 1] == "gpt-6-luna" and "model_reasoning_effort=max" in argv
+    assert "read-only" in argv and "--ephemeral" in argv and argv.count("--disable") == 5
+    with pytest.raises(B.BenchError):
+        B.parse_l_reply('{"ranking": ["c1", "c1", "c2", "c3"]}', ["c1", "c2", "c3", "c4"])
+    B.run(_frozen(task), ["t1"], ["L"], tmp_path / "l.jsonl", ranker=ranker)
+    assert B._load_records(tmp_path / "l.jsonl")[0]["model"] == "gpt-6-luna@max"
+
+
+def test_qualification_ids_take_first_n_nonempty_in_frozen_order():
+    frozen = _frozen(_task("t1"), _task("t2"), _task("t3"), _task("t4"))
+    gold = _gold(frozen, {("t1", 1), ("t3", 2), ("t4", 5)})
+    split = B.qualification_ids(frozen, gold, n=2)
+    assert split["qualification"] == ["t1", "t3"] and not split["underpowered"]
+    assert split["counts"] == {"scanned": 4, "empty": 1, "non-empty": 3, "indeterminate": 0}
+    assert B.qualification_ids(frozen, gold, n=5)["underpowered"]
+
+
+def test_score_v5_hand_computed_and_decide():
+    frozen = _frozen(_task("t1"), _task("t2"))
+    gold = _gold(frozen, {("t1", 4), ("t2", 5), ("t2", 1)})
+    split = {"qualification": ["t1", "t2"], "underpowered": False,
+             "counts": {"scanned": 3, "empty": 1, "non-empty": 2, "indeterminate": 0}}
+    records = [_rec("A", "t1", ["c1", "c2", "c3"]), _rec("A", "t2", ["c1", "c2", "c3"]),
+               _rec("R", "t1", ["c4", "c1", "c2"], 2000, "0.0007", "sent"),
+               _rec("R", "t2", ["c5", "c1", "c2"], 3000, "0.0007", "sent"),
+               _rec("L", "t1", ["c4", "c2", "c3"], 60000), _rec("L", "t2", ["c1", "c2", "c3"], 50000)]
+    thresholds = {**B.GO_THRESHOLDS_V5, "nonempty_n": 2, "bootstrap": 200}
+    summary = B.score_v5(frozen, gold, split, records, thresholds)
+    assert summary["means"]["A"]["ndcg3"] == round((0 + 1 / (1 + 1 / __import__("math").log2(3))) / 2, 4)
+    assert summary["means"]["R"]["ndcg3"] == 1.0 and summary["means"]["R"]["recall3"] == 1.0
+    assert summary["runtime"]["r_wall_ms"]["p90"] == 3000 and summary["all_tasks"]["empty_rate"] == round(1 / 3, 4)
+    decision = B.decide_v5(summary)
+    assert decision["quality"] == "pass" and decision["runtime"] == "pass" and decision["decision"] == "go-to-Q1"
+    slow = [dict(r, wall_ms=9000) if r["arm"] == "R" else r for r in records]
+    assert B.decide_v5(B.score_v5(frozen, gold, split, slow, thresholds))["decision"] == \
+        "quality-qualified/runtime-not-qualified"
+    short = dict(split, underpowered=True)
+    assert B.decide_v5(B.score_v5(frozen, gold, short, records, thresholds))["decision"] == "no-go"
+
+
+def test_cli_split_and_score_v5(tmp_path, capsys):
+    tasks = [_task(f"t{i}") for i in range(4)]
+    frozen = _frozen(*tasks)
+    (tmp_path / "f.json").write_text(json.dumps(frozen))
+    gold = {"pairs": {k: {"gold": v} for k, v in _gold(frozen, {("t0", 2), ("t2", 3)}).items()}}
+    (tmp_path / "g.json").write_text(json.dumps(gold))
+    assert cli.main(["h2", "split", "--protocol", "v5", "--n", "2", "--frozen", str(tmp_path / "f.json"),
+                     "--gold", str(tmp_path / "g.json"), "--out", str(tmp_path / "s.json")]) == 0
+    split = json.loads((tmp_path / "s.json").read_text())
+    assert split["qualification"] == ["t0", "t2"]
+    recs = [_rec(a, t, ["c2", "c3", "c1"] if a == "R" else ["c1", "c2", "c3"], 2000, "0", "sent")
+            for a in "AR" for t in split["qualification"]]
+    (tmp_path / "r.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    capsys.readouterr()
+    assert cli.main(["h2", "score", "--protocol", "v5", "--frozen", str(tmp_path / "f.json"), "--gold",
+                     str(tmp_path / "g.json"), "--split-file", str(tmp_path / "s.json"), "--split", "qualification",
+                     "--records", str(tmp_path / "r.jsonl")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["decision"]["protocol"] == "v5" and "R-A" in out["summary"]["deltas"]
