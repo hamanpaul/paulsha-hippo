@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- #169 C 問法 `rev3`（v4.1 dev 唯一一次修訂）：把本題要改的程式碼或流程的規格、契約、測試預期明寫進 yes。
 - #169（#148 H2 C 組第二輪，v4.1）：`hippo h2 split` 分層抽 dev／hidden；`h2 run`／`h2 score` 的 `--protocol v4.1`（C 問法 rev2、B 只報告、品質穩定門檻）；抽樣腳本可排除先前各輪題目並分批追加。
 - #167（#148 H2 C 組）`hippo h2 run`／`hippo h2 score`：在凍結候選集上跑 A／B／C 離線 benchmark。
   - A：BM25 top-3；B：Claude 篩 0–3 則；C：JEV 逐則 yes／no，依 BM25 名次取前 3。
