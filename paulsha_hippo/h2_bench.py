@@ -14,6 +14,10 @@ B 與 C 看同一份候選：只含通過送出前掃描（``egress == eligible`
 計分依 v4：Precision@3、每題不相關數、task 命中率、正確回 0 則比例為主，另報注入字元量、
 延遲、成本、可送出涵蓋率與被過濾掉的相關候選比例；go 條件見 ``GO_THRESHOLDS``。
 
+v5（2026-09-28 決策紀錄 v5，#173）改測連續分數重排序：R75-slot-v1（``rerank_r75``）以單題 Noul 取得
+P(true)，只在可送出候選原本的位置之間重排、固定回 top-3；L 對照組為 Codex ``gpt-6-luna``@max 對 12 則
+排序取前 3（``CodexRanker``）。計分見 ``score_v5``／``decide_v5``。
+
 v4.1（第二輪，2026-09-27 決策紀錄 v4.1）改問「C 值不值得取代 A」：gold 完成後把題目分成
 empty（top-12 全部不相關）與 non-empty 兩層，依事先登錄的 seed 分層抽出 dev／hidden
 （``stratified_split``）；B 只作參考；門檻見 ``GO_THRESHOLDS_V41``，由 ``score_v41``／``decide_v41`` 計算。
@@ -27,6 +31,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -54,6 +59,11 @@ __all__ = [
     "build_c_request",
     "decide",
     "decide_v41",
+    "decide_v5",
+    "CodexRanker",
+    "rerank_r75",
+    "qualification_ids",
+    "score_v5",
     "load_gold",
     "parse_b_reply",
     "run",
@@ -245,10 +255,11 @@ class JevClient:
 
     def __init__(self, *, transport: Callable | None = None, environ: dict | None = None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 max_attempts: int = 4) -> None:
+                 max_attempts: int = 4, timeout: float | None = None) -> None:
         self._transport = transport or _urllib_transport
         self._environ = os.environ if environ is None else environ
         self._clock, self._sleep, self._max = clock, sleep, max(1, max_attempts)
+        self._timeout = timeout
         self.model = JEV_MODEL
 
     def judge(self, request: dict) -> tuple:
@@ -260,7 +271,10 @@ class JevClient:
         started, attempt = self._clock(), 0
         while True:
             attempt += 1
-            status, body, reply_headers = self._transport(JEV_ENDPOINT, headers, payload)
+            if self._timeout is None:
+                status, body, reply_headers = self._transport(JEV_ENDPOINT, headers, payload)
+            else:
+                status, body, reply_headers = self._transport(JEV_ENDPOINT, headers, payload, timeout=self._timeout)
             if status == 200:
                 break
             if status not in _RETRYABLE or attempt >= self._max:
@@ -370,7 +384,7 @@ def _load_records(path: Path) -> list:
 def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, jev: JevClient | None = None,
         claude: ClaudeFilter | None = None, deny_terms: Iterable[str] = (), repeat: int = 0,
         c_revision: str = "rev1", now: Callable[[], str] | None = None,
-        progress: Callable[[dict], None] | None = None) -> dict:
+        progress: Callable[[dict], None] | None = None, ranker: "CodexRanker | None" = None) -> dict:
     """對 ``task_ids`` 執行各組並逐筆 append；已有成功紀錄的 (arm, task, repeat) 跳過。"""
     now = now or (lambda: dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     out_path = Path(out_path)
@@ -421,6 +435,19 @@ def run(frozen: dict, task_ids: list, arms: Iterable[str], out_path: Path, *, je
                                           wall_ms=wall, egress="sent",
                                           cost_usd=None if usd is None else str(usd), model=str(body.get("model")),
                                           request_sha256=_sha256(request), response_sha256=_sha256(body))
+                elif arm == "R":
+                    if jev is None:
+                        raise BenchError("config", "R 組需要 JevClient")
+                    sel, details, wall, cost = rerank_r75(task, jev, deny_terms)
+                    record.update(selected=sel, details=details, wall_ms=wall, cost_usd=str(cost),
+                                  model=f"{JEV_MODEL}/noul", egress="sent" if details["fallback"] is None
+                                  else f"fallback:{details['fallback']}")
+                elif arm == "L":
+                    if ranker is None:
+                        raise BenchError("config", "L 組需要 CodexRanker")
+                    sel, ranking, wall, usage, req_sha, resp_sha = ranker.rank(task)
+                    record.update(selected=sel, details={"ranking": ranking, "usage": usage}, wall_ms=wall,
+                                  cost_usd=None, model=ranker.label, request_sha256=req_sha, response_sha256=resp_sha)
                 else:
                     raise BenchError("config", f"未知 arm：{arm}")
             except BenchError as exc:
@@ -693,3 +720,299 @@ def decide_v41(summary: dict, thresholds: dict | None = None) -> dict:
     reasons += [f"未過：{name}" for name, ok in gates.items() if not ok]
     return {"protocol": "v4.1", "decision": "go" if not reasons else "no-go", "gates": gates,
             "reasons": reasons, "thresholds": t}
+
+
+# ---------------------------------------------------------------- v5：R75-slot-v1 與 L 對照組
+
+R75_W = 0.75
+R75_SLOTS = 12
+NOUL_TIMEOUT_S = 5.0
+NOUL_CONCURRENCY = 12
+NOUL_INSTRUCTIONS = (
+    "The query excerpt is a GitHub issue that an engineer is about to work on. The candidate passage is a note from "
+    "the team's engineering memory. Would the engineer reasonably rely on this note while working on the issue?")
+NOUL_CRITERIA = {
+    "true": "The candidate passage contains a specific rule, constraint, fact, prior decision, known failure, or "
+            "validated result that this task would reasonably rely on to choose, avoid, verify, or constrain an action.",
+    "false": "The candidate passage only shares the repository or topic, is general background, is execution history "
+             "without an actionable implication for this task, concerns another task, or contains no specific claim "
+             "this task would rely on.",
+}
+GO_THRESHOLDS_V5 = {
+    "nonempty_n": 60,
+    "ndcg_gain_min": 0.10,
+    "ndcg_ci_low_min": 0.0,
+    "recall_ci_low_min": -0.05,
+    "precision_point_min": 0.0,
+    "precision_ci_low_min": -0.05,
+    "runtime_p90_ms_max": 4000,
+    "bootstrap": 10000,
+    "bootstrap_seed": "h2-v5-q0-bootstrap",
+}
+
+
+def build_noul_request(task: dict, cand: dict) -> dict:
+    return {"state": {"query_excerpt": {"title": task["title"], "body": task["body"]},
+                      "candidate_passage": {"title": cand["title"], "text": cand["body_view"]}},
+            "questions": {"relevant": {"type": "noul", "instructions": NOUL_INSTRUCTIONS,
+                                       "criteria": dict(NOUL_CRITERIA)}}}
+
+
+def _noul_deny_hits(request: dict, deny_terms: tuple) -> list:
+    s = request["state"]
+    return h2_offline.deny_scan("\n".join([s["query_excerpt"]["title"], s["query_excerpt"]["body"],
+                                           s["candidate_passage"]["title"], s["candidate_passage"]["text"]]),
+                                deny_terms)
+
+
+def slot_order(task: dict, noul: dict) -> list:
+    """R75-slot-v1：只在可送出候選原本佔的位置之間依 fused 重排；不可送出的候選位置不動。"""
+    cands = sorted(task["candidates"], key=lambda c: c["rank"])
+    elig = [c for c in cands if cid(c) in noul]
+    slots = [c["rank"] for c in elig]
+    by_noul = sorted(elig, key=lambda c: (-noul[cid(c)], c["rank"]))
+    pseudo = {cid(c): slots[j] for j, c in enumerate(by_noul)}
+
+    def score(r: int) -> float:
+        return (R75_SLOTS - r) / (R75_SLOTS - 1)
+
+    fused = sorted(elig, key=lambda c: (-(R75_W * score(pseudo[cid(c)]) + (1 - R75_W) * score(c["rank"])), c["rank"]))
+    position = {c["rank"]: cid(c) for c in cands}
+    for slot, c in zip(slots, fused):
+        position[slot] = cid(c)
+    return [position[r] for r in sorted(position)]
+
+
+def rerank_r75(task: dict, jev: JevClient, deny_terms: Iterable[str] = (), *,
+               concurrency: int = NOUL_CONCURRENCY) -> tuple:
+    """回傳 (top-3, details, wall_ms, cost)。任何回退條件成立就整題回 A（BM25 top-3）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    bm25 = [cid(c) for c in sorted(task["candidates"], key=lambda c: c["rank"])]
+    details = {"fallback": None, "noul": {}, "order": bm25}
+    elig = eligible_candidates(task)
+    if task["task_egress"] != "eligible":
+        details["fallback"] = "task-not-eligible"
+    elif len(elig) <= 1:
+        details["fallback"] = "too-few-eligible"
+    if details["fallback"]:
+        return bm25[:MAX_SELECT], details, 0, Decimal(0)
+    deny_terms = tuple(deny_terms)
+    requests = {cid(c): build_noul_request(task, c) for c in elig}
+    if any(_noul_deny_hits(r, deny_terms) for r in requests.values()):
+        details["fallback"] = "blocked"
+        return bm25[:MAX_SELECT], details, 0, Decimal(0)
+    started = time.monotonic()
+
+    def one(item):
+        key, request = item
+        body, _wall, _attempts = jev.judge(request)
+        value = (body.get("answers") or {}).get("relevant", {}).get("noul")
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+            raise BenchError("invalid_output", f"noul 不合法：{str(body.get('answers'))[:120]}")
+        tokens = (body.get("usage") or {}).get("input_tokens")
+        return key, float(value), tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+            results = list(pool.map(one, requests.items()))
+    except BenchError as exc:
+        if exc.kind == "config":
+            raise
+        details["fallback"] = f"error:{exc.kind}"
+        return bm25[:MAX_SELECT], details, round((time.monotonic() - started) * 1000), Decimal(0)
+    wall = round((time.monotonic() - started) * 1000)
+    noul = {key: value for key, value, _t in results}
+    order = slot_order(task, noul)
+    cost = Decimal(sum(t for _k, _v, t in results)) * JEV_USD_PER_INPUT_MTOK / Decimal(1_000_000)
+    details.update(noul=noul, order=order)
+    return order[:MAX_SELECT], details, wall, cost
+
+
+L_SYSTEM = ("You rank memory notes for an engineering agent. You have no tools. "
+            "Reply with exactly one JSON object and nothing else.")
+
+
+def l_prompt(task: dict) -> str:
+    cands = sorted(task["candidates"], key=lambda c: c["rank"])
+    blocks = [f"[{cid(c)}] {c['title']}\n{c['body_view']}" for c in cands]
+    return (f"TASK (a GitHub issue an engineer is about to work on):\n{task['title']}\n{task['body']}\n\n"
+            "CANDIDATE MEMORY NOTES (id, title, excerpt):\n\n" + "\n\n".join(blocks) + "\n\n"
+            "Rank ALL candidates from most to least likely that the engineer would reasonably rely on the note while "
+            "working on the issue.\n"
+            f"- rely on it: {NOUL_CRITERIA['true']}\n- do not rely on it: {NOUL_CRITERIA['false']}\n\n"
+            'Output exactly {"ranking": ["<id>", ...]} containing every id exactly once: '
+            + ", ".join(cid(c) for c in cands) + ".")
+
+
+def parse_l_reply(text: str, ids: list) -> list:
+    text = text.strip()
+    start = text.find("{")
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:]) if start >= 0 else (None, 0)
+    except json.JSONDecodeError as exc:
+        raise BenchError("invalid_output", f"L 回覆不是 JSON：{text[:120]!r}") from exc
+    ranking = value.get("ranking") if isinstance(value, dict) else None
+    if not isinstance(ranking, list) or sorted(ranking) != sorted(ids):
+        raise BenchError("invalid_output", f"L ranking 不是候選的排列：{str(ranking)[:120]}")
+    return ranking
+
+
+def _codex_runner(argv: list, cwd: Path, timeout: float) -> str:
+    env = {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
+    try:
+        done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=env)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise BenchError("transport", f"codex 執行失敗：{exc}") from exc
+    if done.returncode != 0:
+        raise BenchError("transport", f"codex exit {done.returncode}：{done.stderr.strip()[:300]}")
+    return done.stdout
+
+
+class CodexRanker:
+    """L 對照組：Codex CLI 純補全（read-only sandbox、ephemeral、關閉 plugins／memories／goals／hooks／shell_tool）。"""
+
+    def __init__(self, *, model: str = "gpt-6-luna", effort: str = "max", runner: Callable | None = None,
+                 timeout: float = 1800.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self.model, self.effort, self._timeout = model, effort, timeout
+        self._runner, self._clock = runner or _codex_runner, clock
+        self.label = f"{model}@{effort}"
+
+    def rank(self, task: dict) -> tuple:
+        prompt = l_prompt(task)
+        ids = [cid(c) for c in sorted(task["candidates"], key=lambda c: c["rank"])]
+        with tempfile.TemporaryDirectory(prefix="hippo-h2-l-") as tmp:
+            argv = ["codex", "exec", L_SYSTEM + "\n\n" + prompt, "-m", self.model, "-c",
+                    f"model_reasoning_effort={self.effort}", "--sandbox", "read-only", "--ephemeral",
+                    "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules"]
+            for feature in ("plugins", "memories", "goals", "hooks", "shell_tool"):
+                argv += ["--disable", feature]
+            argv += ["--cd", tmp, "--json"]
+            started = self._clock()
+            stdout = self._runner(argv, Path(tmp), self._timeout)
+            wall = round((self._clock() - started) * 1000)
+        text, usage = None, {}
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+            elif event.get("type") == "turn.completed":
+                usage = event.get("usage") or {}
+        if text is None:
+            raise BenchError("invalid_output", "codex 沒有回傳 agent_message")
+        ranking = parse_l_reply(text, ids)
+        return ranking[:MAX_SELECT], ranking, wall, usage, hashlib.sha256(prompt.encode("utf-8")).hexdigest(), \
+            hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def qualification_ids(frozen: dict, gold: dict, n: int = 60) -> dict:
+    """依凍結集的題目順序，取前 n 題 non-empty（完整 top-12 gold，含不可送出候選）。"""
+    strata = task_strata(frozen, gold)
+    order = [t["task_id"] for t in frozen["tasks"]]
+    nonempty = [t for t in order if strata[t] == "non-empty"]
+    return {"protocol": "v5", "rule": "凍結集題目順序中的前 n 題 non-empty", "n": n,
+            "qualification": nonempty[:n], "underpowered": len(nonempty) < n,
+            "counts": {"scanned": len(order), "empty": sum(1 for t in order if strata[t] == "empty"),
+                       "non-empty": len(nonempty),
+                       "indeterminate": sum(1 for t in order if strata[t] == "indeterminate")}}
+
+
+def _rank_metrics(selected: list, labels: dict) -> dict:
+    rel = {c for c, g in labels.items() if g == "relevant"}
+    top = selected[:MAX_SELECT]
+    dcg = sum(1 / math.log2(i + 2) for i, c in enumerate(top) if c in rel)
+    idcg = sum(1 / math.log2(i + 2) for i in range(min(MAX_SELECT, len(rel))))
+    resolved = [c for c in top if labels.get(c) in ("relevant", "irrelevant")]
+    return {"ndcg3": dcg / idcg if idcg else 0.0, "recall3": sum(c in rel for c in top) / len(rel) if rel else 0.0,
+            "p3": sum(c in rel for c in resolved) / len(resolved) if resolved else 0.0}
+
+
+def _paired_boot(per: dict, a: str, b: str, metric: str, n: int, seed: str) -> dict:
+    import random
+    ids = sorted(per)
+    diffs = [per[t][a][metric] - per[t][b][metric] for t in ids]
+    point = sum(diffs) / len(diffs)
+    rng = random.Random(seed)
+    boots = sorted(sum(diffs[rng.randrange(len(diffs))] for _ in diffs) / len(diffs) for _ in range(n))
+    return {"delta": round(point, 4), "ci95": [round(boots[int(0.025 * n)], 4), round(boots[int(0.975 * n) - 1], 4)]}
+
+
+def _quantile(values: list, q: float):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))]
+
+
+def score_v5(frozen: dict, gold: dict, split: dict, records: list, thresholds: dict | None = None) -> dict:
+    t = dict(GO_THRESHOLDS_V5 if thresholds is None else thresholds)
+    tasks = {x["task_id"]: x for x in frozen["tasks"]}
+    ids = split["qualification"]
+    recs = {(r["arm"], r["task_id"]): r for r in records if r["repeat"] == 0 and r.get("error") is None}
+    arms = [a for a in ("A", "R", "L") if all((a, i) in recs for i in ids)]
+    missing = {a: [i for i in ids if (a, i) not in recs] for a in ("A", "R", "L")}
+    per = {}
+    for i in ids:
+        labels = {cid(c): gold.get(f"{i}#{cid(c)}") for c in tasks[i]["candidates"]}
+        per[i] = {a: _rank_metrics(recs[(a, i)]["selected"], labels) for a in arms}
+    means = {a: {m: round(sum(per[i][a][m] for i in ids) / len(ids), 4) for m in ("ndcg3", "recall3", "p3")}
+             for a in arms} if ids else {}
+    deltas = {}
+    for a, b in (("R", "A"), ("L", "A"), ("R", "L")):
+        if a in arms and b in arms and ids:
+            deltas[f"{a}-{b}"] = {m: _paired_boot(per, a, b, m, t["bootstrap"], t["bootstrap_seed"])
+                                  for m in ("ndcg3", "recall3", "p3")}
+    r_recs = [recs[("R", i)] for i in ids if ("R", i) in recs]
+    sent_walls = [r["wall_ms"] for r in r_recs if r.get("egress") == "sent"]
+    fallbacks: dict = {}
+    for r in r_recs:
+        if r.get("egress") != "sent":
+            fallbacks[r.get("egress")] = fallbacks.get(r.get("egress"), 0) + 1
+    l_walls = [recs[("L", i)]["wall_ms"] for i in ids if ("L", i) in recs]
+    counts = split["counts"]
+    # 全體題目（含 empty）的每次 pull slot 期望：empty 題固定 top-3，三組都送 3 則不相關
+    nonempty_rel = {a: sum(sum(1 for c in recs[(a, i)]["selected"] if gold.get(f"{i}#{c}") == "relevant") for i in ids)
+                    for a in arms}
+    scanned_known = counts["empty"] + counts["non-empty"]
+    return {
+        "protocol": "v5", "qualification_n": len(ids), "underpowered": split.get("underpowered", False),
+        "missing": {a: v for a, v in missing.items() if v}, "means": means, "deltas": deltas,
+        "runtime": {"r_sent": len(sent_walls), "r_fallbacks": fallbacks,
+                    "r_wall_ms": {"median": _quantile(sent_walls, 0.5), "p90": _quantile(sent_walls, 0.9),
+                                  "p99": _quantile(sent_walls, 0.99)},
+                    "l_wall_ms": {"median": _quantile(l_walls, 0.5), "p90": _quantile(l_walls, 0.9)}},
+        "all_tasks": {"scanned": counts["scanned"], "empty_rate": round(counts["empty"] / scanned_known, 4)
+                      if scanned_known else None,
+                      "relevant_slots_per_nonempty_pull": {a: round(nonempty_rel[a] / len(ids), 4) for a in arms}
+                      if ids else {}},
+        "thresholds": t,
+    }
+
+
+def decide_v5(summary: dict) -> dict:
+    t = summary["thresholds"]
+    reasons = []
+    if summary["underpowered"] or summary["qualification_n"] < t["nonempty_n"]:
+        reasons.append("underpowered：non-empty 題數不足")
+    if "R" in summary["missing"] or "A" in summary["missing"]:
+        reasons.append(f"缺紀錄：{ {k: len(v) for k, v in summary['missing'].items()} }")
+    d = summary["deltas"].get("R-A")
+    gates = {}
+    if d:
+        gates["ndcg_gain"] = d["ndcg3"]["delta"] >= t["ndcg_gain_min"] and d["ndcg3"]["ci95"][0] > t["ndcg_ci_low_min"]
+        gates["recall_noninferior"] = d["recall3"]["ci95"][0] >= t["recall_ci_low_min"]
+        gates["precision_noninferior"] = d["p3"]["delta"] >= t["precision_point_min"] and \
+            d["p3"]["ci95"][0] >= t["precision_ci_low_min"]
+    reasons += [f"未過：{k}" for k, ok in gates.items() if not ok]
+    p90 = summary["runtime"]["r_wall_ms"]["p90"]
+    runtime_ok = p90 is not None and p90 <= t["runtime_p90_ms_max"]
+    quality = "pass" if gates and all(gates.values()) and not reasons else "fail"
+    return {"protocol": "v5", "quality": quality, "runtime": "pass" if runtime_ok else "fail",
+            "decision": ("go-to-Q1" if quality == "pass" and runtime_ok else
+                         "quality-qualified/runtime-not-qualified" if quality == "pass" else "no-go"),
+            "gates": gates, "reasons": reasons}

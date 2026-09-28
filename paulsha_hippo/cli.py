@@ -351,15 +351,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "run", help="#167：在凍結候選集上跑 A／B／C（可續跑；C 送 TypeSafe 前再掃一次 payload）")
     h2_run_p.add_argument("--frozen", required=True, help="frozen-candidates.json")
     h2_run_p.add_argument("--split-file", required=True, help="JSON：{\"dev\": [...], \"hidden\": [...]}")
-    h2_run_p.add_argument("--split", choices=("dev", "hidden"), required=True)
+    h2_run_p.add_argument("--split", choices=("dev", "hidden", "qualification"), required=True)
     h2_run_p.add_argument("--arms", default="A,B,C")
     h2_run_p.add_argument("--out", required=True, help="records JSONL（私有位置）")
     h2_run_p.add_argument("--deny-terms", default=None, help="私有字詞清單（C 組送出前掃描用）")
     h2_run_p.add_argument("--stability", action="store_true",
                           help="只對 hidden 依協定 seed 抽出的題目（v4：8 題；v4.1：10 題）重跑 B、C 一次（repeat=1）")
     h2_run_p.add_argument("--b-model", default="sonnet")
-    h2_run_p.add_argument("--protocol", choices=("v4", "v4.1"), default="v4",
-                          help="協定版本：決定 C 問法版本與穩定性抽樣（預設 v4，第一輪）")
+    h2_run_p.add_argument("--protocol", choices=("v4", "v4.1", "v5"), default="v4",
+                          help="協定版本：決定 C 問法版本與穩定性抽樣（預設 v4，第一輪）；v5 提供 R（R75-slot-v1）與 L 組")
+    h2_run_p.add_argument("--l-model", default="gpt-6-luna", help="v5 L 對照組的 Codex 模型")
+    h2_run_p.add_argument("--l-effort", default="max", help="v5 L 對照組的 reasoning effort")
     h2_run_p.add_argument("--c-revision", default=None,
                           help="覆寫 C 問法版本（例如 v4.1 在 dev 修訂後的 rev3）；省略時依協定")
     h2_run_p.set_defaults(func=_h2_run)
@@ -367,16 +369,19 @@ def _build_parser() -> argparse.ArgumentParser:
     h2_score_p.add_argument("--frozen", required=True)
     h2_score_p.add_argument("--gold", required=True, help="gold-final.json（私有）")
     h2_score_p.add_argument("--split-file", required=True)
-    h2_score_p.add_argument("--split", choices=("dev", "hidden"), required=True)
+    h2_score_p.add_argument("--split", choices=("dev", "hidden", "qualification"), required=True)
     h2_score_p.add_argument("--records", required=True)
-    h2_score_p.add_argument("--protocol", choices=("v4", "v4.1"), default="v4",
-                            help="v4：第一輪門檻；v4.1：分層計分，只看 C 對 A、C 本身與隱私")
+    h2_score_p.add_argument("--protocol", choices=("v4", "v4.1", "v5"), default="v4",
+                            help="v4：第一輪門檻；v4.1：分層計分，只看 C 對 A、C 本身與隱私；v5：R75 對 A 的排序門檻，L 只報告")
     h2_score_p.set_defaults(func=_h2_score)
     h2_split_p = h2_sub.add_parser(
         "split", help="v4.1：gold 完成後依 empty／non-empty 分層，用事先登錄的 seed 抽出 dev／hidden（確定性）")
     h2_split_p.add_argument("--frozen", required=True)
     h2_split_p.add_argument("--gold", required=True, help="gold-final.json（私有）")
-    h2_split_p.add_argument("--seed", required=True, help="事先登錄的抽樣 seed")
+    h2_split_p.add_argument("--seed", default=None, help="事先登錄的抽樣 seed（v4.1 必填）")
+    h2_split_p.add_argument("--protocol", choices=("v4.1", "v5"), default="v4.1",
+                            help="v4.1：分層抽 dev／hidden；v5：依凍結集順序取前 n 題 non-empty")
+    h2_split_p.add_argument("--n", type=int, default=60, help="v5 qualification 題數")
     h2_split_p.add_argument("--out", required=True, help="split JSON（私有位置）")
     h2_split_p.set_defaults(func=_h2_split)
 
@@ -2070,7 +2075,7 @@ def _h2_run(args: argparse.Namespace) -> int:
         frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
         task_ids = _h2_load_split(args)
         arms = [a.strip().upper() for a in args.arms.split(",") if a.strip()]
-        protocol = h2_bench.PROTOCOLS[args.protocol]
+        protocol = h2_bench.PROTOCOLS.get(args.protocol, h2_bench.PROTOCOLS["v4.1"])
         c_revision = args.c_revision or protocol["c_revision"]
         repeat = 0
         if args.stability:
@@ -2080,11 +2085,13 @@ def _h2_run(args: argparse.Namespace) -> int:
             arms = [a for a in arms if a in ("B", "C")]
             repeat = 1
         deny = h2_offline.load_deny_terms(Path(args.deny_terms) if args.deny_terms else None)
-        if "C" in arms and not deny:
-            raise ValueError("C 組需要 --deny-terms（送出前掃描）")
+        if ("C" in arms or "R" in arms) and not deny:
+            raise ValueError("C／R 組需要 --deny-terms（送出前掃描）")
         stats = h2_bench.run(
             frozen, task_ids, arms, Path(args.out), deny_terms=deny, repeat=repeat, c_revision=c_revision,
-            jev=h2_bench.JevClient() if "C" in arms else None,
+            jev=(h2_bench.JevClient(max_attempts=1, timeout=h2_bench.NOUL_TIMEOUT_S) if "R" in arms
+                 else h2_bench.JevClient() if "C" in arms else None),
+            ranker=h2_bench.CodexRanker(model=args.l_model, effort=args.l_effort) if "L" in arms else None,
             claude=h2_bench.ClaudeFilter(model=args.b_model) if "B" in arms else None,
             progress=lambda r: print(f"{r['arm']} r{r['repeat']} {r['task_id']:28} {r['selected']} "
                                      f"{r['wall_ms']} ms {'ERR ' + r['error']['kind'] if r['error'] else ''}",
@@ -2106,7 +2113,11 @@ def _h2_score(args: argparse.Namespace) -> int:
         records = [json.loads(line) for line in Path(args.records).read_text(encoding="utf-8").splitlines()
                    if line.strip()]
         gold = h2_bench.load_gold(Path(args.gold))
-        if args.protocol == "v4.1":
+        if args.protocol == "v5":
+            split = json.loads(Path(args.split_file).read_text(encoding="utf-8"))
+            summary = h2_bench.score_v5(frozen, gold, split, records)
+            decision = h2_bench.decide_v5(summary)
+        elif args.protocol == "v4.1":
             summary = h2_bench.score_v41(frozen, gold, task_ids, records)
             decision = h2_bench.decide_v41(summary)
         else:
@@ -2125,14 +2136,21 @@ def _h2_split(args: argparse.Namespace) -> int:
 
     try:
         frozen = json.loads(Path(args.frozen).read_text(encoding="utf-8"))
-        split = h2_bench.stratified_split(frozen, h2_bench.load_gold(Path(args.gold)), args.seed)
+        gold = h2_bench.load_gold(Path(args.gold))
+        if args.protocol == "v5":
+            split = h2_bench.qualification_ids(frozen, gold, args.n)
+        else:
+            if not args.seed:
+                raise ValueError("v4.1 split 需要 --seed")
+            split = h2_bench.stratified_split(frozen, gold, args.seed)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(split, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, KeyError) as exc:
         print(f"hippo h2 split: error: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({k: split[k] for k in ("counts", "generalization_scope")}, ensure_ascii=False))
+    print(json.dumps({k: split[k] for k in ("counts", "generalization_scope", "underpowered") if k in split},
+                     ensure_ascii=False))
     return 0
 
 
