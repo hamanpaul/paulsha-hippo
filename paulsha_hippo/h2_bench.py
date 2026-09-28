@@ -105,10 +105,24 @@ C_CRITERIA_REV2 = {
           "status logs, or general background that would not change how this task is carried out, and for notes "
           "about a different problem.",
 }
+#: rev3：v4.1 在 dev 上唯一一次修訂。rev2 在 dev 的命中率 5/9 低於 A 的 6/9：漏掉的相關記憶多是本題要改的
+#: 程式碼或流程的規格、契約、測試預期（「同元件不足」條款把它們一起壓掉）。rev3 把這類記憶明寫進 yes，
+#: 「同元件」改成「沒有規則或結果才不足」；「歷史執行紀錄不足」維持不變。
+C_INSTRUCTION_REV3 = C_INSTRUCTION
+C_CRITERIA_REV3 = {
+    "yes": "The note states a rule, constraint, known failure, still-valid design decision, or validated result "
+           "that would directly change or confirm how this task is carried out, including a specification, "
+           "contract, or test expectation for the code or workflow this task changes, and repository workflow "
+           "rules the task must follow.",
+    "no": "Merely sharing the same repository, component, or feature, without such a rule or result, is not enough. "
+          "Past execution records, ship records, and status logs are not enough unless they state such a rule or "
+          "result. Answer no for general background and for notes about a different problem.",
+}
 C_REVISIONS = {
     "rev0": (C_INSTRUCTION_REV0, C_CRITERIA_REV0),
     "rev1": (C_INSTRUCTION, C_CRITERIA),
     "rev2": (C_INSTRUCTION_REV2, C_CRITERIA_REV2),
+    "rev3": (C_INSTRUCTION_REV3, C_CRITERIA_REV3),
 }
 B_SYSTEM = ("You select memory notes for an engineering agent. You have no tools. "
             "Reply with exactly one JSON object and nothing else.")

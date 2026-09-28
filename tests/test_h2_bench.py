@@ -238,6 +238,8 @@ def test_c_revision_selects_criteria_and_is_recorded(tmp_path):
     B.run(_frozen(task), ["t1"], ["C"], tmp_path / "r.jsonl", jev=_jev([(200, body, {})]), c_revision="rev2")
     assert B._load_records(tmp_path / "r.jsonl")[0]["details"]["c_revision"] == "rev2"
     assert B.PROTOCOLS["v4.1"]["c_revision"] == "rev2" and B.PROTOCOLS["v4"]["c_revision"] == "rev1"
+    rev3 = B.build_c_request(task, "rev3")["questions"]["c1"]["criteria"]
+    assert rev3 == B.C_CRITERIA_REV3 and "test expectation" in rev3["yes"] and "execution records" in rev3["no"]
 
 
 def test_task_strata_and_unresolved_not_counted_in_precision():
