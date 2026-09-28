@@ -309,3 +309,30 @@ hippo h2 score --protocol v5 --split qualification --frozen <…> --gold <…> -
 - **延遲：** R75 送出的題目，pull 新增 wall 的 p90 ≤ 4 s 才能進 Q1；品質通過但延遲未過時，判定為 `quality-qualified/runtime-not-qualified`。
 - **必報：** 掃描題目的 empty 比例、每次 pull 的相關 slot 數、L 對 A 與 R75 對 L 的差值、L 的延遲。
 - **範圍：** Q0 只證明排序更符合凍結的相關性標準（offline public paulsha-cortex、以 BM25 top-12 為前提），不代表產品有價值。產品價值要到 Q2 的 live 隨機對照才能判定。
+
+## 12. v5 Q0 結果（2026-09-28）：通過（go-to-Q1）
+
+60 題 non-empty 的全新 public paulsha-cortex 題目，依第 11 節門檻判定。詳細數據與檔案 sha256 見 #173。
+
+| 組 | NDCG@3 | Recall@3 | P@3 | 延遲 |
+|---|---|---|---|---|
+| A（BM25 top-3） | 0.525 | 0.316 | 0.472 | — |
+| **R75-slot-v1（JEV）** | **0.725** | **0.507** | **0.633** | median 2.2 s、p90 2.4 s |
+| L（gpt-6-luna@max，只報告） | 0.866 | 0.622 | 0.728 | median 48 s、p90 71 s |
+
+- **R75 − A：**
+  - ΔNDCG@3 ＋0.200 [0.117, 0.284]；
+  - ΔRecall@3 ＋0.191 [0.104, 0.282]；
+  - ΔP@3 ＋0.161 [0.094, 0.228]。
+
+  品質門檻全部通過；60 題全數送出，回退 0 次；p90 2.4 s，runtime 門檻也通過。
+- **R75 − L：** ΔNDCG@3 −0.141 [−0.212, −0.071]。LLM 對照組的品質明顯更好，但每題要數十秒，不可能放進 live pull。R75 拿到 L 相對 A 提升幅度的約 59%，每次 pull 約 US$0.0007。
+- **全體題目：** 掃描 90 題，empty 比例 31%；每次 pull 平均送出的相關 slot 數，A 0.98 → R75 1.31。
+- **範圍：**
+  - 只證明「以 BM25 top-12 為前提，R75 排序更符合凍結的相關性標準」，不代表產品有價值。
+  - production 的 #857 provider 用 `moc.search` 正式排序、只取 top-3，和本 benchmark 的純 BM25 A 不同。相對 production A 的實際提升，要到 Q2 的 live 隨機對照才能判定。
+- **下一步：**
+  1. #857 A 路徑依 cortex 的 canary 節奏開啟，並量使用鏈基準；
+  2. Q1 shadow；
+  3. Q2 randomized；
+  4. Q3。

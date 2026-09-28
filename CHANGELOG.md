@@ -8,6 +8,7 @@
 ## [Unreleased]
 
 ### Added
+- #173 v5 Q0 結果：R75-slot-v1（JEV 連續分數重排序）在 60 題全新 cortex 題目上通過 qualification（ΔNDCG@3 ＋0.200、p90 2.4 s），見 `docs/h2-offline-baseline.md` 第 12 節。
 - #173（決策紀錄 v5）H2 連續分數重排序 Q0 工具：R75-slot-v1（單題 Noul、不可送出候選位置不動、固定 top-3、逾時回退）、L 對照組（Codex gpt-6-luna@max）、`hippo h2 split|run|score --protocol v5`。
 - #169 H2 第二輪（v4.1）結果：hidden 40 題判定 no-go，Hippo × JEV 相關性篩選結案（見 `docs/h2-offline-baseline.md` 第 10 節）。
 - #169 C 問法 `rev3`（v4.1 dev 唯一一次修訂，試過不採用）：把本題要改的程式碼或流程的規格、契約、測試預期明寫進 yes；dev 上沒有比 rev2 好，hidden 沿用 rev2。
