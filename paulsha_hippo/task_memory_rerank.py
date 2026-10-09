@@ -6,6 +6,8 @@
 - ``shadow``：只對 public paulsha-cortex 生效。正式輸出維持 A（``moc.search(limit=3)``），本模組另外做一次
   ``moc.search(limit=12)``，經送出前過濾後以 R75-slot-v1（``h2_bench.rerank_r75``）重排，並寫一筆 shadow
   receipt。任何失敗都只記在 receipt，不影響正式輸出。
+- ``ab``：依 ``HIPPO_TASK_MEMORY_AB_SEED`` 與 task ID 穩定分組；A 組維持正式輸出並背景量測，R75 組同步
+  嘗試 R75，遇到前置條件或 rerank 失敗時正式輸出回退至 A。
 
 receipt 不保存記憶內容與原始 intent，只存 note ID、content digest、分數與排序。缺 TypeSafe key 或私有
 字詞清單時直接回退，完全不送出。真正打開 shadow 需要 Paul 核准 live public-memory egress。
@@ -22,6 +24,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,8 @@ from .importer.project_resolver import normalize_remote
 
 RERANK_ENV = "HIPPO_TASK_MEMORY_RERANK"
 DENY_TERMS_ENV = "HIPPO_TASK_MEMORY_RERANK_DENY_TERMS"
+AB_SEED_ENV = "HIPPO_TASK_MEMORY_AB_SEED"
+DEFAULT_AB_SEED = "q2-2026-10"
 SHADOW_REPOS = frozenset({"github.com/hamanpaul/paulsha-cortex"})
 # registry 解析出的 project slug 也必須是 public cortex（避免 remote 被對應到私人專案時外送）
 SHADOW_PROJECT_SLUGS = frozenset({"github.com/hamanpaul/paulsha-cortex"})
@@ -41,7 +46,21 @@ RECEIPT_SCHEMA = "hippo/task-memory-rerank-shadow/v1"
 
 def mode(environ: Mapping[str, str] | None = None) -> str:
     env = os.environ if environ is None else environ
-    return "shadow" if env.get(RERANK_ENV, "").strip().lower() == "shadow" else "off"
+    value = env.get(RERANK_ENV, "").strip().lower()
+    return value if value in {"shadow", "ab"} else "off"
+
+
+def ab_arm(task_id: str, environ: Mapping[str, str] | None = None) -> str:
+    """同一 task ID 在固定 seed 下總是分到相同實驗組。"""
+    env = os.environ if environ is None else environ
+    seed = env.get(AB_SEED_ENV, DEFAULT_AB_SEED)
+    first_byte = hashlib.sha256(f"{seed}:{task_id}".encode("utf-8")).digest()[0]
+    return "R75" if first_byte % 2 == 0 else "A"
+
+
+def in_scope(request: Mapping[str, Any], project_slug: str) -> bool:
+    return (normalize_remote(str(request.get("project", ""))) in SHADOW_REPOS
+            and project_slug in SHADOW_PROJECT_SLUGS)
 
 
 def receipt_path(memory_root: Path) -> Path:
@@ -50,6 +69,184 @@ def receipt_path(memory_root: Path) -> Path:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _base_receipt(*, memory_root: Path, request: Mapping[str, Any], project_slug: str,
+                  production_payload: Mapping[str, Any], now: Callable[[], str] | None = None) -> dict[str, Any]:
+    from . import h2_bench
+
+    now = now or (lambda: dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+    production = production_payload.get("candidates") or []
+    manifest_sha = ((production_payload.get("delivery") or {}).get("manifest") or {}).get("sha256")
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "recorded_at": now(),
+        "task_id": request.get("task_id"),
+        "project": request.get("project"),
+        "moc_search_revision": _index_revision(memory_root),
+        "query_sha256": _sha256_text(str(request.get("intent", ""))),
+        "production_manifest_sha256": manifest_sha,
+        "production_a_top3": [c.get("note_id") for c in production],
+        "shadow_r75_top3": None,
+        "candidates": [],
+        "fallback": None,
+        "wall_ms": 0,
+        "cost_usd": "0",
+        "jev_model": h2_bench.JEV_MODEL,
+        "deny_terms": None,
+        "delivery_manifest_sha256": manifest_sha,
+        "arm": None,
+        "applied_arm": "A",
+    }
+
+
+def production_rerank(
+    *, memory_root: Path,
+    request: Mapping[str, Any],
+    project_slug: str,
+    search_fn: Callable[..., list],
+    read_note: Callable[[Path, Mapping[str, Any]], dict],
+    environ: Mapping[str, str] | None = None,
+    jev_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """同步嘗試 R75；回傳 top hits 或一個安全回退原因，不建正式 payload。"""
+    from . import h2_bench, h2_offline
+    from .task_memory_provider import _DeadlineExpired
+
+    env = os.environ if environ is None else environ
+    started = time.monotonic()
+    result: dict[str, Any] = {
+        "selected_hits": None,
+        "notes_by_id": {},
+        "shadow_r75_top3": None,
+        "candidates": [],
+        "fallback": None,
+        "wall_ms": 0,
+        "cost_usd": "0",
+        "deny_terms": None,
+    }
+
+    def fallback(reason: str) -> dict[str, Any]:
+        result["fallback"] = reason
+        result["wall_ms"] = round((time.monotonic() - started) * 1000)
+        return result
+
+    if not in_scope(request, project_slug):
+        return fallback("out-of-scope")
+    deny_path = env.get(DENY_TERMS_ENV, "")
+    if not deny_path:
+        return fallback("no-deny-terms")
+    try:
+        deny = h2_offline.load_deny_terms(Path(deny_path))
+    except _DeadlineExpired:
+        raise
+    except Exception:  # noqa: BLE001 - malformed or unreadable policy fails closed to A
+        return fallback("no-deny-terms")
+    if not deny:
+        return fallback("no-deny-terms")
+    result["deny_terms"] = {"count": len(deny), "sha256": _sha256_text("\n".join(deny))}
+    if not env.get("TYPESAFE_API_KEY"):
+        return fallback("no-api-key")
+
+    intent = str(request.get("intent", ""))
+    try:
+        hits = list(search_fn(memory_root, intent, project=project_slug,
+                              limit=SHADOW_LIMIT, include_decayed=False))[:SHADOW_LIMIT]
+    except _DeadlineExpired:
+        raise
+    except Exception:  # noqa: BLE001 - R75 failure falls back to the already-built A notes
+        return fallback("search-error")
+
+    candidates: list[dict[str, Any]] = []
+    note_ids: dict[str, str] = {}
+    notes_by_id: dict[str, dict[str, Any]] = {}
+    for rank, hit in enumerate(hits, start=1):
+        if not isinstance(hit, Mapping) or hit.get("project") != project_slug:
+            return fallback("scope-mismatch")
+        note_id = hit.get("slice_id")
+        if not isinstance(note_id, str) or not note_id:
+            return fallback("scope-mismatch")
+        try:
+            note = read_note(memory_root, hit)
+            view = note["content"].strip()[: h2_offline.BODY_VIEW_CHARS]
+            title = str(note.get("summary") or hit.get("title") or "")
+            reasons = h2_offline.deny_scan(f"{title}\n{view}", deny)
+        except _DeadlineExpired:
+            raise
+        except Exception:  # noqa: BLE001 - unreadable R75 candidates cannot be delivered safely
+            return fallback("read-error")
+        candidates.append({"rank": rank, "title": title, "body_view": view,
+                           "egress": "eligible" if not reasons else "excluded"})
+        note_ids[f"c{rank}"] = note_id
+        notes_by_id[note_id] = dict(note)
+        result["candidates"].append({"rank": rank, "note_id": note_id,
+                                     "content_sha256": _sha256_text(note["content"]),
+                                     "egress": "eligible" if not reasons else "excluded",
+                                     "egress_reasons": reasons, "noul": None})
+
+    task_egress = "eligible" if not h2_offline.deny_scan(intent, deny) else "excluded"
+    task = {"task_id": str(request.get("task_id")), "title": "", "body": intent,
+            "task_egress": task_egress, "candidates": candidates}
+    try:
+        jev = (jev_factory or h2_bench.JevClient)(max_attempts=1, timeout=h2_bench.NOUL_TIMEOUT_S, environ=env)
+        top, details, _jev_wall, cost = h2_bench.rerank_r75(task, jev, deny)
+    except _DeadlineExpired:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a JEV failure must fall back to A
+        result["wall_ms"] = round((time.monotonic() - started) * 1000)
+        result["fallback"] = "jev-timeout" if isinstance(exc, TimeoutError) else f"jev-error:{type(exc).__name__}"
+        return result
+
+    result["cost_usd"] = str(cost)
+    for entry in result["candidates"]:
+        entry["noul"] = details.get("noul", {}).get(f"c{entry['rank']}")
+    if details.get("fallback"):
+        reason = details["fallback"]
+        if reason == "task-not-eligible":
+            return fallback("deny")
+        if reason == "too-few-eligible" and not top:
+            return fallback("top-empty")
+        return fallback(reason)
+    selected_ids = [note_ids.get(candidate_id) for candidate_id in top]
+    selected_hits = [hit for hit in hits
+                     if isinstance(hit, Mapping) and hit.get("slice_id") in selected_ids]
+    ordered_hits = []
+    for note_id in selected_ids:
+        match = next((hit for hit in selected_hits if hit.get("slice_id") == note_id), None)
+        if match is None:
+            return fallback("scope-mismatch")
+        ordered_hits.append(match)
+    if not ordered_hits:
+        return fallback("top-empty")
+    result.update(selected_hits=ordered_hits, notes_by_id=notes_by_id,
+                  shadow_r75_top3=selected_ids,
+                  wall_ms=round((time.monotonic() - started) * 1000), fallback=None)
+    return result
+
+
+def ab_receipt(*, memory_root: Path, request: Mapping[str, Any], project_slug: str,
+               production_payload: Mapping[str, Any], arm: str, applied_arm: str,
+               rerank_result: Mapping[str, Any] | None = None,
+               fallback: str | None = None,
+               production_a_top3: list[str | None] | None = None,
+               now: Callable[[], str] | None = None) -> dict[str, Any]:
+    """組裝 A/B receipt；只保存 note ID、摘要雜湊與量測欄位。"""
+    receipt = _base_receipt(memory_root=memory_root, request=request, project_slug=project_slug,
+                            production_payload=production_payload, now=now)
+    receipt.update(arm=arm, applied_arm=applied_arm, fallback=fallback)
+    if production_a_top3 is not None:
+        receipt["production_a_top3"] = production_a_top3
+    if rerank_result is not None:
+        receipt.update(shadow_r75_top3=rerank_result.get("shadow_r75_top3"),
+                       candidates=rerank_result.get("candidates") or [],
+                       fallback=fallback if fallback is not None else rerank_result.get("fallback"),
+                       wall_ms=rerank_result.get("wall_ms", 0),
+                       cost_usd=str(rerank_result.get("cost_usd", "0")),
+                       deny_terms=rerank_result.get("deny_terms"))
+    receipt["delivery_manifest_sha256"] = (
+        ((production_payload.get("delivery") or {}).get("manifest") or {}).get("sha256")
+    )
+    return receipt
 
 
 def _index_revision(memory_root: Path) -> dict:
@@ -74,6 +271,7 @@ def shadow(
     environ: Mapping[str, str] | None = None,
     jev_factory: Callable[..., Any] | None = None,
     now: Callable[[], str] | None = None,
+    arm: str | None = None,
 ) -> dict | None:
     """計算並回傳 shadow receipt；不屬於 shadow 範圍時回 None。本函式不丟例外。"""
     from . import h2_bench, h2_offline
@@ -81,7 +279,7 @@ def shadow(
     from .task_memory_provider import _DeadlineExpired
 
     env = os.environ if environ is None else environ
-    if normalize_remote(str(request.get("project", ""))) not in SHADOW_REPOS or project_slug not in SHADOW_PROJECT_SLUGS:
+    if not in_scope(request, project_slug):
         return None
     now = now or (lambda: dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     production = production_payload.get("candidates") or []
@@ -102,6 +300,9 @@ def shadow(
         "jev_model": h2_bench.JEV_MODEL,
         "deny_terms": None,
     }
+    if arm is not None:
+        receipt.update(arm=arm, applied_arm="A",
+                       delivery_manifest_sha256=receipt["production_manifest_sha256"])
     try:
         deny_path = env.get(DENY_TERMS_ENV, "")
         if not deny_path:
@@ -166,16 +367,19 @@ def shadow(
     return receipt
 
 
-def deferred_job(request: Mapping[str, Any], project_slug: str, payload: Mapping[str, Any]) -> dict:
+def deferred_job(request: Mapping[str, Any], project_slug: str, payload: Mapping[str, Any], *, arm: str | None = None) -> dict:
     """背景 shadow 需要的最小 job：不含記憶內容，只留 note ID 與 manifest hash，確保寫入 pipe 不會阻塞。"""
     manifest = ((payload.get("delivery") or {}).get("manifest") or {})
-    return {
+    job = {
         "request": {"task_id": request.get("task_id"), "project": request.get("project"),
                     "intent": str(request.get("intent", ""))[:MAX_JOB_INTENT_CHARS]},
         "project_slug": project_slug,
         "payload": {"candidates": [{"note_id": c.get("note_id")} for c in payload.get("candidates") or []],
                     "delivery": {"manifest": {"sha256": manifest.get("sha256")}}},
     }
+    if arm is not None:
+        job["arm"] = arm
+    return job
 
 
 def append_receipt(memory_root: Path, receipt: Mapping[str, Any]) -> None:
@@ -192,7 +396,7 @@ def run_deferred(memory_root: Path, job: Mapping[str, Any], environ: Mapping[str
 
     receipt = shadow(memory_root=Path(memory_root), request=job["request"], project_slug=job["project_slug"],
                      production_payload=job["payload"], search_fn=moc_search, read_note=_read_note,
-                     environ=environ)
+                     environ=environ, arm=job.get("arm"))
     if receipt is not None:
         append_receipt(Path(memory_root), receipt)
     return receipt

@@ -96,6 +96,17 @@ class TaskMemoryProvider:
         self.pending_shadow = None
         request = _validate_envelope(envelope)
         project_slug = self._resolve_project(request["project"])
+        env = os.environ if self.environ is None else self.environ
+        rerank_mode = "off"
+        rerank_module = None
+        if env.get("HIPPO_TASK_MEMORY_RERANK", "").strip().lower() in {"shadow", "ab"}:
+            # Keep off fully lazy: the default path does not import task_memory_rerank.
+            from . import task_memory_rerank as rerank_module
+
+            rerank_mode = rerank_module.mode(env)
+        ab_arm = rerank_module.ab_arm(request["task_id"], env) if rerank_mode == "ab" else None
+        ab_in_scope = (rerank_module.in_scope(request, project_slug)
+                       if rerank_mode == "ab" else False)
         try:
             hits = self.search_fn(
                 self.memory_root,
@@ -111,41 +122,69 @@ class TaskMemoryProvider:
         except Exception:
             raise TaskMemoryProviderError("provider-error") from None
 
-        mode = request["mode"]
-        notes: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for rank, hit in enumerate(hits[:MAX_CANDIDATES], start=1):
-            if not isinstance(hit, Mapping):
-                raise TaskMemoryProviderError("provider-error")
-            if hit.get("project") != project_slug:
-                raise TaskMemoryProviderError("scope-mismatch")
-            note_id = hit.get("slice_id")
-            if not isinstance(note_id, str) or _NOTE_ID_RE.fullmatch(note_id) is None:
-                continue
-            if note_id in seen:
-                continue
-            seen.add(note_id)
-            note = _read_note(self.memory_root, hit)
-            content_hash = _sha256(note["content"].encode("utf-8"))
-            excerpt = note["content"][:800].strip()
-            candidate = {
-                "ref": note_id,
-                "note_id": note_id,
-                "rank": rank,
-                "summary": note["summary"],
-                "authorization": {"status": "authorized"},
-                "availability": {"status": "available"},
-                "content_hash": content_hash,
-                "content_version": note["content_version"],
-                "applicability": [],
-                "relevance_reason": "符合 task intent 的 project scoped 搜尋結果。",
-                "source_time": note["source_time"],
-                "project": request["project"],
-                "_content": note["content"],
-            }
-            if mode == "inline" and excerpt:
-                candidate["excerpt"] = excerpt
-            notes.append(candidate)
+        delivery_mode = request["mode"]
+
+        def load_candidates(candidate_hits, notes_by_id=None):
+            notes: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for rank, hit in enumerate(candidate_hits[:MAX_CANDIDATES], start=1):
+                if not isinstance(hit, Mapping):
+                    raise TaskMemoryProviderError("provider-error")
+                if hit.get("project") != project_slug:
+                    raise TaskMemoryProviderError("scope-mismatch")
+                note_id = hit.get("slice_id")
+                if not isinstance(note_id, str) or _NOTE_ID_RE.fullmatch(note_id) is None:
+                    continue
+                if note_id in seen:
+                    continue
+                seen.add(note_id)
+                note = (notes_by_id or {}).get(note_id) or _read_note(self.memory_root, hit)
+                content_hash = _sha256(note["content"].encode("utf-8"))
+                excerpt = note["content"][:800].strip()
+                candidate = {
+                    "ref": note_id,
+                    "note_id": note_id,
+                    "rank": rank,
+                    "summary": note["summary"],
+                    "authorization": {"status": "authorized"},
+                    "availability": {"status": "available"},
+                    "content_hash": content_hash,
+                    "content_version": note["content_version"],
+                    "applicability": [],
+                    "relevance_reason": "符合 task intent 的 project scoped 搜尋結果。",
+                    "source_time": note["source_time"],
+                    "project": request["project"],
+                    "_content": note["content"],
+                }
+                if delivery_mode == "inline" and excerpt:
+                    candidate["excerpt"] = excerpt
+                notes.append(candidate)
+            return notes
+
+        notes_a = load_candidates(hits)
+        notes = notes_a
+        rerank_result = None
+        ab_applied_arm = "A"
+        ab_fallback = None
+        if rerank_mode == "ab" and ab_arm == "R75":
+            if ab_in_scope:
+                rerank_result = rerank_module.production_rerank(
+                    memory_root=self.memory_root, request=request, project_slug=project_slug,
+                    search_fn=self.search_fn, read_note=_read_note, environ=self.environ,
+                    jev_factory=self.rerank_jev_factory)
+                if rerank_result.get("selected_hits"):
+                    try:
+                        notes = load_candidates(rerank_result["selected_hits"], rerank_result.get("notes_by_id"))
+                        ab_applied_arm = "R75"
+                    except _DeadlineExpired:
+                        raise
+                    except Exception:  # noqa: BLE001 - keep A if R75 results cannot form a payload
+                        notes = notes_a
+                        ab_fallback = "payload-error"
+                else:
+                    ab_fallback = rerank_result.get("fallback") or "top-empty"
+            else:
+                ab_fallback = "out-of-scope"
 
         # 先交由 #146 純函式做欄位驗證、遮蔽與 excerpt 截斷，再為 inline
         # 綁定「實際會交給 Cortex 的 excerpt」bytes 計算 content_hash。
@@ -154,7 +193,7 @@ class TaskMemoryProvider:
             for note in notes
         ]
         delivery = {
-            "mode": mode,
+            "mode": delivery_mode,
             "capabilities": request["capabilities"],
         }
         try:
@@ -169,13 +208,30 @@ class TaskMemoryProvider:
                 adapter={"id": "hippo-task-memory-provider", "version": "1"},
             )
         except (TypeError, ValueError):
-            raise TaskMemoryProviderError("provider-error") from None
+            if ab_applied_arm == "R75":
+                notes = notes_a
+                ab_applied_arm = "A"
+                ab_fallback = "payload-error"
+                candidate_input = [
+                    {key: value for key, value in note.items() if key != "_content"}
+                    for note in notes
+                ]
+                try:
+                    payload = build_task_memory_payload(
+                        schema_version="1", task_id=request["task_id"], intent=request["intent"],
+                        candidates=candidate_input, delivery=delivery, evidence=[],
+                        producer={"id": "hippo-core", "version": "1"},
+                        adapter={"id": "hippo-task-memory-provider", "version": "1"})
+                except (TypeError, ValueError):
+                    raise TaskMemoryProviderError("provider-error") from None
+            else:
+                raise TaskMemoryProviderError("provider-error") from None
 
         manifest_entries: list[dict[str, Any]] = []
         notes_by_id = {item["note_id"]: item for item in notes}
         for candidate in payload["candidates"]:
             note = notes_by_id[candidate["note_id"]]
-            if mode == "inline":
+            if delivery_mode == "inline":
                 delivered = candidate.get("excerpt") or candidate["summary"]
                 candidate["content_hash"] = _sha256(delivered.encode("utf-8"))
             else:
@@ -186,7 +242,7 @@ class TaskMemoryProvider:
                 "content_version": candidate["content_version"],
                 "project": request["project"],
             }
-            if mode == "snapshot":
+            if delivery_mode == "snapshot":
                 entry["content"] = delivered
             manifest_entries.append(entry)
 
@@ -201,26 +257,57 @@ class TaskMemoryProvider:
             validated = validate_task_memory_payload(payload)
         except (TypeError, ValueError):
             raise TaskMemoryProviderError("provider-error") from None
-        self._rerank_shadow(request, project_slug, validated)
+        if rerank_mode == "ab":
+            if ab_arm == "R75":
+                receipt = rerank_module.ab_receipt(
+                    memory_root=self.memory_root, request=request, project_slug=project_slug,
+                    production_payload=validated, arm="R75", applied_arm=ab_applied_arm,
+                    rerank_result=rerank_result, fallback=ab_fallback or (rerank_result or {}).get("fallback"),
+                    production_a_top3=[note.get("note_id") for note in notes_a])
+                if ab_fallback:
+                    receipt["fallback"] = ab_fallback
+                self._append_rerank_receipt(rerank_module, receipt)
+            elif not ab_in_scope:
+                receipt = rerank_module.ab_receipt(
+                    memory_root=self.memory_root, request=request, project_slug=project_slug,
+                    production_payload=validated, arm="A", applied_arm="A", fallback="out-of-scope",
+                    production_a_top3=[note.get("note_id") for note in notes_a])
+                self._append_rerank_receipt(rerank_module, receipt)
+            else:
+                self._rerank_shadow(request, project_slug, validated, arm="A")
+        elif rerank_mode == "shadow":
+            self._rerank_shadow(request, project_slug, validated)
         return validated
 
-    def _rerank_shadow(self, request: Mapping[str, Any], project_slug: str, payload: Mapping[str, Any]) -> None:
+    def _append_rerank_receipt(self, rerank_module, receipt: Mapping[str, Any]) -> None:
+        from .task_memory_provider import _DeadlineExpired
+
+        try:
+            rerank_module.append_receipt(self.memory_root, receipt)
+        except _DeadlineExpired:
+            raise
+        except Exception:  # noqa: BLE001 - receipt I/O must not invalidate provider output
+            return
+
+    def _rerank_shadow(self, request: Mapping[str, Any], project_slug: str, payload: Mapping[str, Any],
+                       *, arm: str | None = None) -> None:
         """#176：flag 為 shadow 時計算 R75 並寫 receipt；任何失敗都不影響已產生的正式輸出。"""
         env = os.environ if self.environ is None else self.environ
-        if env.get("HIPPO_TASK_MEMORY_RERANK", "").strip().lower() != "shadow":
+        flag = env.get("HIPPO_TASK_MEMORY_RERANK", "").strip().lower()
+        if flag not in {"shadow", "ab"} or (flag == "ab" and arm != "A"):
             return  # 預設 off：不 import、不做任何事
         from . import task_memory_rerank
 
         if self.defer_shadow:
-            self.pending_shadow = task_memory_rerank.deferred_job(request, project_slug, payload)
+            self.pending_shadow = task_memory_rerank.deferred_job(request, project_slug, payload, arm=arm)
             return
         try:
             receipt = task_memory_rerank.shadow(
                 memory_root=self.memory_root, request=request, project_slug=project_slug,
                 production_payload=payload, search_fn=self.search_fn, read_note=_read_note,
-                environ=self.environ, jev_factory=self.rerank_jev_factory)
+                environ=self.environ, jev_factory=self.rerank_jev_factory, arm=arm)
             if receipt is not None:
-                task_memory_rerank.append_receipt(self.memory_root, receipt)
+                self._append_rerank_receipt(task_memory_rerank, receipt)
         except _DeadlineExpired:
             raise
         except Exception:  # noqa: BLE001 - shadow 不得影響正式輸出
