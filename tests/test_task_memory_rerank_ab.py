@@ -188,6 +188,33 @@ def test_r75_arm_delivers_reranked_notes_and_receipt(tmp_path):
     assert search.calls == [3, 12]
 
 
+def test_r75_validate_failure_falls_back_to_a(tmp_path, monkeypatch):
+    """R75 的 payload 建得起來但 manifest／validate 失敗時，也要回退 A，不得變成 provider-error。"""
+    from paulsha_hippo import task_memory_provider as provider_module
+
+    hits = _notes(tmp_path)
+    request = _request(task_id=_arm_task_id("R75"))
+    off = _provider(tmp_path, FakeSearch(hits), {}).provide(request)
+    a_ids = [candidate["note_id"] for candidate in off["candidates"]]
+    original_validate = provider_module.validate_task_memory_payload
+
+    def reject_r75_payload(payload):
+        if [candidate["note_id"] for candidate in payload["candidates"]] != a_ids:
+            raise ValueError("fake validation failure for the R75 set")
+        return original_validate(payload)
+
+    monkeypatch.setattr(provider_module, "validate_task_memory_payload", reject_r75_payload)
+    jev = FakeJev({"Note 9": 0.99, "Note 5": 0.95, "Note 1": 0.1})
+    result = _provider(tmp_path, FakeSearch(hits), _env(tmp_path), jev).provide(request)
+    receipt = _receipts(tmp_path)[0]
+
+    assert result == off
+    assert receipt["arm"] == "R75" and receipt["applied_arm"] == "A"
+    assert receipt["fallback"] == "payload-error"
+    assert receipt["shadow_r75_top3"] and receipt["shadow_r75_top3"] != a_ids
+    assert receipt["delivery_manifest_sha256"] == off["delivery"]["manifest"]["sha256"]
+
+
 @pytest.mark.parametrize(
     ("case", "expected"),
     [("jev-error", "error:transport"), ("jev-timeout", "jev-timeout"), ("deny", "deny"),

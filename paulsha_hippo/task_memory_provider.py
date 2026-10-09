@@ -188,75 +188,71 @@ class TaskMemoryProvider:
 
         # 先交由 #146 純函式做欄位驗證、遮蔽與 excerpt 截斷，再為 inline
         # 綁定「實際會交給 Cortex 的 excerpt」bytes 計算 content_hash。
-        candidate_input = [
-            {key: value for key, value in note.items() if key != "_content"}
-            for note in notes
-        ]
-        delivery = {
-            "mode": delivery_mode,
-            "capabilities": request["capabilities"],
-        }
-        try:
-            payload = build_task_memory_payload(
-                schema_version="1",
+        def finalize(selected_notes: list[dict[str, Any]]) -> dict[str, Any]:
+            candidate_input = [
+                {key: value for key, value in note.items() if key != "_content"}
+                for note in selected_notes
+            ]
+            delivery = {
+                "mode": delivery_mode,
+                "capabilities": request["capabilities"],
+            }
+            try:
+                payload = build_task_memory_payload(
+                    schema_version="1",
+                    task_id=request["task_id"],
+                    intent=request["intent"],
+                    candidates=candidate_input,
+                    delivery=delivery,
+                    evidence=[],
+                    producer={"id": "hippo-core", "version": "1"},
+                    adapter={"id": "hippo-task-memory-provider", "version": "1"},
+                )
+            except (TypeError, ValueError):
+                raise TaskMemoryProviderError("provider-error") from None
+
+            manifest_entries: list[dict[str, Any]] = []
+            notes_by_id = {item["note_id"]: item for item in selected_notes}
+            for candidate in payload["candidates"]:
+                note = notes_by_id[candidate["note_id"]]
+                if delivery_mode == "inline":
+                    delivered = candidate.get("excerpt") or candidate["summary"]
+                    candidate["content_hash"] = _sha256(delivered.encode("utf-8"))
+                else:
+                    delivered = note["_content"]
+                entry = {
+                    "note_id": candidate["note_id"],
+                    "content_hash": candidate["content_hash"],
+                    "content_version": candidate["content_version"],
+                    "project": request["project"],
+                }
+                if delivery_mode == "snapshot":
+                    entry["content"] = delivered
+                manifest_entries.append(entry)
+
+            manifest = _build_manifest(
                 task_id=request["task_id"],
-                intent=request["intent"],
-                candidates=candidate_input,
-                delivery=delivery,
-                evidence=[],
-                producer={"id": "hippo-core", "version": "1"},
-                adapter={"id": "hippo-task-memory-provider", "version": "1"},
+                project=request["project"],
+                entries=manifest_entries,
             )
-        except (TypeError, ValueError):
-            if ab_applied_arm == "R75":
+            payload["project"] = request["project"]
+            payload["delivery"]["manifest"] = manifest
+            try:
+                return validate_task_memory_payload(payload)
+            except (TypeError, ValueError):
+                raise TaskMemoryProviderError("provider-error") from None
+
+        if ab_applied_arm == "R75":
+            try:
+                validated = finalize(notes)
+            except TaskMemoryProviderError:
+                # R75 任何失敗一律回退 A：payload、manifest 或 validate 出錯都交付 A 的三則。
                 notes = notes_a
                 ab_applied_arm = "A"
                 ab_fallback = "payload-error"
-                candidate_input = [
-                    {key: value for key, value in note.items() if key != "_content"}
-                    for note in notes
-                ]
-                try:
-                    payload = build_task_memory_payload(
-                        schema_version="1", task_id=request["task_id"], intent=request["intent"],
-                        candidates=candidate_input, delivery=delivery, evidence=[],
-                        producer={"id": "hippo-core", "version": "1"},
-                        adapter={"id": "hippo-task-memory-provider", "version": "1"})
-                except (TypeError, ValueError):
-                    raise TaskMemoryProviderError("provider-error") from None
-            else:
-                raise TaskMemoryProviderError("provider-error") from None
-
-        manifest_entries: list[dict[str, Any]] = []
-        notes_by_id = {item["note_id"]: item for item in notes}
-        for candidate in payload["candidates"]:
-            note = notes_by_id[candidate["note_id"]]
-            if delivery_mode == "inline":
-                delivered = candidate.get("excerpt") or candidate["summary"]
-                candidate["content_hash"] = _sha256(delivered.encode("utf-8"))
-            else:
-                delivered = note["_content"]
-            entry = {
-                "note_id": candidate["note_id"],
-                "content_hash": candidate["content_hash"],
-                "content_version": candidate["content_version"],
-                "project": request["project"],
-            }
-            if delivery_mode == "snapshot":
-                entry["content"] = delivered
-            manifest_entries.append(entry)
-
-        manifest = _build_manifest(
-            task_id=request["task_id"],
-            project=request["project"],
-            entries=manifest_entries,
-        )
-        payload["project"] = request["project"]
-        payload["delivery"]["manifest"] = manifest
-        try:
-            validated = validate_task_memory_payload(payload)
-        except (TypeError, ValueError):
-            raise TaskMemoryProviderError("provider-error") from None
+                validated = finalize(notes)
+        else:
+            validated = finalize(notes)
         if rerank_mode == "ab":
             if ab_arm == "R75":
                 receipt = rerank_module.ab_receipt(
@@ -280,8 +276,6 @@ class TaskMemoryProvider:
         return validated
 
     def _append_rerank_receipt(self, rerank_module, receipt: Mapping[str, Any]) -> None:
-        from .task_memory_provider import _DeadlineExpired
-
         try:
             rerank_module.append_receipt(self.memory_root, receipt)
         except _DeadlineExpired:
