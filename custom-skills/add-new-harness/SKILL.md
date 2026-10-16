@@ -15,7 +15,7 @@ description: Use when adding a new agent CLI to paulshaclaw footer and cockpit u
 2. 只輸出平台真正有的視窗。沒有 5h 就走週池段 `name wk:N%(reset)`，不要印 `5h:--`。逾時仍顯示數字並在名稱後加 `~`；沒有可用行才是 `wk:--`。
 3. footer 與 cockpit 都吃同一份 snapshot。cockpit 帶 ANSI，測試先剝色再比對文字。
 4. 新 provider 若預設 enabled，所有會呼叫 `collect_all(CostConfig())` 的測試都要明確關掉，否則會讀到開發機的活日誌。
-5. 一起改：config、collector、degraded snapshot、enabled filter、`_FOOTER_PROVIDERS`、TUI 選項、sample yaml、README。`--footer` 沒點到這個名字時要寫入 `enabled: false`。
+5. 一起改：config、collector、degraded snapshot、enabled filter、`_FOOTER_PROVIDERS`、TUI 選項、sample yaml、README。`--footer` 沒點到這個名字時要寫入 `enabled: false`。家目錄預設走 `paths.home_path()`，cost config 不得呼叫 `Path.home()`。
 6. 既有 spec 若寫「全部 N 個 provider」，把句子改成仍然為真。不要為了這件事新開一個未完成的 OpenSpec change。
 
 ## 筆記與 session（paulsha-hippo）
@@ -45,4 +45,5 @@ description: Use when adding a new agent CLI to paulshaclaw footer and cockpit u
 | 用 Stop 截取 | exit 2 讓 agent 繼續工作 |
 | PostToolUse `print` JSON | 取代模型看到的工具輸出 |
 | 測試不關新 provider | `collect_all` 讀到本機活日誌 |
+| cost config 呼叫 `Path.home()` | facade 測試失敗，`PSC_HOME_ROOT` 隔離失效 |
 | 沒 probe 就寫 supported | 消費能力被說成已送達 |
