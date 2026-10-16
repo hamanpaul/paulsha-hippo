@@ -1584,7 +1584,7 @@ def _memory_usage(args: argparse.Namespace) -> int:
     return 0
 
 
-_FUNNEL_TOOLS = ("claude-code", "codex", "copilot-cli")
+_FUNNEL_TOOLS = ("claude-code", "codex", "copilot-cli", "grok")
 _FUNNEL_TOP_N = 30
 
 

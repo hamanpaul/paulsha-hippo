@@ -491,6 +491,10 @@ class InstallerTest(unittest.TestCase):
             "_shortlist_common.py",
             "copilot_user_prompt_submit.py",
             "copilot_post_tool_use.py",
+            "grok_session_end.py",
+            "grok_session_start.py",
+            "grok_precompact.py",
+            "grok_post_tool_use.py",
         ):
             deployed = self.memory_root / "hooks" / script
             self.assertTrue(deployed.exists(), f"{script} not deployed")
@@ -649,6 +653,52 @@ class InstallerTest(unittest.TestCase):
             any("copilot_post_tool_use.py" in c for c in ptu_cmds),
             f"copilot_post_tool_use.py not in postToolUse: {ptu_cmds}",
         )
+
+    def test_full_install_writes_grok_hook_file(self):
+        """Grok 整檔覆寫 ~/.grok/hooks/paulsha-memory.json，且可重跑。"""
+        self.assertEqual(_run_install(self.base_args).returncode, 0)
+        self.assertEqual(_run_install(self.base_args).returncode, 0)
+        hook_path = self.config_root / ".grok" / "hooks" / "paulsha-memory.json"
+        config = json.loads(hook_path.read_text(encoding="utf-8"))
+        hooks = config["hooks"]
+        self.assertEqual(
+            set(hooks),
+            {"SessionStart", "SessionEnd", "PreCompact", "PostToolUse"},
+        )
+        self.assertNotIn("UserPromptSubmit", hooks)
+        self.assertNotIn("Stop", hooks)
+
+        def _commands(event):
+            return [
+                hook.get("command", "")
+                for group in hooks[event]
+                for hook in group.get("hooks", [])
+            ]
+
+        start = _commands("SessionStart")
+        end = _commands("SessionEnd")
+        pre = _commands("PreCompact")
+        post_groups = hooks["PostToolUse"]
+        self.assertEqual(post_groups[0]["matcher"], "read_file|hashline_read")
+        post = _commands("PostToolUse")
+        self.assertTrue(any("grok_session_start.py" in cmd for cmd in start), start)
+        self.assertTrue(any("grok_session_end.py" in cmd for cmd in end), end)
+        self.assertTrue(any("grok_precompact.py" in cmd for cmd in pre), pre)
+        self.assertTrue(any("grok_post_tool_use.py" in cmd for cmd in post), post)
+        joined = "\n".join(start + end + pre + post)
+        self.assertIn(f"PSC_MEMORY_ROOT={self.memory_root}", joined)
+        self.assertIn(f"PSC_CONFIG_ROOT={self.config_root}", joined)
+        for group in hooks.values():
+            for entry in group:
+                self.assertNotIn("managedBy", entry)
+                self.assertNotIn("if", entry)
+                self.assertNotIn("args", entry)
+                for hook in entry.get("hooks", []):
+                    self.assertNotIn("managedBy", hook)
+                    self.assertNotIn("if", hook)
+                    self.assertNotIn("args", hook)
+                    self.assertEqual(hook.get("timeout"), 10)
+                    self.assertEqual(hook.get("type"), "command")
 
     def test_full_install_preserves_existing_claude_settings_non_hook_keys(self):
         """Should not clobber existing keys outside 'hooks' in settings.json."""
@@ -1513,6 +1563,21 @@ class InstallerTest(unittest.TestCase):
         ])
 
         self.assertFalse(hook_path.exists(), "copilot hook file not removed")
+
+    def test_uninstall_removes_grok_hook_file(self):
+        _run_install(self.base_args)
+        hook_path = self.config_root / ".grok" / "hooks" / "paulsha-memory.json"
+        self.assertTrue(hook_path.exists())
+        other = hook_path.parent / "local.json"
+        other.write_text("{}\n", encoding="utf-8")
+
+        _run_uninstall([
+            "--memory-root", str(self.memory_root),
+            "--config-root", str(self.config_root),
+        ])
+
+        self.assertFalse(hook_path.exists(), "grok hook file not removed")
+        self.assertTrue(other.exists(), "uninstall removed an unrelated grok hook")
 
     def test_uninstall_preserves_inbox_content(self):
         _run_install(self.base_args)

@@ -15,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .adapters import claude, codex, copilot
+from .adapters import claude, codex, copilot, grok
 from .adapters.base import AdapterResult, NormalizedSession
 from . import _git
 from . import registry
@@ -230,6 +230,8 @@ def _extract(queue_path: Path) -> AdapterResult:
         return codex.extract(queue_path)
     if normalized in {"copilot", "copilot-cli", "github-copilot-cli"}:
         return copilot.extract(queue_path)
+    if normalized == "grok":
+        return grok.extract(queue_path)
     raise PipelineError(f"unsupported tool: {tool}")
 
 

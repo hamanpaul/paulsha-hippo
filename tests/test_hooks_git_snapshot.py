@@ -5,7 +5,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS = REPO_ROOT / "paulsha_hippo" / "hooks"
-CAPTURE_HOOKS = ("claude_session_end.py", "codex_session_end.py", "copilot_session_end.py")
+CAPTURE_HOOKS = (
+    "claude_session_end.py",
+    "codex_session_end.py",
+    "copilot_session_end.py",
+    "grok_session_end.py",
+)
 
 
 def _git_repo(path: Path) -> str:
