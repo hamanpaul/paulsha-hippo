@@ -8,7 +8,7 @@
 #
 # Options:
 #   --memory-root PATH    Override memory root (default: ~/.agents/memory)
-#   --config-root PATH    Override config root (default: ~); used for .claude / .codex / .copilot
+#   --config-root PATH    Override config root (default: ~); used for .claude / .codex / .copilot / .grok
 #   --repo-root   PATH    Override repo root (default: git rev-parse --show-toplevel)
 #   --python      PATH    Use this installed interpreter for hook commands (skip nested venv)
 #   --skip-venv           Skip venv creation and pip install (useful for tests)
@@ -208,7 +208,8 @@ for script in install.sh uninstall.sh \
   _wakeup_common.py _bootstrap.py claude_session_start.py codex_session_start.py \
   copilot_session_start.py claude_precompact.py copilot_precompact.py \
   claude_user_prompt_submit.py claude_post_tool_use.py _shortlist_common.py \
-  copilot_user_prompt_submit.py copilot_post_tool_use.py; do
+  copilot_user_prompt_submit.py copilot_post_tool_use.py \
+  grok_session_end.py grok_session_start.py grok_precompact.py grok_post_tool_use.py; do
   src="${hooks_src_dir}/${script}"
   dst="${memory_root}/hooks/${script}"
   if [[ -f "$src" ]]; then
@@ -569,6 +570,47 @@ config = {
 with open(hook_path, "w", encoding="utf-8") as f:
     json.dump(config, f, indent=2, sort_keys=True)
     f.write("\n")
+PYEOF
+
+# ------------------------------------------------------------------
+# Step 6b: Grok hook config — overwrite ~/.grok/hooks/paulsha-memory.json
+# Grok 不認得 managedBy，多出來的 if/args 會讓 handler 被跳過，所以整檔覆寫。
+# SessionStart 只送 systemMessage。不裝 UserPromptSubmit。截取用 SessionEnd
+# 與 PreCompact，不用 Stop。PostToolUse 只記帳，matcher 限讀檔工具。
+# ------------------------------------------------------------------
+grok_hook="${config_root}/.grok/hooks/paulsha-memory.json"
+install -d -m 700 "$(dirname "$grok_hook")"
+
+grok_session_end_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/grok_session_end.py"
+grok_session_start_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/grok_session_start.py"
+grok_precompact_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/grok_precompact.py"
+grok_post_tool_use_cmd="${hook_env_prefix} ${venv_python} ${hook_dir}/grok_post_tool_use.py"
+
+python3 - "$grok_hook" \
+  "$grok_session_end_cmd" "$grok_session_start_cmd" "$grok_precompact_cmd" \
+  "$grok_post_tool_use_cmd" <<'PYEOF'
+import json, sys
+
+hook_path, session_end_cmd, session_start_cmd, precompact_cmd, post_tool_use_cmd = sys.argv[1:6]
+
+def _command(command):
+    return {"type": "command", "command": command, "timeout": 10}
+
+config = {
+    "hooks": {
+        "SessionStart": [{"hooks": [_command(session_start_cmd)]}],
+        "SessionEnd": [{"hooks": [_command(session_end_cmd)]}],
+        "PreCompact": [{"hooks": [_command(precompact_cmd)]}],
+        "PostToolUse": [{
+            "matcher": "read_file|hashline_read",
+            "hooks": [_command(post_tool_use_cmd)],
+        }],
+    }
+}
+
+with open(hook_path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, sort_keys=True)
+    handle.write("\n")
 PYEOF
 
 # ------------------------------------------------------------------

@@ -12,7 +12,12 @@ def test_session_end_capture_path_stays_stdlib_only():
 
     pkg_root = Path(paths.__file__).resolve().parents[1]
     hooks_dir = pkg_root / "paulsha_hippo" / "hooks"
-    capture_hooks = ["claude_session_end.py", "codex_session_end.py", "copilot_session_end.py"]
+    capture_hooks = [
+        "claude_session_end.py",
+        "codex_session_end.py",
+        "copilot_session_end.py",
+        "grok_session_end.py",
+    ]
     offenders = []
     for name in capture_hooks:
         tree = ast.parse((hooks_dir / name).read_text(encoding="utf-8"))

@@ -54,6 +54,8 @@ class HookSelfSessionGuardTests(unittest.TestCase):
         "copilot_session_end.py",
         "claude_precompact.py",
         "copilot_precompact.py",
+        "grok_session_end.py",
+        "grok_precompact.py",
     ]
 
     def _run_hook(self, name, memory_root, *, self_session):

@@ -5,6 +5,7 @@
 #   - The managed SessionEnd entry from ~/.claude/settings.json
 #   - The managed Stop/SubagentStop/SessionStart entries from ~/.codex/hooks.json
 #   - The entire ~/.copilot/hooks/paulsha-memory.json file
+#   - The entire ~/.grok/hooks/paulsha-memory.json file
 #
 # Preserves:
 #   - inbox content, projects.yaml, and all other memory tree contents
@@ -219,6 +220,14 @@ fi
 copilot_hook="${config_root}/.copilot/hooks/paulsha-memory.json"
 if [[ -f "$copilot_hook" ]]; then
   rm -f -- "$copilot_hook"
+fi
+
+# ------------------------------------------------------------------
+# Remove Grok paulsha-memory.json（整檔，與 Copilot 相同；不碰其他 hook）
+# ------------------------------------------------------------------
+grok_hook="${config_root}/.grok/hooks/paulsha-memory.json"
+if [[ -f "$grok_hook" ]]; then
+  rm -f -- "$grok_hook"
 fi
 
 echo "paulsha-memory hooks uninstalled."

@@ -1,6 +1,7 @@
 # 跨 CLI 消費能力矩陣（capability matrix）
 
 > 實查日期：2026-07-11（copilot prompt-time 於同日以官方事件 key 復測，推翻先前錯誤 key 的判定，見證據區）。
+> grok 欄於 2026-10-16 依本機 user guide 補上。SessionStart 的 `systemMessage` 尚未做 MEMO-TOKEN 送達 probe，消費總評維持 inconclusive。
 > probe 腳本：`tests/cross_cli_probe_check.sh`；證據為當日本機輸出（路徑已以 `<tmp>` / `<repo>` / `~` 去識別）。
 > 判定規則：`supported` = 官方文件列出該事件 **且** 本機 probe FIRED；僅其一 = `inconclusive`（保守處理，等同不支援，不接線）。
 > `read attribution` 依 Task 1 Step 3 僅以官方文件判定（不強求 fire 實測）；copilot 另有 live 實測（見漏斗實證區）。
@@ -38,14 +39,14 @@
   I/O 錯誤只增加固定鍵的 bounded diagnostics，其他合法行仍會處理；
   scanner 只在 counter 大於零時輸出一則彙整 warning。ledger 全程唯讀。
 
-| 能力 | claude-code | codex | copilot-cli |
-|---|---|---|---|
-| session-start 注入 | supported（SessionStart，既有佈署） | inconclusive（文件列 `SessionStart`；headless probe 對照組未 fire） | supported（文件列 `sessionStart`/`SessionStart`；probe FIRED） |
-| prompt-time shortlist（自動） | supported（UserPromptSubmit，既有佈署） | inconclusive（文件列 `UserPromptSubmit`；headless probe 未能 fire） | supported（文件列 `userPromptSubmitted`；官方 key probe FIRED＋additionalContext 注入實測；已接線 `copilot_user_prompt_submit.py`） |
-| read attribution | supported（PostToolUse(Read)，既有佈署） | not-supported（`PostToolUse` 僅涵蓋 Bash / `apply_patch` / MCP；非 `Read` 等價） | supported（`postToolUse` payload 實測 `toolName:"view"`＝Read file contents；已接線 `copilot_post_tool_use.py`，view 過濾在腳本內做） |
-| 顯式 recall（`hippo recall`） | supported | inconclusive（`hippo recall` CLI 可執行，但 agent 需靠 session-start 指引注入才會呼叫——該送達管道本機未實測，見 session-start 列與證據區） | supported（CLI 可用；自動 shortlist 接線後 session-start 還原預設提示） |
-| applied 顯式訊號（`hippo usage mark-applied`） | supported（PR-F，含實證） | 介面可用（無平台注入實證） | supported（PR-F，含實證——live 漏斗 applied OK） |
-| 總評 | full | inconclusive | full |
+| 能力 | claude-code | codex | copilot-cli | grok |
+|---|---|---|---|---|
+| session-start 注入 | supported（SessionStart，既有佈署） | inconclusive（文件列 `SessionStart`；headless probe 對照組未 fire） | supported（文件列 `sessionStart`/`SessionStart`；probe FIRED） | inconclusive（文件列 `SessionStart`，只讀頂層 `systemMessage`；本機未做 MEMO-TOKEN 送達 probe） |
+| prompt-time shortlist（自動） | supported（UserPromptSubmit，既有佈署） | inconclusive（文件列 `UserPromptSubmit`；headless probe 未能 fire） | supported（文件列 `userPromptSubmitted`；官方 key probe FIRED＋additionalContext 注入實測；已接線 `copilot_user_prompt_submit.py`） | not-supported（`UserPromptSubmit` 的 `additionalContext` 會被丟棄；不接 prompt-time injector） |
+| read attribution | supported（PostToolUse(Read)，既有佈署） | not-supported（`PostToolUse` 僅涵蓋 Bash / `apply_patch` / MCP；非 `Read` 等價） | supported（`postToolUse` payload 實測 `toolName:"view"`＝Read file contents；已接線 `copilot_post_tool_use.py`，view 過濾在腳本內做） | supported（文件判定：`PostToolUse` stdout 會被讀取並可能取代工具輸出，故 `grok_post_tool_use.py` 只記帳、不印 JSON；matcher `read_file\|hashline_read`。無 live probe） |
+| 顯式 recall（`hippo recall`） | supported | inconclusive（`hippo recall` CLI 可執行，但 agent 需靠 session-start 指引注入才會呼叫——該送達管道本機未實測，見 session-start 列與證據區） | supported（CLI 可用；自動 shortlist 接線後 session-start 還原預設提示） | inconclusive（有 shell，`hippo recall` 可執行；SessionStart `systemMessage` 是否進模型未實測，不升 recall-capable） |
+| applied 顯式訊號（`hippo usage mark-applied`） | supported（PR-F，含實證） | 介面可用（無平台注入實證） | supported（PR-F，含實證——live 漏斗 applied OK） | 介面可用（無平台注入實證） |
+| 總評 | full | inconclusive | full | inconclusive |
 
 > 總評語意：`full`＝自動 shortlist＋read attribution 全鏈；`recall-capable`＝無 prompt-time hook，
 > 但 agent 可依 session-start 指引顯式呼叫 `hippo recall`（**須先實證 session-start 指引確有送達模型**）；
@@ -140,6 +141,12 @@ postToolUse        | {"sessionId":"d44d38f8-...","timestamp":...,"cwd":"<tmp>/wo
 ### claude-code（既有佈署，列作基線）
 - UserPromptSubmit / PostToolUse(Read) 由 `paulsha_hippo/hooks/install.sh` 佈署（Step 4 / matcher="Read"）。
 - 真實 adapter E2E 證據見下方「offered → read → applied 實證」（Task 8 產出時附）。
+
+### grok
+- 文件依據：本機 Grok user guide `10-hooks.md`。`SessionStart` 只讀頂層 `systemMessage`。`UserPromptSubmit` 的 `additionalContext` 不採用，所以不安裝 prompt-time injector。`SessionEnd` 帶 `subagentType`；`Stop` 的 exit 2 會讓 agent 繼續工作，因此截取只用 `SessionEnd` 與 `PreCompact`。`PostToolUse` 的 stdout 會被讀取，並可能取代模型看到的工具輸出，所以 `grok_post_tool_use.py` 只寫 ledger、stdout 保持空白。matcher 為 `read_file|hashline_read`。
+- 全域 hook 檔是 `~/.grok/hooks/paulsha-memory.json`，由 `install.sh` 整檔覆寫。不寫 `managedBy`、`if`、`args`：多出來的欄位會讓 handler 被跳過。
+- 送達：尚未跑 MEMO-TOKEN probe。session-start 與顯式 recall 維持 inconclusive。Grok 有 shell，`hippo recall` CLI 本身可用；缺的是「模型有沒有看到 systemMessage」。
+- session ingest 是另一條生產者路徑：`SessionEnd`／`PreCompact` 加上 `importer/adapters/grok.py`，以 fixture 測 `chat_history.jsonl`（略過 `synthetic_reason`，寫入路徑只取 `write`／`search_replace`／`hashline_edit`）。這不證明消費送達。
 
 ## offered → read → applied 實證（Task 8 已完成，含 copilot 接線同鏈復驗）
 
